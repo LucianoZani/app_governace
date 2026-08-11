@@ -1,0 +1,667 @@
+<title>Governança Unity Catalog — Documentação Técnica</title>
+<style>
+  :root {
+    --ink: #161a22;
+    --ink-soft: #4a5262;
+    --paper: #eef1f5;
+    --panel: #ffffff;
+    --line: #d7dce3;
+    --slate: #5c6675;
+    --amber: #b8752f;
+    --amber-soft: #f4e6d2;
+    --teal: #3f7d74;
+    --teal-soft: #dcece9;
+    --blue: #3d6fa3;
+    --blue-soft: #dde8f1;
+    --plum: #74628f;
+    --plum-soft: #e8e2ee;
+    --green: #4f7d55;
+    --green-soft: #e1ede2;
+    --red: #a8483c;
+    --red-soft: #f3e0dd;
+    --shadow: 0 1px 2px rgba(22, 26, 34, 0.06), 0 8px 24px rgba(22, 26, 34, 0.05);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e8ebf0;
+      --ink-soft: #a7afc0;
+      --paper: #10131a;
+      --panel: #181c25;
+      --line: #2b313d;
+      --slate: #8a93a3;
+      --amber: #d99a4e;
+      --amber-soft: #3a2c18;
+      --teal: #6cb3a8;
+      --teal-soft: #17322f;
+      --blue: #7ba8d6;
+      --blue-soft: #1c2c3c;
+      --plum: #b09fcc;
+      --plum-soft: #292236;
+      --green: #85bd8c;
+      --green-soft: #1b2b1d;
+      --red: #dd8b7f;
+      --red-soft: #372019;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px rgba(0, 0, 0, 0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e8ebf0; --ink-soft: #a7afc0; --paper: #10131a; --panel: #181c25; --line: #2b313d;
+    --slate: #8a93a3; --amber: #d99a4e; --amber-soft: #3a2c18; --teal: #6cb3a8; --teal-soft: #17322f;
+    --blue: #7ba8d6; --blue-soft: #1c2c3c; --plum: #b09fcc; --plum-soft: #292236;
+    --green: #85bd8c; --green-soft: #1b2b1d; --red: #dd8b7f; --red-soft: #372019;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px rgba(0, 0, 0, 0.35);
+  }
+  :root[data-theme="light"] {
+    --ink: #161a22; --ink-soft: #4a5262; --paper: #eef1f5; --panel: #ffffff; --line: #d7dce3;
+    --slate: #5c6675; --amber: #b8752f; --amber-soft: #f4e6d2; --teal: #3f7d74; --teal-soft: #dcece9;
+    --blue: #3d6fa3; --blue-soft: #dde8f1; --plum: #74628f; --plum-soft: #e8e2ee;
+    --green: #4f7d55; --green-soft: #e1ede2; --red: #a8483c; --red-soft: #f3e0dd;
+    --shadow: 0 1px 2px rgba(22, 26, 34, 0.06), 0 8px 24px rgba(22, 26, 34, 0.05);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+  body {
+    margin: 0;
+    color: var(--ink);
+    background-color: var(--paper);
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 32px 32px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+  }
+
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  a { color: var(--amber); }
+  a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px 96px; }
+
+  header.doc-head { padding: 56px 0 40px; }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    font-size: 12.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); margin: 0 0 14px;
+  }
+  h1.doc-title {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    font-size: clamp(30px, 4.4vw, 44px); font-weight: 700; letter-spacing: -0.01em; margin: 0 0 12px; text-wrap: balance;
+  }
+  p.doc-sub { max-width: 64ch; color: var(--ink-soft); font-size: 18px; margin: 0 0 28px; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .meta-chip {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    font-size: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 10px; color: var(--ink-soft); box-shadow: var(--shadow);
+  }
+  .meta-chip b { color: var(--ink); font-weight: 600; }
+
+  nav.toc {
+    display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 32px 0 8px; padding: 16px 20px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+  }
+  nav.toc a { font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; font-size: 13px; color: var(--ink-soft); text-decoration: none; white-space: nowrap; }
+  nav.toc a:hover { color: var(--amber); text-decoration: underline; }
+  nav.toc a span.n { color: var(--amber); margin-right: 6px; }
+
+  section { padding: 64px 0 8px; border-top: 1px solid var(--line); }
+  section:first-of-type { border-top: none; }
+  .sec-label { display: flex; align-items: baseline; gap: 14px; margin: 0 0 8px; }
+  .sec-num { font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; font-size: 13px; color: var(--amber); letter-spacing: 0.06em; }
+  h2.sec-title {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    font-size: clamp(22px, 3vw, 28px); font-weight: 700; margin: 0; text-wrap: balance;
+  }
+  p.sec-intro { max-width: 68ch; color: var(--ink-soft); font-size: 16px; margin: 14px 0 32px; }
+  h3.sub-title {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    font-size: 16px; font-weight: 700; margin: 40px 0 4px;
+  }
+  p.sub-intro { max-width: 68ch; color: var(--ink-soft); font-size: 14.5px; margin: 0 0 20px; }
+
+  figure { margin: 0 0 12px; }
+  .fig-scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 20px; }
+  .fig-scroll svg { display: block; color: var(--ink); }
+  figcaption { margin-top: 10px; font-size: 13.5px; color: var(--ink-soft); max-width: 68ch; }
+  figcaption b { color: var(--ink); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 8px 0 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px 20px;
+    box-shadow: var(--shadow); border-top: 3px solid var(--card-accent, var(--slate));
+  }
+  .card h3 { font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; font-size: 15.5px; margin: 0 0 4px; color: var(--ink); }
+  .card .role { font-size: 13px; color: var(--card-accent, var(--slate)); font-weight: 600; margin: 0 0 10px; }
+  .card p { font-size: 14px; color: var(--ink-soft); margin: 0 0 12px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 12.5px; }
+  .kv dt { color: var(--ink-soft); }
+  .kv dd { margin: 0; font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; word-break: break-word; }
+
+  ol.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; }
+  ol.steps li { counter-increment: step; position: relative; padding: 14px 0 14px 46px; border-bottom: 1px solid var(--line); }
+  ol.steps li:last-child { border-bottom: none; }
+  ol.steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 14px; width: 28px; height: 28px; border-radius: 50%;
+    border: 1.5px solid var(--step-accent, var(--slate)); color: var(--step-accent, var(--slate));
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; font-size: 13px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600;
+    padding: 5px 12px; border-radius: 999px; border: 1px solid var(--pill-c); color: var(--pill-c); background: var(--pill-bg);
+  }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 30px; }
+
+  .table-scroll { overflow-x: auto; }
+  table.ref {
+    width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 640px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  }
+  table.ref th, table.ref td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.ref th {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; font-size: 11.5px;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); background: var(--paper);
+  }
+  table.ref td.mono, table.ref code { font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; font-size: 12.5px; }
+  table.ref tr:last-child td { border-bottom: none; }
+  table.ref .id-pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--pc); color: var(--pc); background: var(--pb); }
+
+  .note {
+    background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--amber);
+    border-radius: 8px; padding: 16px 20px; margin: 8px 0 20px;
+  }
+  .note.danger { border-left-color: var(--red); }
+  .note h4 {
+    margin: 0 0 6px; font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    font-size: 13px; color: var(--amber); text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .note.danger h4 { color: var(--red); }
+  .note p { margin: 0 0 8px; font-size: 14px; color: var(--ink-soft); }
+  .note p:last-child { margin-bottom: 0; }
+  .note code { font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+
+  footer {
+    margin-top: 72px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--ink-soft);
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace; display: flex; flex-wrap: wrap; gap: 6px 18px;
+  }
+
+  @media print {
+    @page { size: A4; margin: 14mm 12mm; }
+    body { background-image: none; }
+    .wrap { max-width: none; padding: 0; }
+    header.doc-head { padding-top: 0; }
+    .fig-scroll { overflow: visible; box-shadow: none; break-inside: avoid; page-break-inside: avoid; }
+    .fig-scroll svg { width: 100% !important; height: auto !important; }
+    .card, .note, table.ref, nav.toc { box-shadow: none; break-inside: avoid; page-break-inside: avoid; }
+    .table-scroll { overflow: visible; }
+    table.ref { width: 100%; min-width: 0; table-layout: fixed; }
+    table.ref td, table.ref th { word-break: break-word; break-inside: avoid; }
+    a { color: var(--ink); text-decoration: none; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="doc-head">
+    <p class="eyebrow">Documentação técnica · governanca-unity-catalog</p>
+    <h1 class="doc-title">Governança Unity Catalog</h1>
+    <p class="doc-sub">Um app onde usuários de negócio comentam e classificam colunas do Unity Catalog — e a decisão de design que faz isso ser seguro: quando a ação roda com a identidade do próprio usuário, e quando roda com a identidade do robô.</p>
+    <div class="meta-row">
+      <span class="meta-chip">app: <b>governanca-unity-catalog</b></span>
+      <span class="meta-chip">stack: <b>Streamlit</b> · <b>databricks-sdk</b></span>
+      <span class="meta-chip">estado interno: <b>apps.governanca_unity_catalog_&lt;env&gt;</b></span>
+      <span class="meta-chip">deploy: <b>manual, fora do Asset Bundle</b></span>
+      <span class="meta-chip">app.py: <b>1815 linhas, 1 módulo</b></span>
+    </div>
+
+    <nav class="toc" aria-label="Sumário">
+      <a href="#visao-geral"><span class="n">01</span>Visão geral</a>
+      <a href="#identidade"><span class="n">02</span>Identidade: você ou o robô</a>
+      <a href="#pipeline"><span class="n">03</span>O que acontece quando você edita uma coluna</a>
+      <a href="#isolamento"><span class="n">04</span>Isolamento DEV/PROD</a>
+      <a href="#dados"><span class="n">05</span>Cadastros &amp; auditoria</a>
+      <a href="#recursos"><span class="n">06</span>Recursos Databricks</a>
+      <a href="#notas"><span class="n">07</span>Notas e observações</a>
+    </nav>
+  </header>
+
+  <!-- ============================================================ -->
+  <section id="visao-geral">
+    <div class="sec-label"><span class="sec-num">01</span><h2 class="sec-title">Visão geral</h2></div>
+    <p class="sec-intro">É um app <b>Streamlit</b> (não AppKit) de um módulo só: usuários de negócio navegam catálogo → schema → tabela → coluna e aplicam comentários e <i>tags governadas</i> do Unity Catalog. Diferente dos apps AppKit do time, não usa Lakebase, Volumes ou Model Serving — fala só com SQL Warehouse e duas APIs de identidade/governança. Deploy é manual (<code class="mono">databricks apps deploy</code>), de propósito fora do Asset Bundle e da pasta que a pipeline de PROD limpa a cada execução.</p>
+
+    <figure>
+      <div class="fig-scroll">
+        <svg viewBox="0 0 1040 460" role="img" aria-label="Diagrama de arquitetura: o navegador envia HTTPS mais o token OAuth do usuário para o app Streamlit, que mantém dois clientes — um com a identidade do service principal e outro com a identidade do usuário (on-behalf-of) — e usa ambos para falar com o SQL Warehouse; já a API de Tag Policies e a busca de usuários na conta são acessadas sempre com a identidade do service principal." style="width:1040px" width="1040" height="460">
+          <defs>
+            <marker id="gah1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+
+          <rect x="208" y="20" width="800" height="400" rx="14" fill="none" style="stroke:var(--slate)" stroke-width="1.4" stroke-dasharray="6 4"></rect>
+          <text x="228" y="44" class="mono" font-size="11.5" letter-spacing="1" style="fill:var(--slate)">DATABRICKS WORKSPACE</text>
+          <text x="228" y="60" class="mono" font-size="11" style="fill:var(--ink-soft)">Unity Catalog · metastore unificado</text>
+
+          <rect x="24" y="165" width="150" height="80" rx="10" fill="var(--panel)" style="stroke:var(--slate)" stroke-width="1.4"></rect>
+          <text x="99" y="200" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Navegador</text>
+          <text x="99" y="218" text-anchor="middle" class="mono" font-size="10" style="fill:var(--ink-soft)">usuário de negócio</text>
+
+          <line x1="174" y1="205" x2="224" y2="205" style="stroke:var(--slate)" stroke-width="1.4" marker-end="url(#gah1)"></line>
+          <text x="199" y="193" text-anchor="middle" class="mono" font-size="9.5" style="fill:var(--ink-soft)">HTTPS + token</text>
+
+          <rect x="228" y="130" width="280" height="160" rx="12" fill="var(--panel)" style="stroke:var(--ink)" stroke-width="1.6"></rect>
+          <text x="248" y="152" class="mono" font-size="13.5" font-weight="700" fill="currentColor">governanca-unity-catalog</text>
+          <text x="248" y="167" font-size="10.8" style="fill:var(--ink-soft)">Streamlit · app.py</text>
+
+          <rect x="246" y="178" width="232" height="34" rx="6" style="fill:var(--paper);stroke:var(--slate)"></rect>
+          <text x="362" y="199" text-anchor="middle" class="mono" font-size="11.5" style="fill:var(--slate)">SP client</text>
+
+          <rect x="246" y="220" width="232" height="34" rx="6" style="fill:var(--teal-soft);stroke:var(--teal)"></rect>
+          <text x="362" y="241" text-anchor="middle" class="mono" font-size="11.5" style="fill:var(--teal)">OBO client (usuário)</text>
+
+          <text x="246" y="268" class="mono" font-size="9.8" style="fill:var(--ink-soft)">get_client(prefer_user)</text>
+
+          <rect x="700" y="60" width="300" height="80" rx="10" style="fill:var(--amber-soft);stroke:var(--amber)" stroke-width="1.4"></rect>
+          <text x="720" y="86" font-size="14" font-weight="700" style="fill:var(--amber)">SQL Warehouse</text>
+          <text x="720" y="103" class="mono" font-size="10.5" fill="currentColor">Statement Execution API</text>
+          <text x="720" y="119" font-size="10.2" style="fill:var(--ink-soft)">toda leitura e escrita SQL</text>
+
+          <rect x="700" y="170" width="300" height="80" rx="10" style="fill:var(--blue-soft);stroke:var(--blue)" stroke-width="1.4"></rect>
+          <text x="720" y="196" font-size="14" font-weight="700" style="fill:var(--blue)">Tag Policies API</text>
+          <text x="720" y="213" class="mono" font-size="10.5" fill="currentColor">w.tag_policies.list_tag_policies()</text>
+          <text x="720" y="229" font-size="10.2" style="fill:var(--ink-soft)">catálogo oficial de tags governadas</text>
+
+          <rect x="700" y="280" width="300" height="80" rx="10" style="fill:var(--plum-soft);stroke:var(--plum)" stroke-width="1.4"></rect>
+          <text x="720" y="306" font-size="14" font-weight="700" style="fill:var(--plum)">Account SCIM</text>
+          <text x="720" y="323" class="mono" font-size="10.5" fill="currentColor">AccountClient.users.list()</text>
+          <text x="720" y="339" font-size="10.2" style="fill:var(--ink-soft)">busca de usuário na conta (opcional)</text>
+
+          <path d="M508,195 H540 V85 H700" fill="none" style="stroke:var(--slate)" stroke-width="1.4" marker-end="url(#gah1)"></path>
+          <text x="548" y="78" class="mono" font-size="10" style="fill:var(--slate)">SP</text>
+
+          <path d="M508,237 H560 V115 H700" fill="none" style="stroke:var(--teal)" stroke-width="1.4" marker-end="url(#gah1)"></path>
+          <text x="568" y="108" class="mono" font-size="10" style="fill:var(--teal)">OBO</text>
+
+          <path d="M508,195 H580 V210 H700" fill="none" style="stroke:var(--slate)" stroke-width="1.4" marker-end="url(#gah1)"></path>
+          <text x="588" y="203" class="mono" font-size="10" style="fill:var(--slate)">sempre SP</text>
+
+          <path d="M508,195 H600 V320 H700" fill="none" style="stroke:var(--slate)" stroke-width="1.4" marker-end="url(#gah1)"></path>
+          <text x="608" y="313" class="mono" font-size="10" style="fill:var(--slate)">sempre SP</text>
+        </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> — O app mantém dois clientes do SDK: um com a identidade do <span style="color:var(--slate)"><b>service principal</b></span> e um com a identidade <span style="color:var(--teal)"><b>on-behalf-of do usuário</b></span> logado (o token vem no header <code>x-forwarded-access-token</code>, injetado pelo runtime do Databricks Apps). O SQL Warehouse recebe chamadas dos dois; Tag Policies API e Account SCIM só aceitam o service principal.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="identidade">
+    <div class="sec-label"><span class="sec-num">02</span><h2 class="sec-title">Identidade: quando é você, quando é o robô</h2></div>
+    <p class="sec-intro">Essa é a decisão de design que sustenta o app inteiro. A regra, tal como está no código (função <code class="mono">get_client(prefer_user)</code>, chamada em cada operação):</p>
+
+    <div class="table-scroll">
+      <table class="ref">
+        <thead><tr><th>operação</th><th>chamada</th><th>identidade</th><th>por quê</th></tr></thead>
+        <tbody>
+          <tr><td>Navegar catálogo/schema/tabela</td><td class="mono">SHOW CATALOGS/SCHEMAS · information_schema</td><td><span class="id-pill" style="--pc:var(--teal);--pb:var(--teal-soft)">OBO</span></td><td>o usuário só deve ver o que ele mesmo enxerga</td></tr>
+          <tr><td>Ler amostra de dados / comentário atual</td><td class="mono">SELECT ... LIMIT 5</td><td><span class="id-pill" style="--pc:var(--teal);--pb:var(--teal-soft)">OBO</span></td><td>idem — leitura respeita grants do usuário</td></tr>
+          <tr><td>Aplicar / remover tag</td><td class="mono">ALTER TABLE ... SET/UNSET TAGS</td><td><span class="id-pill" style="--pc:var(--teal);--pb:var(--teal-soft)">OBO</span></td><td>só quem tem <code>APPLY TAG</code> + <code>ASSIGN</code> consegue — a UC decide, o app não precisa</td></tr>
+          <tr><td>Listar tags governadas (catálogo oficial)</td><td class="mono">w.tag_policies.list_tag_policies()</td><td><span class="id-pill" style="--pc:var(--slate);--pb:var(--paper)">SP</span></td><td>é um catálogo global da conta, não um grant por objeto</td></tr>
+          <tr><td>Comentar tabela / coluna</td><td class="mono">COMMENT ON TABLE/COLUMN ...</td><td><span class="id-pill" style="--pc:var(--slate);--pb:var(--paper)">SP</span></td><td>ninguém recebe <code>MODIFY</code> (destravaria escrita de dados) — o robô empresta o dele, com portão na frente (§03)</td></tr>
+          <tr><td>Cadastros (domínios/sub/stewards/permissões)</td><td class="mono">CRUD em apps.governanca_unity_catalog_&lt;env&gt;</td><td><span class="id-pill" style="--pc:var(--slate);--pb:var(--paper)">SP</span></td><td>não são objetos do catálogo de negócio — controlados por papel interno, não por grant de UC</td></tr>
+          <tr><td>Log de auditoria</td><td class="mono">INSERT log_comentarios / log_tags</td><td><span class="id-pill" style="--pc:var(--slate);--pb:var(--paper)">SP</span></td><td>escrita interna, best-effort, nunca deve travar a governança</td></tr>
+          <tr><td>Buscar usuário (workspace / conta)</td><td class="mono">w.users.list() · AccountClient.users.list()</td><td><span class="id-pill" style="--pc:var(--slate);--pb:var(--paper)">SP</span></td><td>diretório de identidade, não dado do usuário-alvo</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="sub-title">O portão de acesso na frente da única escrita como SP</h3>
+    <p class="sub-intro">Como ninguém tem <code class="mono">MODIFY</code>, comentar só é seguro se o app checar, com o token do <i>próprio usuário</i>, se aquele objeto aparece no <code class="mono">information_schema</code> dele — ou seja, se ele já teria pelo menos <code class="mono">USE</code>/<code class="mono">SELECT</code>. Qualquer exceção é tratada como acesso negado (<i>fail-closed</i>): não existe caminho de "erro = permite".</p>
+
+    <figure>
+      <div class="fig-scroll">
+        <svg viewBox="0 0 640 320" role="img" aria-label="Diagrama do portão de acesso: uma verificação on-behalf-of do usuário decide se a tabela aparece no information_schema dele; se sim, o service principal grava o comentário; se não, ou se a checagem lançar exceção, a escrita é bloqueada e nada é gravado." style="width:640px" width="640" height="320">
+          <defs>
+            <marker id="gah2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+          <rect x="200" y="20" width="240" height="60" rx="10" style="fill:var(--teal-soft);stroke:var(--teal)" stroke-width="1.4"></rect>
+          <text x="320" y="44" text-anchor="middle" font-size="13" font-weight="700" style="fill:var(--teal)">Verifica acesso (OBO)</text>
+          <text x="320" y="60" text-anchor="middle" class="mono" font-size="10" style="fill:var(--teal)">user_can_access_table()</text>
+
+          <line x1="280" y1="80" x2="180" y2="140" style="stroke:var(--green)" stroke-width="1.3" marker-end="url(#gah2)"></line>
+          <line x1="360" y1="80" x2="460" y2="140" style="stroke:var(--red)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#gah2)"></line>
+
+          <rect x="60" y="140" width="220" height="60" rx="10" style="fill:var(--green-soft);stroke:var(--green)" stroke-width="1.4"></rect>
+          <text x="170" y="164" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--green)">Aparece no information_schema</text>
+          <text x="170" y="180" text-anchor="middle" class="mono" font-size="10" style="fill:var(--green)">do próprio usuário</text>
+
+          <rect x="360" y="140" width="220" height="60" rx="10" style="fill:var(--red-soft);stroke:var(--red)" stroke-width="1.4"></rect>
+          <text x="470" y="164" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--red)">Não aparece — ou exceção</text>
+          <text x="470" y="180" text-anchor="middle" class="mono" font-size="10" style="fill:var(--red)">fail-closed</text>
+
+          <line x1="170" y1="200" x2="170" y2="240" style="stroke:var(--slate)" stroke-width="1.3" marker-end="url(#gah2)"></line>
+          <line x1="470" y1="200" x2="470" y2="240" style="stroke:var(--red)" stroke-width="1.3" marker-end="url(#gah2)"></line>
+
+          <rect x="60" y="240" width="220" height="54" rx="10" style="fill:var(--paper);stroke:var(--slate)" stroke-width="1.4"></rect>
+          <text x="170" y="262" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--slate)">SP grava</text>
+          <text x="170" y="278" text-anchor="middle" class="mono" font-size="10" style="fill:var(--slate)">COMMENT ON ...</text>
+
+          <rect x="360" y="240" width="220" height="54" rx="10" style="fill:var(--red-soft);stroke:var(--red)" stroke-width="1.4"></rect>
+          <text x="470" y="262" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--red)">Bloqueado</text>
+          <text x="470" y="278" text-anchor="middle" class="mono" font-size="10" style="fill:var(--red)">nada é escrito</text>
+        </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> — A checagem roda com o token do usuário; a escrita, se liberada, roda com o robô. Isso é o oposto do padrão mais comum ("escreve com o que tiver permissão") — aqui a permissão é sempre checada como o usuário, mesmo quando quem escreve é o service principal.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="pipeline">
+    <div class="sec-label"><span class="sec-num">03</span><h2 class="sec-title">O que acontece quando você edita uma coluna</h2></div>
+    <p class="sec-intro">Do clique em "Salvar e Aplicar Governança" até o log de auditoria — 8 passos, cada um com sua própria identidade (a cor da barra à esquerda), incluindo o desvio de bloqueio do portão de acesso.</p>
+
+    <figure>
+      <div class="fig-scroll">
+        <svg viewBox="0 0 900 850" role="img" aria-label="Diagrama de sequência com 8 passos: carregamento do catálogo e colunas via OBO, edição pelo usuário, verificação do portão de acesso com desvio de bloqueio, gravação do comentário pelo service principal, aplicação das tags via OBO, gravação do log de auditoria pelo service principal, e atualização da tela." style="width:900px" width="900" height="850">
+          <defs>
+            <marker id="gah3" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+            </marker>
+            <marker id="gah3-red" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" style="fill:var(--red)"></path>
+            </marker>
+          </defs>
+
+          <line x1="460" y1="92" x2="460" y2="132" stroke="currentColor" stroke-width="1.4" marker-end="url(#gah3)"></line>
+          <line x1="460" y1="192" x2="460" y2="232" stroke="currentColor" stroke-width="1.4" marker-end="url(#gah3)"></line>
+          <line x1="460" y1="292" x2="460" y2="332" stroke="currentColor" stroke-width="1.4" marker-end="url(#gah3)"></line>
+          <line x1="460" y1="392" x2="460" y2="432" stroke="currentColor" stroke-width="1.4" marker-end="url(#gah3)"></line>
+          <line x1="460" y1="492" x2="460" y2="532" stroke="currentColor" stroke-width="1.4" marker-end="url(#gah3)"></line>
+          <line x1="460" y1="592" x2="460" y2="632" stroke="currentColor" stroke-width="1.4" marker-end="url(#gah3)"></line>
+          <line x1="460" y1="692" x2="460" y2="732" stroke="currentColor" stroke-width="1.4" marker-end="url(#gah3)"></line>
+
+          <!-- error branch off step 4 -->
+          <line x1="680" y1="362" x2="760" y2="362" style="stroke:var(--red)" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#gah3-red)"></line>
+          <rect x="680" y="386" width="160" height="52" rx="8" style="fill:var(--red-soft);stroke:var(--red)" stroke-width="1.3"></rect>
+          <text x="760" y="408" text-anchor="middle" font-size="11.5" font-weight="700" style="fill:var(--red)">bloqueado</text>
+          <text x="760" y="424" text-anchor="middle" font-size="9.8" style="fill:var(--red)">nada é escrito</text>
+
+          <!-- 1 -->
+          <rect x="240" y="32" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="36" width="5" height="52" style="fill:var(--teal)"></rect>
+          <circle cx="272" cy="62" r="15" fill="none" style="stroke:var(--teal)"></circle>
+          <text x="272" y="66" text-anchor="middle" class="mono" font-size="12" style="fill:var(--teal)">1</text>
+          <text x="302" y="52" class="mono" font-size="10" letter-spacing="1" style="fill:var(--teal)">OBO</text>
+          <text x="302" y="70" font-size="13.5" font-weight="600" fill="currentColor">Catálogo → schema → tabela</text>
+          <text x="302" y="84" class="mono" font-size="11" style="fill:var(--ink-soft)">SHOW CATALOGS/SCHEMAS/TABLES</text>
+
+          <!-- 2 -->
+          <rect x="240" y="132" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="136" width="5" height="52" style="fill:var(--teal)"></rect>
+          <circle cx="272" cy="162" r="15" fill="none" style="stroke:var(--teal)"></circle>
+          <text x="272" y="166" text-anchor="middle" class="mono" font-size="12" style="fill:var(--teal)">2</text>
+          <text x="302" y="152" class="mono" font-size="10" letter-spacing="1" style="fill:var(--teal)">OBO</text>
+          <text x="302" y="170" font-size="13.5" font-weight="600" fill="currentColor">Colunas e tags atuais carregadas</text>
+          <text x="302" y="184" class="mono" font-size="11" style="fill:var(--ink-soft)">information_schema.columns + column_tags</text>
+
+          <!-- 3 -->
+          <rect x="240" y="232" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="236" width="5" height="52" style="fill:var(--ink)"></rect>
+          <circle cx="272" cy="262" r="15" fill="none" style="stroke:var(--ink)"></circle>
+          <text x="272" y="266" text-anchor="middle" class="mono" font-size="12" fill="currentColor">3</text>
+          <text x="302" y="252" class="mono" font-size="10" letter-spacing="1" fill="currentColor">NAVEGADOR</text>
+          <text x="302" y="270" font-size="13.5" font-weight="600" fill="currentColor">Usuário edita e clica Salvar</text>
+          <text x="302" y="284" class="mono" font-size="11" style="fill:var(--ink-soft)">apply_changes()</text>
+
+          <!-- 4 -->
+          <rect x="240" y="332" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="336" width="5" height="52" style="fill:var(--teal)"></rect>
+          <circle cx="272" cy="362" r="15" fill="none" style="stroke:var(--teal)"></circle>
+          <text x="272" y="366" text-anchor="middle" class="mono" font-size="12" style="fill:var(--teal)">4</text>
+          <text x="302" y="352" class="mono" font-size="10" letter-spacing="1" style="fill:var(--teal)">OBO</text>
+          <text x="302" y="370" font-size="13.5" font-weight="600" fill="currentColor">Portão de acesso verificado</text>
+          <text x="302" y="384" class="mono" font-size="11" style="fill:var(--ink-soft)">user_can_access_table() — fail-closed</text>
+
+          <!-- 5 -->
+          <rect x="240" y="432" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="436" width="5" height="52" style="fill:var(--slate)"></rect>
+          <circle cx="272" cy="462" r="15" fill="none" style="stroke:var(--slate)"></circle>
+          <text x="272" y="466" text-anchor="middle" class="mono" font-size="12" style="fill:var(--slate)">5</text>
+          <text x="302" y="452" class="mono" font-size="10" letter-spacing="1" style="fill:var(--slate)">SP</text>
+          <text x="302" y="470" font-size="13.5" font-weight="600" fill="currentColor">Comentário gravado</text>
+          <text x="302" y="484" class="mono" font-size="11" style="fill:var(--ink-soft)">COMMENT ON TABLE / COLUMN</text>
+
+          <!-- 6 -->
+          <rect x="240" y="532" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="536" width="5" height="52" style="fill:var(--teal)"></rect>
+          <circle cx="272" cy="562" r="15" fill="none" style="stroke:var(--teal)"></circle>
+          <text x="272" y="566" text-anchor="middle" class="mono" font-size="12" style="fill:var(--teal)">6</text>
+          <text x="302" y="552" class="mono" font-size="10" letter-spacing="1" style="fill:var(--teal)">OBO</text>
+          <text x="302" y="570" font-size="13.5" font-weight="600" fill="currentColor">Tags aplicadas / removidas</text>
+          <text x="302" y="584" class="mono" font-size="11" style="fill:var(--ink-soft)">ALTER TABLE ... SET/UNSET TAGS</text>
+
+          <!-- 7 -->
+          <rect x="240" y="632" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="636" width="5" height="52" style="fill:var(--slate)"></rect>
+          <circle cx="272" cy="662" r="15" fill="none" style="stroke:var(--slate)"></circle>
+          <text x="272" y="666" text-anchor="middle" class="mono" font-size="12" style="fill:var(--slate)">7</text>
+          <text x="302" y="652" class="mono" font-size="10" letter-spacing="1" style="fill:var(--slate)">SP</text>
+          <text x="302" y="670" font-size="13.5" font-weight="600" fill="currentColor">Log de auditoria gravado</text>
+          <text x="302" y="684" class="mono" font-size="11" style="fill:var(--ink-soft)">INSERT log_comentarios / log_tags (best-effort)</text>
+
+          <!-- 8 -->
+          <rect x="240" y="732" width="440" height="60" rx="10" style="fill:var(--panel);stroke:var(--line)"></rect>
+          <rect x="246" y="736" width="5" height="52" style="fill:var(--ink)"></rect>
+          <circle cx="272" cy="762" r="15" fill="none" style="stroke:var(--ink)"></circle>
+          <text x="272" y="766" text-anchor="middle" class="mono" font-size="12" fill="currentColor">8</text>
+          <text x="302" y="752" class="mono" font-size="10" letter-spacing="1" fill="currentColor">NAVEGADOR</text>
+          <text x="302" y="770" font-size="13.5" font-weight="600" fill="currentColor">Tela atualiza</text>
+          <text x="302" y="784" class="mono" font-size="11" style="fill:var(--ink-soft)">cache limpo + st.rerun()</text>
+        </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> — O portão (passo 4) roda de novo, independentemente, tanto para o comentário quanto para as tags — não é uma checagem única reaproveitada. O log (passo 7) é melhor-esforço: uma falha ao gravar o log nunca desfaz nem bloqueia a governança que já foi aplicada.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="isolamento">
+    <div class="sec-label"><span class="sec-num">04</span><h2 class="sec-title">Isolamento DEV/PROD</h2></div>
+    <p class="sec-intro">Duas instâncias completamente separadas do app (SPs, warehouses e URLs diferentes) apontando para o <b>mesmo metastore</b>. O filtro que você vê na tela (nomes de schema terminando em <code class="mono">_dev</code>) é só conveniência visual — o limite real são os grants de cada service principal.</p>
+
+    <figure>
+      <div class="fig-scroll">
+        <svg viewBox="0 0 920 480" role="img" aria-label="Diagrama de isolamento: o app DEV e o app PROD são instâncias separadas, cada uma com seu próprio service principal, e cada SP só tem grants de escrita nos schemas do seu próprio ambiente dentro do mesmo metastore unificado. Uma sincronização semanal copia dados de PROD para DEV e sobrescreve comentários e tags feitos na instância DEV." style="width:920px" width="920" height="480">
+          <defs>
+            <marker id="gah4" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+            </marker>
+            <marker id="gah4-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" style="fill:var(--amber)"></path>
+            </marker>
+          </defs>
+
+          <rect x="160" y="30" width="200" height="90" rx="10" style="fill:var(--teal-soft);stroke:var(--teal)" stroke-width="1.4"></rect>
+          <text x="260" y="58" text-anchor="middle" font-size="14" font-weight="700" style="fill:var(--teal)">App DEV</text>
+          <text x="260" y="76" text-anchor="middle" class="mono" font-size="10.5" style="fill:var(--teal)">env=dev · SP dev</text>
+          <text x="260" y="102" text-anchor="middle" font-size="9.5" style="fill:var(--red)">sem grant nos schemas PROD</text>
+
+          <rect x="560" y="30" width="200" height="90" rx="10" style="fill:var(--plum-soft);stroke:var(--plum)" stroke-width="1.4"></rect>
+          <text x="660" y="58" text-anchor="middle" font-size="14" font-weight="700" style="fill:var(--plum)">App PROD</text>
+          <text x="660" y="76" text-anchor="middle" class="mono" font-size="10.5" style="fill:var(--plum)">env=prd · SP prd</text>
+          <text x="660" y="102" text-anchor="middle" font-size="9.5" style="fill:var(--red)">sem grant nos schemas *_dev</text>
+
+          <line x1="260" y1="120" x2="260" y2="230" style="stroke:var(--teal)" stroke-width="1.4" marker-end="url(#gah4)"></line>
+          <text x="272" y="178" class="mono" font-size="9.5" style="fill:var(--teal)">MODIFY,</text>
+          <text x="272" y="190" class="mono" font-size="9.5" style="fill:var(--teal)">APPLY TAG</text>
+
+          <line x1="660" y1="120" x2="660" y2="230" style="stroke:var(--plum)" stroke-width="1.4" marker-end="url(#gah4)"></line>
+          <text x="672" y="178" class="mono" font-size="9.5" style="fill:var(--plum)">MODIFY,</text>
+          <text x="672" y="190" class="mono" font-size="9.5" style="fill:var(--plum)">APPLY TAG</text>
+
+          <rect x="40" y="195" width="840" height="260" rx="14" fill="none" style="stroke:var(--slate)" stroke-width="1.4" stroke-dasharray="6 4"></rect>
+          <text x="60" y="218" class="mono" font-size="11.5" letter-spacing="1" style="fill:var(--slate)">UNITY CATALOG — METASTORE UNIFICADO</text>
+
+          <rect x="100" y="230" width="320" height="150" rx="10" style="fill:var(--paper);stroke:var(--teal)" stroke-width="1.4"></rect>
+          <text x="260" y="254" text-anchor="middle" font-size="13" font-weight="700" style="fill:var(--teal)">schemas *_dev</text>
+          <text x="260" y="272" text-anchor="middle" font-size="10.5" style="fill:var(--ink-soft)">ex: suprimentos_dev, rh_dev</text>
+
+          <rect x="500" y="230" width="320" height="150" rx="10" style="fill:var(--paper);stroke:var(--plum)" stroke-width="1.4"></rect>
+          <text x="660" y="254" text-anchor="middle" font-size="13" font-weight="700" style="fill:var(--plum)">schemas PROD (sem sufixo)</text>
+          <text x="660" y="272" text-anchor="middle" font-size="10.5" style="fill:var(--ink-soft)">ex: suprimentos, rh</text>
+
+          <path d="M660,380 Q550,428 260,380" fill="none" style="stroke:var(--amber)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#gah4-amber)"></path>
+          <text x="460" y="426" text-anchor="middle" class="mono" font-size="10" style="fill:var(--amber)">sync semanal (dom.) — sobrescreve comentários/tags</text>
+        </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> — Mesmo que o filtro de UX da instância DEV fosse contornado, a escrita falharia com <code>PERMISSION_DENIED</code>: o SP de cada ambiente só tem grant no seu próprio grupo de schemas. A seta âmbar é um job separado (<code>notebooks/utils/sync_prod_to_dev.py</code>) que reconcilia comentários/tags de PROD para DEV semanalmente — qualquer governança feita <i>só</i> na instância DEV é sobrescrita nesse ciclo.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="dados">
+    <div class="sec-label"><span class="sec-num">05</span><h2 class="sec-title">Cadastros &amp; auditoria</h2></div>
+    <p class="sec-intro">Estado próprio do app — nada disso é Lakebase, são 6 tabelas Delta comuns no catálogo <code class="mono">apps</code>, criadas de forma idempotente a cada início de processo. Domínios/sub-domínios/stewards formam uma hierarquia; permissões e os dois logs são independentes dela.</p>
+
+    <figure>
+      <div class="fig-scroll">
+        <svg viewBox="0 0 900 380" role="img" aria-label="Diagrama de relacionamento: sub-domínios referenciam domínios, e data stewards referenciam tanto domínios quanto sub-domínios, formando uma hierarquia. A tabela de permissões e as duas tabelas de log de auditoria não têm nenhuma chave estrangeira — vivem no mesmo schema mas sem relação estrutural com as demais." style="width:900px" width="900" height="380">
+          <defs>
+            <marker id="gah5" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+
+          <rect x="20" y="20" width="860" height="340" rx="14" fill="none" style="stroke:var(--slate)" stroke-width="1.3" stroke-dasharray="6 4"></rect>
+          <text x="40" y="44" class="mono" font-size="10.5" letter-spacing="1" style="fill:var(--slate)">apps.governanca_unity_catalog_&lt;env&gt;</text>
+
+          <text x="60" y="76" class="mono" font-size="10.5" letter-spacing="1" style="fill:var(--amber)">CADASTROS (hierarquia)</text>
+          <rect x="60" y="88" width="170" height="42" rx="8" style="fill:var(--amber-soft);stroke:var(--amber)" stroke-width="1.3"></rect>
+          <text x="145" y="113" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--amber)">dominios</text>
+
+          <rect x="60" y="160" width="170" height="42" rx="8" style="fill:var(--amber-soft);stroke:var(--amber)" stroke-width="1.3"></rect>
+          <text x="145" y="185" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--amber)">subdominios</text>
+
+          <rect x="60" y="232" width="170" height="42" rx="8" style="fill:var(--amber-soft);stroke:var(--amber)" stroke-width="1.3"></rect>
+          <text x="145" y="257" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--amber)">data_stewards</text>
+
+          <line x1="145" y1="160" x2="145" y2="130" style="stroke:var(--amber)" stroke-width="1.3" marker-end="url(#gah5)"></line>
+          <text x="155" y="148" class="mono" font-size="9" style="fill:var(--amber)">dominio_id</text>
+
+          <line x1="120" y1="232" x2="120" y2="130" style="stroke:var(--amber)" stroke-width="1.2" marker-end="url(#gah5)"></line>
+          <line x1="170" y1="232" x2="170" y2="202" style="stroke:var(--amber)" stroke-width="1.2" marker-end="url(#gah5)"></line>
+
+          <rect x="290" y="88" width="180" height="42" rx="8" style="fill:var(--paper);stroke:var(--slate)" stroke-width="1.3"></rect>
+          <text x="380" y="113" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--slate)">permissoes</text>
+          <text x="380" y="150" text-anchor="middle" font-size="9.8" style="fill:var(--ink-soft)">RBAC do app — sem</text>
+          <text x="380" y="163" text-anchor="middle" font-size="9.8" style="fill:var(--ink-soft)">relação com o acima</text>
+
+          <text x="620" y="76" class="mono" font-size="10.5" letter-spacing="1" style="fill:var(--blue)">AUDITORIA (sem FK)</text>
+          <rect x="620" y="88" width="240" height="42" rx="8" style="fill:var(--blue-soft);stroke:var(--blue)" stroke-width="1.3"></rect>
+          <text x="740" y="113" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--blue)">log_comentarios</text>
+
+          <rect x="620" y="160" width="240" height="42" rx="8" style="fill:var(--blue-soft);stroke:var(--blue)" stroke-width="1.3"></rect>
+          <text x="740" y="185" text-anchor="middle" font-size="12.5" font-weight="700" style="fill:var(--blue)">log_tags</text>
+          <text x="740" y="222" text-anchor="middle" font-size="9.8" style="fill:var(--ink-soft)">referenciam catálogo/schema/tabela</text>
+          <text x="740" y="235" text-anchor="middle" font-size="9.8" style="fill:var(--ink-soft)">como texto simples, não FK</text>
+        </svg>
+      </div>
+      <figcaption><b>Fig. 5</b> — Nenhuma dessas tabelas tem FK/unicidade no nível do Delta/UC: unicidade de nome, de steward por domínio+sub-domínio+e-mail, e a regra "sempre um admin" são só código de aplicação (padrão <code>INSERT ... WHERE NOT EXISTS</code> para evitar corrida).</figcaption>
+    </figure>
+
+    <div class="table-scroll">
+      <table class="ref">
+        <thead><tr><th>tabela</th><th>colunas principais</th><th>regra de negócio</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">dominios</td><td class="mono">id, nome, descricao</td><td>nome único; delete bloqueado se houver sub-domínio ou steward filho</td></tr>
+          <tr><td class="mono">subdominios</td><td class="mono">id, dominio_id, nome, descricao</td><td>nome único por domínio; delete bloqueado se houver steward filho</td></tr>
+          <tr><td class="mono">data_stewards</td><td class="mono">id, dominio_id, subdominio_id, nome, email</td><td>único por (domínio, sub-domínio, e-mail)</td></tr>
+          <tr><td class="mono">permissoes</td><td class="mono">id, email, papel, ver_logs, ver_cadastros</td><td>papel ∈ admin/editor/leitor; não deixa apagar o último admin</td></tr>
+          <tr><td class="mono">log_comentarios</td><td class="mono">usuario, executor, acao, objeto, catalogo, db_schema, tabela, coluna, comentario_anterior/novo, ambiente, criado_em</td><td>append-only; <code>usuario</code> = quem pediu, <code>executor</code> = <code>'service_principal'</code> fixo</td></tr>
+          <tr><td class="mono">log_tags</td><td class="mono">usuario, executor, acao, catalogo, db_schema, tabela, coluna, tag_chave, valor_anterior/novo, ambiente, criado_em</td><td>append-only; <code>executor</code> = <code>'on_behalf_of_user'</code> fixo</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="sub-title">Papéis (RBAC dos cadastros)</h3>
+    <p class="sub-intro">Controla só o menu e a edição de cadastros/logs — <b>não</b> tem efeito nenhum sobre quem pode comentar/tagueiar dados de negócio (aquilo é grant de UC + o portão de acesso, seção 02). Usuário sem registro em <code class="mono">permissoes</code> entra como <code class="mono">leitor</code> por padrão.</p>
+    <div class="pill-row">
+      <span class="pill" style="--pill-c:var(--plum); --pill-bg:var(--plum-soft)">● admin — vê e edita tudo, único que gerencia Usuários &amp; Permissões</span>
+      <span class="pill" style="--pill-c:var(--teal); --pill-bg:var(--teal-soft)">● editor — edita cadastros, se <code>ver_cadastros=true</code></span>
+      <span class="pill" style="--pill-c:var(--slate); --pill-bg:var(--paper)">● leitor — padrão, somente leitura</span>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="recursos">
+    <div class="sec-label"><span class="sec-num">06</span><h2 class="sec-title">Recursos Databricks</h2></div>
+    <p class="sec-intro">Só três pontos de contato — mais enxuto que um app AppKit, porque a própria governança nativa do Unity Catalog faz a maior parte do trabalho de autorização.</p>
+
+    <div class="cards">
+      <div class="card" style="--card-accent:var(--amber)">
+        <h3>SQL Warehouse</h3>
+        <p class="role">toda leitura e escrita SQL</p>
+        <p>Um único funil (<code>run_query</code> / <code>run_exec</code>) para navegação, amostras, DDL de comentário/tag e todo o CRUD dos cadastros.</p>
+        <dl class="kv"><dt>dev</dt><dd>eb0314aa7f7a27c2</dd><dt>prd</dt><dd>99d8bd5c236bde9b</dd></dl>
+      </div>
+      <div class="card" style="--card-accent:var(--blue)">
+        <h3>Tag Policies API</h3>
+        <p class="role">catálogo oficial de tags</p>
+        <p>Fonte única de chaves e valores permitidos — o app nunca inventa opção de tag, sempre lê da política.</p>
+        <dl class="kv"><dt>chamada</dt><dd>w.tag_policies</dd><dt>identidade</dt><dd>sempre SP</dd></dl>
+      </div>
+      <div class="card" style="--card-accent:var(--plum)">
+        <h3>Account SCIM</h3>
+        <p class="role">busca de usuário (opcional)</p>
+        <p>Só ativa se <code>DATABRICKS_ACCOUNT_ID</code> estiver setado; complementa a busca de usuários do workspace para achar gente ainda não provisionada.</p>
+        <dl class="kv"><dt>requer</dt><dd>Account Admin</dd></dl>
+      </div>
+      <div class="card" style="--card-accent:var(--teal)">
+        <h3>Unity Catalog (nativo)</h3>
+        <p class="role">quem pode ver/tagueiar</p>
+        <p>Não é uma chamada explícita do app — é o próprio UC recusando a operação OBO quando o usuário não tem o grant, sem o app precisar checar nada.</p>
+        <dl class="kv"><dt>grants usados</dt><dd>SELECT/USE, APPLY TAG, ASSIGN</dd></dl>
+      </div>
+    </div>
+
+    <div class="note">
+      <h4>O que esse app não usa</h4>
+      <p>Ao contrário dos apps AppKit do time (ex: <code>rag-pdf-files</code>), este não tem Lakebase, Volumes nem Model Serving — é Streamlit puro sobre o <code>databricks-sdk</code>, e todo o estado próprio vive em tabelas Delta comuns.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="notas">
+    <div class="sec-label"><span class="sec-num">07</span><h2 class="sec-title">Notas e observações</h2></div>
+    <p class="sec-intro">Duas coisas que valem registrar para quem for mexer nesse app ou usá-lo em produção.</p>
+
+    <div class="note danger">
+      <h4>README e guia de uso descrevem a escrita de tags errado</h4>
+      <p><code>README.md</code> e <code>docs/07-guia-de-uso.md</code> afirmam que tags são escritas pelo <b>service principal</b>. O código faz o oposto: tags rodam <code>prefer_user=True</code> (OBO) em <code>apply_changes()</code> — só o comentário roda como SP. O docstring do módulo e <code>docs/02-arquitetura.md</code>/<code>docs/04-permissoes.md</code> estão corretos e batem com o código; README e o guia de uso ficaram desatualizados desde que o invariante OBO/SP foi formalizado (commit <code>924c7034</code>).</p>
+    </div>
+    <div class="note">
+      <h4>Governança feita só em DEV não dura</h4>
+      <p>O job de sincronização semanal (Fig. 4) sobrescreve comentários e tags em DEV com o que estiver em PROD. Documentação feita na instância DEV é, por design, efêmera — para durar, precisa ser feita na instância PROD.</p>
+    </div>
+    <div class="note">
+      <h4>Domínios/sub-domínios/stewards são só registro, não trava nada</h4>
+      <p>Nenhum código de <code>apply_changes</code>/<code>apply_table_comment</code>/escrita de tag consulta <code>dominios</code>, <code>subdominios</code> ou <code>data_stewards</code>. A atribuição de steward é informativa — hoje não impede nem libera nenhuma edição; quem decide isso continua sendo o grant de UC (tags) e o portão de acesso (comentário).</p>
+    </div>
+  </section>
+
+  <footer>
+    <span>governanca-unity-catalog</span>
+    <span>·</span>
+    <span>apps/governanca-unity-catalog</span>
+    <span>·</span>
+    <span>gerado em 05/08/2026</span>
+  </footer>
+
+</div>

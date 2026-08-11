@@ -1,0 +1,11 @@
+.databricks/
+__pycache__/
+*.pyc
+
+# Ambiente local / editores
+.venv/
+venv/
+.env
+.DS_Store
+.vscode/
+.idea/

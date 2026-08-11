@@ -1,0 +1,47 @@
+# Configuração do Databricks App (Streamlit) — deploy MANUAL pelo Databricks.
+#
+# Ajuste DATABRICKS_WAREHOUSE_ID e ENVIRONMENT conforme o ambiente antes de subir:
+#   DEV: warehouse ' · ENVIRONMENT dev
+#   PRD: warehouse '' · ENVIRONMENT prd
+
+command: ["streamlit", "run", "app.py"]
+
+env:
+  # SQL Warehouse usado pela Statement Execution API.
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: ""
+
+  # true = executa navegação/leituras/escritas com a identidade do usuário logado
+  # (on-behalf-of-user). Requer User Authorization habilitada no app + scope `sql`.
+  # As tags governadas (catálogo) continuam sendo lidas pelo service principal.
+  - name: USE_ON_BEHALF_OF_USER
+    value: "true"
+
+  # Ambiente lógico: "dev" mostra/edita só schemas *_dev; "prd" só os de PROD.
+  - name: ENVIRONMENT
+    value: "dev"
+
+  # Restringe o app a estes catálogos (vazio = todos). Todos os schemas do
+  # catálogo continuam disponíveis (respeitando o filtro de ambiente).
+  - name: ALLOWED_CATALOGS
+    value: "suprimentos,rh"
+
+  # Busca de usuários no nível de CONTA (Account SCIM API) — permite encontrar
+  # usuários ainda não provisionados neste workspace (ex.: só existem em DEV).
+  # Requer que o SP do App tenha permissão de leitura de usuários na conta
+  # (ver docs/04-permissoes.md). Vazio = busca apenas usuários do workspace.
+  - name: DATABRICKS_ACCOUNT_ID
+    value: ""
+  # Host do console de contas (Azure). Só mude se não for Azure Databricks.
+  - name: DATABRICKS_ACCOUNT_HOST
+    value: "https://accounts.azuredatabricks.net"
+
+  # Cadastros (domínios/sub/stewards/permissões) — dados internos do app,
+  # gravados pelo service principal em <CADASTRO_CATALOG>.<CADASTRO_SCHEMA>.
+  - name: CADASTRO_CATALOG
+    value: "apps"
+  - name: CADASTRO_SCHEMA
+    value: "governanca_unity_catalog"
+  # Admin inicial dos cadastros (semeado se a tabela permissoes estiver vazia).
+  - name: SEED_ADMIN_EMAIL
+    value: ""

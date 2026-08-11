@@ -1,0 +1,19 @@
+# Dependências do Databricks App (Streamlit) — Governança Unity Catalog
+#
+# Fixamos limites inferiores compatíveis com o runtime de Databricks Apps.
+streamlit>=1.40
+databricks-sdk>=0.40
+pandas>=2.0
+
+# Trava o Starlette abaixo de 1.4.0. O 1.4.0 (lançado 05/08/2026) tornou o
+# argumento `thread_minimum_size` obrigatório em GZipResponder e quebrou a
+# subclasse `_MediaAwareGZipResponder` do Streamlit → todo request retorna
+# HTTP 500 ("Connection failed with status 500"). O Streamlit novo já usa o
+# mesmo cap; fixamos aqui para o deploy ser determinístico (DEV subiu antes do
+# 1.4.0 e por isso funcionava; PROD subiu depois e quebrou).
+starlette>=0.46,<1.4.0
+
+# Opcional: só é necessário se você optar por trocar a execução de SQL do
+# Statement Execution API (SDK) para o conector clássico. O app usa o SDK
+# por padrão, mas mantemos a dependência disponível para extensões.
+databricks-sql-connector>=3.0
