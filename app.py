@@ -82,12 +82,6 @@ ALLOWED_CATALOGS = {
     c.strip().lower() for c in os.environ.get("ALLOWED_CATALOGS", "").split(",") if c.strip()
 }
 
-# URL do dashboard AI/BI (Lakeview) publicado, linkado na aba "Análise de
-# Valorização de Estoque". Vazio = a aba fica oculta. Não é embutido via
-# iframe: o navegador bloqueia o cookie de sessão do workspace num iframe de
-# outra origem, então o link abre em nova aba (herdando a sessão do usuário).
-DASHBOARD_ESTOQUE_URL = os.environ.get("DASHBOARD_ESTOQUE_URL", "").strip()
-
 # Busca de usuários no nível de CONTA (Account SCIM API). Permite encontrar
 # usuários que existem na conta Databricks mas ainda não foram provisionados
 # neste workspace (caso típico: usuário só em DEV ao cadastrar steward em PRD).
@@ -1071,6 +1065,13 @@ def ensure_cadastro_tables() -> bool:
         f"nome STRING, email STRING, {audit})",
         f"CREATE TABLE IF NOT EXISTS {_cad('permissoes')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, email STRING, papel STRING, {audit})",
+        # Dashboards AI/BI (Lakeview) registrados no app, vinculados a um domínio
+        # (e opcionalmente sub-domínio). Quem enxerga cada dashboard no menu é
+        # quem for admin ou Data Steward daquele domínio/sub-domínio — reaproveita
+        # o mesmo cadastro de stewards em vez de uma lista de acesso paralela.
+        f"CREATE TABLE IF NOT EXISTS {_cad('dashboards')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, dominio_id BIGINT, subdominio_id BIGINT, "
+        f"nome STRING, descricao STRING, url STRING, icone STRING, ativo BOOLEAN, {audit})",
         # Log de auditoria (append-only) das alterações de COMENTÁRIO. Como a
         # escrita do COMMENT ON roda via Service Principal, o Unity Catalog não
         # guarda o usuário real; aqui registramos o usuário logado (OBO) que de
@@ -1176,6 +1177,14 @@ def list_stewards() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
+def list_dashboards() -> pd.DataFrame:
+    return run_query(
+        f"SELECT id, dominio_id, subdominio_id, nome, descricao, url, icone, "
+        f"coalesce(ativo,true) AS ativo FROM {_cad('dashboards')} ORDER BY nome"
+    )
+
+
+@st.cache_data(ttl=30, show_spinner=False)
 def list_permissoes() -> pd.DataFrame:
     return run_query(
         f"SELECT id, email, papel, coalesce(ver_cadastros,false) AS ver_cadastros, "
@@ -1275,7 +1284,10 @@ def list_users_for_search() -> list[dict]:
 
 
 def _clear_cad_caches() -> None:
-    for f in (list_dominios, list_subdominios, list_stewards, list_permissoes, get_user_perms):
+    for f in (
+        list_dominios, list_subdominios, list_stewards, list_permissoes,
+        list_dashboards, get_user_perms,
+    ):
         try:
             f.clear()
         except Exception:
@@ -1581,6 +1593,118 @@ def page_stewards() -> None:
             _finish_write("Data steward excluído.")
 
 
+def page_dashboards() -> None:
+    st.title("📊 Dashboards")
+    st.caption(
+        "Cadastro de dashboards AI/BI (Lakeview) publicados. Cada um pertence a um "
+        "Domínio (e opcionalmente a um Sub-domínio) — quem enxerga o link no menu "
+        "Governança é quem for **admin** ou **Data Steward** daquele domínio/sub-domínio."
+    )
+    _show_cad_feedback()
+    role = st.session_state.get("role", "leitor")
+    user = st.session_state.get("user", "")
+
+    doms = list_dominios().to_dict("records")
+    subs = list_subdominios().to_dict("records")
+    dom_nome = {d["id"]: d["nome"] for d in doms}
+    sub_nome = {s["id"]: s["nome"] for s in subs}
+    dash = list_dashboards()
+    show = dash.copy()
+    if not show.empty:
+        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Sub-domínio"] = show["subdominio_id"].map(
+            lambda i: sub_nome.get(i, "(todos)") if pd.notna(i) else "(todos)"
+        )
+    st.dataframe(
+        (show.rename(columns={
+            "nome": "Nome", "descricao": "Descrição", "url": "URL",
+            "icone": "Ícone", "ativo": "Ativo",
+        })[["Nome", "Domínio", "Sub-domínio", "URL", "Ícone", "Ativo", "Descrição"]]
+         if not show.empty else show),
+        use_container_width=True, hide_index=True,
+    )
+
+    if not can_edit(role):
+        st.info("Seu perfil é **leitor** — visualização apenas.")
+        return
+    if not doms:
+        st.warning("Cadastre um **Domínio** primeiro.")
+        return
+
+    recs = dash.to_dict("records")
+    opts = ["(novo)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
+    st.divider()
+    st.markdown("#### Adicionar / editar")
+    sel = st.selectbox("Registro", options=opts, key="dash_sel")
+    editing = sel != "(novo)"
+    cur = (
+        recs[opts.index(sel) - 1] if editing
+        else {
+            "id": None, "dominio_id": None, "subdominio_id": None, "nome": "",
+            "descricao": "", "url": "", "icone": "📊", "ativo": True,
+        }
+    )
+
+    dom_ids = [d["id"] for d in doms]
+    dom_idx = dom_ids.index(cur["dominio_id"]) if editing and cur["dominio_id"] in dom_ids else 0
+    with st.form("form_dash"):
+        nome = st.text_input("Nome *", value=cur["nome"] or "")
+        url = st.text_input("URL do dashboard publicado *", value=cur.get("url") or "")
+        dom_id = st.selectbox(
+            "Domínio *", options=dom_ids, index=dom_idx, format_func=lambda i: dom_nome.get(i, i),
+        )
+        sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id]
+        sub_options = [None] + sub_ids_all
+        cur_sub = cur.get("subdominio_id")
+        sub_idx = sub_options.index(cur_sub) if editing and cur_sub in sub_options else 0
+        sub_id = st.selectbox(
+            "Sub-domínio (opcional — vazio libera para todo o domínio)",
+            options=sub_options, index=sub_idx,
+            format_func=lambda i: "(todos os sub-domínios)" if i is None else sub_nome.get(i, i),
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            icone = st.text_input("Ícone (emoji)", value=cur.get("icone") or "📊")
+        with c2:
+            ativo = st.checkbox("Ativo", value=bool(cur.get("ativo", True)))
+        desc = st.text_area("Descrição", value=cur.get("descricao") or "")
+        saved = st.form_submit_button("💾 Salvar", type="primary")
+
+    if saved:
+        nome = (nome or "").strip()
+        url = (url or "").strip()
+        if not nome or not url:
+            st.warning("Informe nome e URL do dashboard.")
+            return
+        if not (url.startswith("http://") or url.startswith("https://")):
+            st.warning("A URL deve começar com http:// ou https://.")
+            return
+        sub_sql = "NULL" if sub_id is None else str(int(sub_id))
+        if editing:
+            run_exec(
+                f"UPDATE {_cad('dashboards')} SET dominio_id = {int(dom_id)}, "
+                f"subdominio_id = {sub_sql}, nome = {q_str(nome)}, descricao = {q_str(desc)}, "
+                f"url = {q_str(url)}, icone = {q_str(icone or '📊')}, ativo = {str(bool(ativo)).lower()}, "
+                f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                f"WHERE id = {int(cur['id'])}"
+            )
+        else:
+            run_exec(
+                f"INSERT INTO {_cad('dashboards')} "
+                f"(dominio_id, subdominio_id, nome, descricao, url, icone, ativo, criado_em, criado_por) "
+                f"VALUES ({int(dom_id)}, {sub_sql}, {q_str(nome)}, {q_str(desc)}, {q_str(url)}, "
+                f"{q_str(icone or '📊')}, {str(bool(ativo)).lower()}, current_timestamp(), {q_str(user)})"
+            )
+        _finish_write("Dashboard salvo.")
+
+    if editing:
+        st.divider()
+        st.markdown("#### Excluir")
+        if st.button(f"🗑️ Excluir dashboard '{cur['nome']}'"):
+            run_exec(f"DELETE FROM {_cad('dashboards')} WHERE id = {int(cur['id'])}")
+            _finish_write("Dashboard excluído.")
+
+
 def page_permissoes() -> None:
     st.title("🔒 Usuários & Permissões")
     st.caption(
@@ -1782,15 +1906,49 @@ def page_log_tags() -> None:
     )
 
 
-def page_dashboard_estoque() -> None:
-    st.title("📊 Análise de Valorização de Estoque")
-    st.caption(
-        "Dashboard AI/BI (Lakeview) publicado no workspace. Não é possível embutir "
-        "o dashboard diretamente nesta página — o navegador bloqueia o cookie de "
-        "sessão do workspace dentro de um iframe de outra origem —, então ele abre "
-        "em uma nova aba, já autenticado com a sua sessão atual."
-    )
-    st.link_button("↗️ Abrir dashboard", DASHBOARD_ESTOQUE_URL, type="primary")
+def make_dashboard_page(row: dict):
+    """Fábrica de página para um dashboard cadastrado (um `st.Page` por linha)."""
+
+    def _page() -> None:
+        st.title(f"{row.get('icone') or '📊'} {row['nome']}")
+        if row.get("descricao"):
+            st.caption(row["descricao"])
+        st.caption(
+            "Não é possível embutir o dashboard diretamente nesta página — o "
+            "navegador bloqueia o cookie de sessão do workspace dentro de um "
+            "iframe de outra origem —, então ele abre em uma nova aba, já "
+            "autenticado com a sua sessão atual."
+        )
+        st.link_button("↗️ Abrir dashboard", row["url"], type="primary")
+
+    return _page
+
+
+def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
+    """Dashboards ativos que o usuário pode ver: admin vê todos; steward vê os do
+
+    seu domínio (e, se o dashboard restringir a um sub-domínio, só se o steward
+    for daquele sub-domínio específico).
+    """
+    dash = list_dashboards()
+    if dash.empty:
+        return []
+    ativos = [r for r in dash.to_dict("records") if r.get("ativo", True)]
+    if is_admin:
+        return ativos
+    stw = list_stewards()
+    minhas = stw[stw["email"].str.lower() == (user or "").lower()] if not stw.empty else stw
+    dom_ids = set(minhas["dominio_id"].tolist()) if not minhas.empty else set()
+    sub_ids = set(minhas["subdominio_id"].tolist()) if not minhas.empty else set()
+    visiveis = []
+    for r in ativos:
+        if r["dominio_id"] not in dom_ids:
+            continue
+        if r.get("subdominio_id") is not None and pd.notna(r["subdominio_id"]):
+            if int(r["subdominio_id"]) not in sub_ids:
+                continue
+        visiveis.append(r)
+    return visiveis
 
 
 # ---------------------------------------------------------------------------
@@ -1833,16 +1991,23 @@ def main() -> None:
     governanca = [
         st.Page(page_governanca, title="Governança de Dados — Unity Catalog", icon="🏷️", default=True),
     ]
-    if DASHBOARD_ESTOQUE_URL:
-        governanca.append(
-            st.Page(page_dashboard_estoque, title="Análise de Valorização de Estoque", icon="📊")
-        )
+    try:
+        for row in user_visible_dashboards(user, is_admin):
+            governanca.append(
+                st.Page(
+                    make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
+                    url_path=f"dashboard-{int(row['id'])}",
+                )
+            )
+    except Exception as exc:
+        st.session_state.setdefault("cad_bootstrap_error", str(exc))
     pages: dict = {}
     if is_admin or perms["ver_cadastros"]:
         cadastros = [
             st.Page(page_dominios, title="Domínios", icon="🗂️"),
             st.Page(page_subdominios, title="Sub-domínios", icon="🗃️"),
             st.Page(page_stewards, title="Data Stewards", icon="🧑‍💼"),
+            st.Page(page_dashboards, title="Dashboards", icon="📊"),
         ]
         if is_admin:  # gestão de usuários/permissões é sempre admin-only
             cadastros.append(st.Page(page_permissoes, title="Usuários & Permissões", icon="🔒"))

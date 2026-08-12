@@ -45,7 +45,5 @@ env:
   - name: SEED_ADMIN_EMAIL
     value: "lucianozaniengenheirodedados@gmail.com"
 
-  # URL do dashboard AI/BI (Lakeview) publicado, linkado na aba "Análise de
-  # Valorização de Estoque" (Governança). Vazio = aba oculta.
-  - name: DASHBOARD_ESTOQUE_URL
-    value: "https://dbc-7b532bee-e109.cloud.databricks.com/dashboardsv3/01f196680d5e1cdca0c8d53c1ad23cd8/published?o=7474649363876533"
+  # Dashboards AI/BI (Lakeview) não são mais configurados aqui: são cadastrados
+  # dentro do app, em Cadastros → Dashboards, vinculados a um Domínio/Sub-domínio.
