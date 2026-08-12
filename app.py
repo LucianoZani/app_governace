@@ -754,6 +754,82 @@ def _log_tag_change(
         pass
 
 
+# Regra de compliance de tagueamento: coluna classificada como dado pessoal
+# (ver is_personal_data_column) precisa ter AMBAS as chaves com esses valores.
+# Tentativa de gravar uma dessas chaves com outro valor (ou removê-la) numa
+# coluna de dado pessoal não é aplicada direto — vai para o backlog de
+# aprovação (tag_backlog) até um aprovador decidir.
+TAG_COMPLIANCE_RULES = {
+    "privacidade": "dado pessoal",
+    "seguranca": "confidencial",
+}
+
+
+def is_personal_data_column(column: str) -> bool:
+    """True se o nome da coluna casar com algum padrão cadastrado em
+
+    Cadastros → Padrões de Dado Pessoal (substring, case-insensitive; ex.:
+    padrão "cpf" casa com "numero_cpf", "cpf_cliente" etc.).
+    """
+    try:
+        padroes = list_padroes_dado_pessoal()
+    except Exception:
+        return False
+    if padroes.empty:
+        return False
+    col = (column or "").lower()
+    return any(
+        str(p).strip().lower() in col
+        for p in padroes["padrao"].tolist() if str(p).strip()
+    )
+
+
+def tag_violates_compliance(column: str, tag_key: str, new_value: str | None) -> bool:
+    """True se `column` é dado pessoal e essa tag_key/valor não cumpre a regra.
+
+    Só avalia as chaves em TAG_COMPLIANCE_RULES — outras chaves nunca violam.
+    Remover a chave (new_value=None) também viola: a coluna ficaria sem o
+    valor obrigatório.
+    """
+    required = TAG_COMPLIANCE_RULES.get((tag_key or "").strip().lower())
+    if required is None:
+        return False
+    if not is_personal_data_column(column):
+        return False
+    return (new_value or "").strip().lower() != required.lower()
+
+
+def _queue_tag_backlog(
+    user: str, catalog: str, schema: str, table: str, column: str,
+    tag_key: str, valor_anterior: str | None, valor_novo: str | None, acao: str,
+) -> None:
+    """Registra uma tentativa de tag não conforme no backlog de aprovação.
+
+    Best-effort (nunca deve travar a tela) — mesmo padrão dos logs de auditoria.
+    """
+    try:
+        required = TAG_COMPLIANCE_RULES.get(tag_key.strip().lower(), "")
+        motivo = (
+            f"Coluna classificada como dado pessoal: a chave '{tag_key}' precisa "
+            f"do valor '{required}' (regra de compliance de tagueamento)."
+        )
+        run_exec(
+            f"INSERT INTO {_cad('tag_backlog')} "
+            f"(catalogo, db_schema, tabela, coluna, tag_chave, valor_anterior, valor_novo, "
+            f"acao, motivo, solicitante, status, ambiente, criado_em) VALUES ("
+            f"{q_str(catalog)}, {q_str(schema)}, {q_str(table)}, {q_str(column)}, {q_str(tag_key)}, "
+            f"{q_str(valor_anterior) if valor_anterior is not None else 'NULL'}, "
+            f"{q_str(valor_novo) if valor_novo is not None else 'NULL'}, {q_str(acao)}, "
+            f"{q_str(motivo)}, {q_str(user)}, 'pendente', {q_str(ENVIRONMENT)}, current_timestamp())"
+        )
+        try:
+            list_tag_backlog.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def apply_changes(
     user: str,
     catalog: str,
@@ -794,6 +870,10 @@ def apply_changes(
     #   via_obo=False -> Service Principal (só comentário)
     #   via_obo=True  -> token do usuário (tags)
     statements: list = []
+    # Tentativas de tag que violam a regra de compliance (coluna de dado
+    # pessoal sem privacidade=dado pessoal / seguranca=confidencial) vão pra
+    # cá em vez de "statements" — não são executadas, ficam pendentes.
+    backlog: list[tuple[str, str | None, str | None, str]] = []
 
     # 1) Comentário (Service Principal) — só altera se mudou.
     if new_comment != original_comment:
@@ -812,6 +892,9 @@ def apply_changes(
     for key in remove_keys:
         if key == add_tag_key:
             continue
+        if tag_violates_compliance(column, key, None):
+            backlog.append((key, prev_tags.get(key), None, "remover"))
+            continue
         statements.append((
             f"Remover tag '{key}'",
             f"ALTER TABLE {full} ALTER COLUMN {col_q} UNSET TAGS ({q_str(key)})",
@@ -824,18 +907,21 @@ def apply_changes(
     if add_tag_key:
         if add_tag_value is not None and add_tag_value != "":
             acao_tag = "alterar" if add_tag_key in prev_tags else "aplicar"
-            statements.append((
-                f"Aplicar tag '{add_tag_key}' = '{add_tag_value}'",
-                f"ALTER TABLE {full} ALTER COLUMN {col_q} "
-                f"SET TAGS ({q_str(add_tag_key)} = {q_str(add_tag_value)})",
-                True,
-                (lambda k=add_tag_key, v=add_tag_value, a=acao_tag: _log_tag_change(
-                    user, catalog, schema, table, column, a, k, prev_tags.get(k), v)),
-            ))
+            if tag_violates_compliance(column, add_tag_key, add_tag_value):
+                backlog.append((add_tag_key, prev_tags.get(add_tag_key), add_tag_value, acao_tag))
+            else:
+                statements.append((
+                    f"Aplicar tag '{add_tag_key}' = '{add_tag_value}'",
+                    f"ALTER TABLE {full} ALTER COLUMN {col_q} "
+                    f"SET TAGS ({q_str(add_tag_key)} = {q_str(add_tag_value)})",
+                    True,
+                    (lambda k=add_tag_key, v=add_tag_value, a=acao_tag: _log_tag_change(
+                        user, catalog, schema, table, column, a, k, prev_tags.get(k), v)),
+                ))
         else:
             st.warning(f"Selecione um valor para a tag '{add_tag_key}'.")
 
-    if not statements:
+    if not statements and not backlog:
         st.info("Nenhuma alteração a aplicar.")
         return
 
@@ -852,6 +938,19 @@ def apply_changes(
         except Exception as exc:
             feedback.append(("error", f"❌ {desc} — {exc}"))
             fail += 1
+
+    # Tentativas não conformes (coluna de dado pessoal sem privacidade/segurança
+    # corretas): não aplicadas — vão para o backlog de aprovação.
+    for tag_key, valor_anterior, valor_novo, acao in backlog:
+        _queue_tag_backlog(
+            user, catalog, schema, table, column, tag_key, valor_anterior, valor_novo, acao,
+        )
+        required = TAG_COMPLIANCE_RULES.get(tag_key.strip().lower(), "")
+        feedback.append((
+            "warning",
+            f"⏳ Tag '{tag_key}' foi para aprovação — coluna é dado pessoal e exige "
+            f"'{tag_key}' = '{required}' (requer aprovação de um governança aprovador).",
+        ))
 
     # Guarda o feedback para exibir após o rerun (a listagem recarrega já
     # refletindo o novo estado — comentários e tags atualizados na tela).
@@ -948,8 +1047,9 @@ def page_governanca() -> None:
     # Feedback do último "Salvar" (exibido após o rerun que recarrega a listagem).
     _feedback = st.session_state.pop("save_feedback", None)
     if _feedback:
+        _kind_fn = {"success": st.success, "warning": st.warning, "error": st.error}
         for _kind, _msg in _feedback:
-            (st.success if _kind == "success" else st.error)(_msg)
+            _kind_fn.get(_kind, st.error)(_msg)
 
     catalog, schema, table = select_object(user)
     if not (catalog and schema and table):
@@ -1091,6 +1191,21 @@ def ensure_cadastro_tables() -> bool:
         f"catalogo STRING, db_schema STRING, tabela STRING, coluna STRING, "
         f"tag_chave STRING, valor_anterior STRING, valor_novo STRING, "
         f"ambiente STRING, criado_em TIMESTAMP)",
+        # Padrões (substring, case-insensitive) de nome de coluna que classificam
+        # um dado como pessoal (cpf, nome, email, ...). Mantido pela governança —
+        # dispara a regra de compliance de tagueamento em apply_changes().
+        f"CREATE TABLE IF NOT EXISTS {_cad('padroes_dado_pessoal')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, padrao STRING, descricao STRING, {audit})",
+        # Backlog de aprovação: tentativas de tag em coluna de dado pessoal que
+        # não cumpriram a regra (privacidade=dado pessoal + seguranca=confidencial)
+        # ficam pendentes aqui em vez de serem aplicadas direto no Unity Catalog.
+        f"CREATE TABLE IF NOT EXISTS {_cad('tag_backlog')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
+        f"catalogo STRING, db_schema STRING, tabela STRING, coluna STRING, "
+        f"tag_chave STRING, valor_anterior STRING, valor_novo STRING, acao STRING, "
+        f"motivo STRING, solicitante STRING, status STRING, "
+        f"aprovador STRING, decidido_em TIMESTAMP, motivo_decisao STRING, "
+        f"ambiente STRING, criado_em TIMESTAMP)",
     ]
     for stmt in ddl:
         run_exec(stmt)  # SP
@@ -1105,7 +1220,7 @@ def ensure_cadastro_tables() -> bool:
             f"AND lower(table_name) = 'permissoes'"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
-        for col in ("ver_logs", "ver_cadastros"):
+        for col in ("ver_logs", "ver_cadastros", "aprovador_tags"):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS ({col} BOOLEAN)")
     except Exception:
@@ -1129,26 +1244,28 @@ def _as_bool(v) -> bool:
 def get_user_perms(email: str) -> dict:
     """Papel + flags de acesso do usuário. Admin implica ver tudo.
 
-    Retorna ``{"papel", "ver_logs", "ver_cadastros"}``. Para não-admin, as flags
-    vêm das colunas homônimas de ``permissoes`` (default False). Admin sempre
-    True nas duas — enxerga Cadastros e Auditoria independentemente das flags.
+    Retorna ``{"papel", "ver_logs", "ver_cadastros", "aprovador_tags"}``. Para
+    não-admin, as flags vêm das colunas homônimas de ``permissoes`` (default
+    False). Admin sempre True em todas — enxerga Cadastros, Auditoria e o
+    backlog de aprovação de tags independentemente das flags.
     """
-    base = {"papel": "leitor", "ver_logs": False, "ver_cadastros": False}
+    base = {"papel": "leitor", "ver_logs": False, "ver_cadastros": False, "aprovador_tags": False}
     if not email:
         return base
     df = run_query(
-        f"SELECT papel, ver_logs, ver_cadastros FROM {_cad('permissoes')} "
+        f"SELECT papel, ver_logs, ver_cadastros, aprovador_tags FROM {_cad('permissoes')} "
         f"WHERE lower(email) = {q_str(email.lower())} LIMIT 1"
     )
     if df.empty:
         return base
     papel = (df.iloc[0]["papel"] or "leitor").strip().lower()
     if papel == "admin":
-        return {"papel": "admin", "ver_logs": True, "ver_cadastros": True}
+        return {"papel": "admin", "ver_logs": True, "ver_cadastros": True, "aprovador_tags": True}
     return {
         "papel": papel,
         "ver_logs": _as_bool(df.iloc[0]["ver_logs"]),
         "ver_cadastros": _as_bool(df.iloc[0]["ver_cadastros"]),
+        "aprovador_tags": _as_bool(df.iloc[0]["aprovador_tags"]),
     }
 
 
@@ -1188,7 +1305,25 @@ def list_dashboards() -> pd.DataFrame:
 def list_permissoes() -> pd.DataFrame:
     return run_query(
         f"SELECT id, email, papel, coalesce(ver_cadastros,false) AS ver_cadastros, "
-        f"coalesce(ver_logs,false) AS ver_logs FROM {_cad('permissoes')} ORDER BY email"
+        f"coalesce(ver_logs,false) AS ver_logs, coalesce(aprovador_tags,false) AS aprovador_tags "
+        f"FROM {_cad('permissoes')} ORDER BY email"
+    )
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_padroes_dado_pessoal() -> pd.DataFrame:
+    return run_query(
+        f"SELECT id, padrao, descricao FROM {_cad('padroes_dado_pessoal')} ORDER BY padrao"
+    )
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def list_tag_backlog(status: str | None = None) -> pd.DataFrame:
+    where = f"WHERE status = {q_str(status)}" if status else ""
+    return run_query(
+        f"SELECT id, catalogo, db_schema, tabela, coluna, tag_chave, valor_anterior, "
+        f"valor_novo, acao, motivo, solicitante, status, aprovador, decidido_em, "
+        f"motivo_decisao, criado_em FROM {_cad('tag_backlog')} {where} ORDER BY criado_em DESC"
     )
 
 
@@ -1286,7 +1421,7 @@ def list_users_for_search() -> list[dict]:
 def _clear_cad_caches() -> None:
     for f in (
         list_dominios, list_subdominios, list_stewards, list_permissoes,
-        list_dashboards, get_user_perms,
+        list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
     ):
         try:
             f.clear()
@@ -1705,14 +1840,84 @@ def page_dashboards() -> None:
             _finish_write("Dashboard excluído.")
 
 
+def page_padroes_dado_pessoal() -> None:
+    st.title("🧬 Padrões de Dado Pessoal")
+    st.caption(
+        "Palavras/trechos (case-insensitive) que, ao aparecerem no nome de uma "
+        "coluna, classificam-na como dado pessoal — ex.: o padrão 'cpf' casa com "
+        "'numero_cpf', 'cpf_cliente' etc. Colunas classificadas como dado pessoal "
+        "exigem as tags governadas **privacidade = dado pessoal** e "
+        "**seguranca = confidencial**; tagueamento fora dessa regra vai para o "
+        "backlog de aprovação em vez de ser aplicado direto."
+    )
+    _show_cad_feedback()
+    role = st.session_state.get("role", "leitor")
+    user = st.session_state.get("user", "")
+
+    df = list_padroes_dado_pessoal()
+    st.dataframe(
+        df.rename(columns={"id": "ID", "padrao": "Padrão", "descricao": "Descrição"}),
+        use_container_width=True, hide_index=True,
+    )
+
+    if not can_edit(role):
+        st.info("Seu perfil é **leitor** — visualização apenas.")
+        return
+
+    recs = df.to_dict("records")
+    opts = ["(novo)"] + [f'{r["padrao"]} (id {r["id"]})' for r in recs]
+    st.divider()
+    st.markdown("#### Adicionar / editar")
+    sel = st.selectbox("Registro", options=opts, key="pdp_sel")
+    editing = sel != "(novo)"
+    cur = recs[opts.index(sel) - 1] if editing else {"id": None, "padrao": "", "descricao": ""}
+
+    with st.form("form_pdp"):
+        padrao = st.text_input("Padrão *", value=cur["padrao"] or "", help="Ex.: cpf, rg, nome, email, telefone")
+        desc = st.text_area("Descrição", value=cur.get("descricao") or "")
+        saved = st.form_submit_button("💾 Salvar", type="primary")
+
+    if saved:
+        padrao = (padrao or "").strip().lower()
+        if not padrao:
+            st.warning("Informe o padrão.")
+            return
+        extra = f" AND id <> {int(cur['id'])}" if editing else ""
+        if _count(f"SELECT count(*) FROM {_cad('padroes_dado_pessoal')} WHERE lower(padrao) = {q_str(padrao)}{extra}"):
+            st.error("Esse padrão já está cadastrado.")
+            return
+        if editing:
+            run_exec(
+                f"UPDATE {_cad('padroes_dado_pessoal')} SET padrao = {q_str(padrao)}, "
+                f"descricao = {q_str(desc)}, atualizado_em = current_timestamp(), "
+                f"atualizado_por = {q_str(user)} WHERE id = {int(cur['id'])}"
+            )
+        else:
+            run_exec(
+                f"INSERT INTO {_cad('padroes_dado_pessoal')} (padrao, descricao, criado_em, criado_por) "
+                f"SELECT {q_str(padrao)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
+                f"FROM (SELECT 1) WHERE NOT EXISTS "
+                f"(SELECT 1 FROM {_cad('padroes_dado_pessoal')} WHERE lower(padrao) = {q_str(padrao)})"
+            )
+        _finish_write("Padrão salvo.")
+
+    if editing:
+        st.divider()
+        st.markdown("#### Excluir")
+        if st.button(f"🗑️ Excluir padrão '{cur['padrao']}'"):
+            run_exec(f"DELETE FROM {_cad('padroes_dado_pessoal')} WHERE id = {int(cur['id'])}")
+            _finish_write("Padrão excluído.")
+
+
 def page_permissoes() -> None:
     st.title("🔒 Usuários & Permissões")
     st.caption(
         "Cadastro de usuários (espelho do workspace) e seu permissionamento. "
         "**Papel** define o que edita nos cadastros (admin/editor/leitor). As "
-        "**checkboxes** liberam a visualização por usuário: *Ver cadastros* mostra "
-        "o menu Cadastros; *Ver logs* mostra o menu Auditoria. **Admin enxerga "
-        "tudo** independentemente das checkboxes. Só admins acessam esta tela."
+        "**checkboxes** liberam a visualização/ação por usuário: *Ver cadastros* mostra "
+        "o menu Cadastros; *Ver logs* mostra o menu Auditoria; *Aprovador de tags* libera "
+        "o backlog de aprovação de tagueamento. **Admin enxerga/faz tudo** independentemente "
+        "das checkboxes. Só admins acessam esta tela."
     )
     _show_cad_feedback()
     user = st.session_state.get("user", "")
@@ -1722,6 +1927,7 @@ def page_permissoes() -> None:
         df.rename(columns={
             "id": "ID", "email": "E-mail", "papel": "Papel",
             "ver_cadastros": "Ver cadastros", "ver_logs": "Ver logs",
+            "aprovador_tags": "Aprovador de tags",
         }),
         use_container_width=True, hide_index=True,
     )
@@ -1759,12 +1965,14 @@ def page_permissoes() -> None:
         email = st.text_input("E-mail corporativo *", key="perm_email_manual")
 
     papel_add = st.selectbox("Papel *", options=["admin", "editor", "leitor"], key="perm_papel_add")
-    ca, cb = st.columns(2)
+    ca, cb, cc = st.columns(3)
     with ca:
         add_ver_cad = st.checkbox("Ver cadastros", value=True, key="perm_add_ver_cad")
     with cb:
         add_ver_log = st.checkbox("Ver logs", value=False, key="perm_add_ver_log")
-    st.caption("Admin ignora as checkboxes (vê tudo).")
+    with cc:
+        add_aprov = st.checkbox("Aprovador de tags", value=False, key="perm_add_aprov")
+    st.caption("Admin ignora as checkboxes (vê/faz tudo).")
     if st.button("💾 Adicionar usuário", type="primary"):
         em = (email or "").strip().lower()
         if "@" not in em:
@@ -1777,9 +1985,9 @@ def page_permissoes() -> None:
             return
         run_exec(
             f"INSERT INTO {_cad('permissoes')} "
-            f"(email, papel, ver_cadastros, ver_logs, criado_em, criado_por) "
+            f"(email, papel, ver_cadastros, ver_logs, aprovador_tags, criado_em, criado_por) "
             f"SELECT {q_str(em)}, {q_str(papel_add)}, {str(add_ver_cad).lower()}, "
-            f"{str(add_ver_log).lower()}, current_timestamp(), {q_str(user)} "
+            f"{str(add_ver_log).lower()}, {str(add_aprov).lower()}, current_timestamp(), {q_str(user)} "
             f"FROM (SELECT 1) WHERE NOT EXISTS "
             f"(SELECT 1 FROM {_cad('permissoes')} WHERE lower(email) = {q_str(em)})"
         )
@@ -1799,19 +2007,23 @@ def page_permissoes() -> None:
             if (cur.get("papel") or "leitor").lower() in papeis else 2,
             key="perm_papel_edit",
         )
-        e1, e2 = st.columns(2)
+        e1, e2, e3 = st.columns(3)
         with e1:
             ed_ver_cad = st.checkbox(
                 "Ver cadastros", value=_as_bool(cur.get("ver_cadastros")), key="perm_edit_ver_cad")
         with e2:
             ed_ver_log = st.checkbox(
                 "Ver logs", value=_as_bool(cur.get("ver_logs")), key="perm_edit_ver_log")
+        with e3:
+            ed_aprov = st.checkbox(
+                "Aprovador de tags", value=_as_bool(cur.get("aprovador_tags")), key="perm_edit_aprov")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("💾 Salvar"):
                 run_exec(
                     f"UPDATE {_cad('permissoes')} SET papel = {q_str(novo)}, "
                     f"ver_cadastros = {str(ed_ver_cad).lower()}, ver_logs = {str(ed_ver_log).lower()}, "
+                    f"aprovador_tags = {str(ed_aprov).lower()}, "
                     f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                     f"WHERE id = {int(cur['id'])}"
                 )
@@ -1906,6 +2118,180 @@ def page_log_tags() -> None:
     )
 
 
+def page_relatorio_auditoria() -> None:
+    st.title("📋 Relatório de Auditoria")
+    st.caption(
+        "Visão consolidada de comentários e tags alterados em tabelas/colunas do "
+        "Unity Catalog — para a governança revisar o que foi documentado."
+    )
+    try:
+        com = list_log_comentarios()
+        tags = list_log_tags()
+    except Exception as exc:
+        st.warning(f"Não foi possível ler os logs: {exc}")
+        return
+    if com.empty and tags.empty:
+        st.info("Ainda não há comentários ou tags registrados.")
+        return
+
+    rows = []
+    for r in com.to_dict("records"):
+        rows.append({
+            "criado_em": r["criado_em"], "tipo": "Comentário", "usuario": r["usuario"],
+            "acao": r["acao"], "catalogo": r["catalogo"], "db_schema": r["db_schema"],
+            "tabela": r["tabela"], "coluna": r.get("coluna"),
+            "detalhe": f"{(r.get('comentario_anterior') or '(vazio)')[:60]} → "
+                       f"{(r.get('comentario_novo') or '(vazio)')[:60]}",
+        })
+    for r in tags.to_dict("records"):
+        rows.append({
+            "criado_em": r["criado_em"], "tipo": "Tag", "usuario": r["usuario"],
+            "acao": r["acao"], "catalogo": r["catalogo"], "db_schema": r["db_schema"],
+            "tabela": r["tabela"], "coluna": r.get("coluna"),
+            "detalhe": f"{r['tag_chave']}: {r.get('valor_anterior') or '(vazio)'} → "
+                       f"{r.get('valor_novo') or '(vazio)'}",
+        })
+    df = pd.DataFrame(rows).sort_values("criado_em", ascending=False)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        termo = st.text_input("🔍 Filtrar por usuário", key="rel_user").strip().lower()
+    with c2:
+        tipo = st.selectbox("Tipo", options=["(todos)", "Comentário", "Tag"], key="rel_tipo")
+    with c3:
+        tabela_termo = st.text_input("🔍 Filtrar por tabela", key="rel_tabela").strip().lower()
+
+    view = df
+    if termo:
+        view = view[view["usuario"].str.lower().str.contains(termo, na=False)]
+    if tipo != "(todos)":
+        view = view[view["tipo"] == tipo]
+    if tabela_termo:
+        view = view[view["tabela"].str.lower().str.contains(tabela_termo, na=False)]
+
+    st.caption(f"{len(view)} de {len(df)} registro(s).")
+    st.dataframe(
+        view.rename(columns={
+            "criado_em": "Quando", "tipo": "Tipo", "usuario": "Usuário", "acao": "Ação",
+            "catalogo": "Catálogo", "db_schema": "Schema", "tabela": "Tabela", "coluna": "Coluna",
+            "detalhe": "Detalhe",
+        })[["Quando", "Tipo", "Usuário", "Ação", "Catálogo", "Schema", "Tabela", "Coluna", "Detalhe"]],
+        use_container_width=True, hide_index=True,
+    )
+
+
+def _decidir_backlog(item: dict, status: str, aprovador: str, motivo_decisao: str) -> None:
+    """Aprova (aplica a tag de fato) ou rejeita um item do backlog."""
+    if status == "aprovado":
+        catalog, schema, table, column = item["catalogo"], item["db_schema"], item["tabela"], item["coluna"]
+        full = q_full(catalog, schema, table)
+        col_q = q_ident(column)
+        try:
+            if item["acao"] == "remover":
+                sql = f"ALTER TABLE {full} ALTER COLUMN {col_q} UNSET TAGS ({q_str(item['tag_chave'])})"
+            else:
+                sql = (
+                    f"ALTER TABLE {full} ALTER COLUMN {col_q} "
+                    f"SET TAGS ({q_str(item['tag_chave'])} = {q_str(item['valor_novo'])})"
+                )
+            run_exec(sql, prefer_user=True)
+            _log_tag_change(
+                item["solicitante"], catalog, schema, table, column, item["acao"],
+                item["tag_chave"], item.get("valor_anterior"), item.get("valor_novo"),
+            )
+        except Exception as exc:
+            st.error(f"Falha ao aplicar a tag aprovada: {exc}")
+            return
+    run_exec(
+        f"UPDATE {_cad('tag_backlog')} SET status = {q_str(status)}, aprovador = {q_str(aprovador)}, "
+        f"decidido_em = current_timestamp(), motivo_decisao = {q_str(motivo_decisao or '')} "
+        f"WHERE id = {int(item['id'])}"
+    )
+    try:
+        list_tag_backlog.clear()
+        get_applied_column_tags.clear()
+    except Exception:
+        pass
+    st.session_state["cad_feedback"] = (
+        "success",
+        "✅ Item aprovado e tag aplicada." if status == "aprovado" else "🚫 Item rejeitado.",
+    )
+    st.rerun()
+
+
+def page_tag_backlog() -> None:
+    st.title("✅ Backlog de Aprovação de Tags")
+    st.caption(
+        "Tentativas de tagueamento em colunas de dado pessoal que não cumpriram a "
+        "regra (privacidade=dado pessoal + seguranca=confidencial) ficam aqui até um "
+        "aprovador decidir. **Aprovar** aplica a tag de fato no Unity Catalog; "
+        "**rejeitar** descarta a tentativa sem aplicar nada."
+    )
+    _show_cad_feedback()
+    user = st.session_state.get("user", "")
+
+    try:
+        pend = list_tag_backlog("pendente")
+    except Exception as exc:
+        st.warning(f"Não foi possível ler o backlog: {exc}")
+        return
+
+    if pend.empty:
+        st.success("Nenhum item pendente. 🎉")
+    else:
+        st.dataframe(
+            pend.rename(columns={
+                "criado_em": "Solicitado em", "solicitante": "Solicitante", "catalogo": "Catálogo",
+                "db_schema": "Schema", "tabela": "Tabela", "coluna": "Coluna", "tag_chave": "Tag",
+                "valor_anterior": "Valor anterior", "valor_novo": "Valor solicitado", "acao": "Ação",
+                "motivo": "Motivo",
+            })[["Solicitado em", "Solicitante", "Catálogo", "Schema", "Tabela", "Coluna",
+                "Tag", "Ação", "Valor anterior", "Valor solicitado", "Motivo"]],
+            use_container_width=True, hide_index=True,
+        )
+
+        st.divider()
+        st.markdown("#### Decidir item")
+        recs = pend.to_dict("records")
+        opts = [
+            f'#{r["id"]} — {r["tabela"]}.{r["coluna"]} — {r["tag_chave"]}='
+            f'{r["valor_novo"] or "(remover)"} ({r["solicitante"]})'
+            for r in recs
+        ]
+        sel = st.selectbox("Item", options=opts, key="backlog_sel")
+        cur = recs[opts.index(sel)]
+        motivo_decisao = st.text_input("Comentário da decisão (opcional)", key="backlog_motivo")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Aprovar e aplicar", type="primary"):
+                _decidir_backlog(cur, "aprovado", user, motivo_decisao)
+        with c2:
+            if st.button("❌ Rejeitar"):
+                _decidir_backlog(cur, "rejeitado", user, motivo_decisao)
+
+    st.divider()
+    with st.expander("Histórico de decisões"):
+        try:
+            hist = list_tag_backlog()
+            hist = hist[hist["status"] != "pendente"]
+        except Exception:
+            hist = pd.DataFrame()
+        if hist.empty:
+            st.caption("Nenhuma decisão registrada ainda.")
+        else:
+            st.dataframe(
+                hist.rename(columns={
+                    "criado_em": "Solicitado em", "solicitante": "Solicitante", "tabela": "Tabela",
+                    "coluna": "Coluna", "tag_chave": "Tag", "valor_novo": "Valor solicitado",
+                    "status": "Status", "aprovador": "Decidido por", "decidido_em": "Decidido em",
+                    "motivo_decisao": "Comentário",
+                })[["Solicitado em", "Solicitante", "Tabela", "Coluna", "Tag", "Valor solicitado",
+                    "Status", "Decidido por", "Decidido em", "Comentário"]],
+                use_container_width=True, hide_index=True,
+            )
+
+
 def make_dashboard_page(row: dict):
     """Fábrica de página para um dashboard cadastrado (um `st.Page` por linha)."""
 
@@ -1973,7 +2359,7 @@ def main() -> None:
     # Identidade do usuário (OBO) + papel/flags nos cadastros (RBAC).
     user = current_username()
     st.session_state["user"] = user
-    perms = {"papel": "leitor", "ver_logs": False, "ver_cadastros": False}
+    perms = {"papel": "leitor", "ver_logs": False, "ver_cadastros": False, "aprovador_tags": False}
     try:
         ensure_cadastro_tables()
         perms = get_user_perms(user)
@@ -2008,13 +2394,19 @@ def main() -> None:
             st.Page(page_subdominios, title="Sub-domínios", icon="🗃️"),
             st.Page(page_stewards, title="Data Stewards", icon="🧑‍💼"),
             st.Page(page_dashboards, title="Dashboards", icon="📊"),
+            st.Page(page_padroes_dado_pessoal, title="Padrões de Dado Pessoal", icon="🧬"),
         ]
         if is_admin:  # gestão de usuários/permissões é sempre admin-only
             cadastros.append(st.Page(page_permissoes, title="Usuários & Permissões", icon="🔒"))
         pages["Cadastros"] = cadastros
     pages["Governança"] = governanca
+    if is_admin or perms["aprovador_tags"]:
+        pages["Aprovações"] = [
+            st.Page(page_tag_backlog, title="Backlog de Aprovação de Tags", icon="✅"),
+        ]
     if is_admin or perms["ver_logs"]:
         pages["Auditoria"] = [
+            st.Page(page_relatorio_auditoria, title="Relatório de Auditoria", icon="📋"),
             st.Page(page_log_comentarios, title="Log de comentários", icon="📜"),
             st.Page(page_log_tags, title="Log de tags", icon="🏷️"),
         ]
