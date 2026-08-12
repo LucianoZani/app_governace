@@ -1,30 +1,29 @@
 # Configuração do Databricks App (Streamlit) — deploy MANUAL pelo Databricks.
 #
-# Ajuste DATABRICKS_WAREHOUSE_ID e ENVIRONMENT conforme o ambiente antes de subir:
-#   DEV: warehouse ' · ENVIRONMENT dev
-#   PRD: warehouse '' · ENVIRONMENT prd
+# Instância: Databricks Free Edition (workspace pessoal de teste), 1 warehouse
+# serverless único, sem separação real dev/prd — por isso ENVIRONMENT=prd
+# (nenhum schema termina em "_dev" nesta conta).
 
 command: ["streamlit", "run", "app.py"]
 
 env:
   # SQL Warehouse usado pela Statement Execution API.
   - name: DATABRICKS_WAREHOUSE_ID
-    value: ""
+    value: "20dfe5c08c3fa359"
 
-  # true = executa navegação/leituras/escritas com a identidade do usuário logado
-  # (on-behalf-of-user). Requer User Authorization habilitada no app + scope `sql`.
-  # As tags governadas (catálogo) continuam sendo lidas pelo service principal.
+  # false = tudo roda como o service principal do App (sem OBO). Simplifica o
+  # primeiro deploy: não precisa configurar User Authorization/scopes no App.
   - name: USE_ON_BEHALF_OF_USER
-    value: "true"
+    value: "false"
 
   # Ambiente lógico: "dev" mostra/edita só schemas *_dev; "prd" só os de PROD.
   - name: ENVIRONMENT
-    value: "dev"
+    value: "prd"
 
   # Restringe o app a estes catálogos (vazio = todos). Todos os schemas do
   # catálogo continuam disponíveis (respeitando o filtro de ambiente).
   - name: ALLOWED_CATALOGS
-    value: "suprimentos,rh"
+    value: "supply_chain,vendas,poc_de_para_materiais_fornecedores"
 
   # Busca de usuários no nível de CONTA (Account SCIM API) — permite encontrar
   # usuários ainda não provisionados neste workspace (ex.: só existem em DEV).
@@ -44,4 +43,9 @@ env:
     value: "governanca_unity_catalog"
   # Admin inicial dos cadastros (semeado se a tabela permissoes estiver vazia).
   - name: SEED_ADMIN_EMAIL
-    value: ""
+    value: "lucianozaniengenheirodedados@gmail.com"
+
+  # URL do dashboard AI/BI (Lakeview) publicado, linkado na aba "Análise de
+  # Valorização de Estoque" (Governança). Vazio = aba oculta.
+  - name: DASHBOARD_ESTOQUE_URL
+    value: "https://dbc-7b532bee-e109.cloud.databricks.com/dashboardsv3/01f196680d5e1cdca0c8d53c1ad23cd8/published?o=7474649363876533"

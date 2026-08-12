@@ -82,6 +82,12 @@ ALLOWED_CATALOGS = {
     c.strip().lower() for c in os.environ.get("ALLOWED_CATALOGS", "").split(",") if c.strip()
 }
 
+# URL do dashboard AI/BI (Lakeview) publicado, linkado na aba "Análise de
+# Valorização de Estoque". Vazio = a aba fica oculta. Não é embutido via
+# iframe: o navegador bloqueia o cookie de sessão do workspace num iframe de
+# outra origem, então o link abre em nova aba (herdando a sessão do usuário).
+DASHBOARD_ESTOQUE_URL = os.environ.get("DASHBOARD_ESTOQUE_URL", "").strip()
+
 # Busca de usuários no nível de CONTA (Account SCIM API). Permite encontrar
 # usuários que existem na conta Databricks mas ainda não foram provisionados
 # neste workspace (caso típico: usuário só em DEV ao cadastrar steward em PRD).
@@ -170,6 +176,25 @@ def _forwarded_user_token() -> str | None:
     if not headers:
         return None
     return headers.get("x-forwarded-access-token")
+
+
+def _forwarded_user_email() -> str | None:
+    """E-mail de quem abriu o app, do header injetado pelo proxy do Databricks Apps.
+
+    Diferente de ``x-forwarded-access-token`` (que só vem com a User
+    Authorization/OBO habilitada), o e-mail/username SSO do usuário é
+    repassado pelo Apps independentemente de OBO — é só identidade, não
+    concede nenhuma permissão extra. Usado para reconhecer quem é admin/editor
+    (RBAC dos cadastros) e para os logs de auditoria mesmo com
+    ``USE_ON_BEHALF_OF_USER=false``.
+    """
+    try:
+        headers = st.context.headers
+    except Exception:
+        return None
+    if not headers:
+        return None
+    return headers.get("x-forwarded-email") or headers.get("x-forwarded-preferred-username")
 
 
 def get_client(prefer_user: bool = False) -> WorkspaceClient:
@@ -262,10 +287,16 @@ def run_exec(sql: str, prefer_user: bool = False) -> None:
 
 
 def current_username() -> str:
-    """Identidade do usuário logado (para OBO e para chavear o cache por usuário).
+    """Identidade do usuário logado (RBAC, auditoria e chave de cache por usuário).
 
-    Em OBO retorna o usuário real; sem token (fallback SP) retorna o SP.
+    Prioriza o e-mail do header ``x-forwarded-email`` (SSO do Databricks Apps,
+    disponível mesmo com ``USE_ON_BEHALF_OF_USER=false``). Sem esse header
+    (fora do App), cai para a identidade do client: o usuário real em OBO, ou
+    o service principal em fallback.
     """
+    email = _forwarded_user_email()
+    if email:
+        return email
     try:
         return get_client(prefer_user=True).current_user.me().user_name or "unknown"
     except Exception:
@@ -436,10 +467,10 @@ def render_sidebar() -> None:
         st.markdown("### ℹ️ Sessão")
         env_badge = "🟢 PRD" if ENVIRONMENT == "prd" else "🟡 DEV"
         st.caption(f"Ambiente: **{env_badge}** (mostra apenas schemas de {ENVIRONMENT.upper()})")
-        try:
-            me = get_client(prefer_user=True).current_user.me()
-            st.caption(f"Usuário: **{me.user_name}**")
-        except Exception:
+        user_display = st.session_state.get("user")
+        if user_display and user_display != "unknown":
+            st.caption(f"Usuário: **{user_display}**")
+        else:
             st.caption("Usuário: (não identificado)")
         st.caption(f"Warehouse: `{WAREHOUSE_ID or '—'}`")
         st.caption(
@@ -1751,6 +1782,17 @@ def page_log_tags() -> None:
     )
 
 
+def page_dashboard_estoque() -> None:
+    st.title("📊 Análise de Valorização de Estoque")
+    st.caption(
+        "Dashboard AI/BI (Lakeview) publicado no workspace. Não é possível embutir "
+        "o dashboard diretamente nesta página — o navegador bloqueia o cookie de "
+        "sessão do workspace dentro de um iframe de outra origem —, então ele abre "
+        "em uma nova aba, já autenticado com a sua sessão atual."
+    )
+    st.link_button("↗️ Abrir dashboard", DASHBOARD_ESTOQUE_URL, type="primary")
+
+
 # ---------------------------------------------------------------------------
 # Entrada / navegação
 # ---------------------------------------------------------------------------
@@ -1791,6 +1833,10 @@ def main() -> None:
     governanca = [
         st.Page(page_governanca, title="Governança de Dados — Unity Catalog", icon="🏷️", default=True),
     ]
+    if DASHBOARD_ESTOQUE_URL:
+        governanca.append(
+            st.Page(page_dashboard_estoque, title="Análise de Valorização de Estoque", icon="📊")
+        )
     pages: dict = {}
     if is_admin or perms["ver_cadastros"]:
         cadastros = [
