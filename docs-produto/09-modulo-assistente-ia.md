@@ -1,0 +1,85 @@
+# 9. Módulo — Assistente de Governança (IA)
+
+Painel de chat (inspirado num assistente irmão de outro produto do autor,
+"Ask Ontos") que responde perguntas em linguagem natural sobre tudo o que
+está cadastrado/governado no app. **Módulo opcional** — adicionado depois do
+core do produto (Governança + Cadastros), desligado por padrão.
+
+## O que faz
+
+- Responde perguntas do tipo "quais colunas da tabela X não têm comentário?",
+  "quem é o data steward do domínio Y?", "que termos de negócio existem sobre
+  Z?", "o que está pendente no backlog de aprovação de tags?".
+- Usa **function calling**: o modelo decide, a cada pergunta, quais das
+  fontes de dados do app consultar (uma ou várias tools, em até 6 idas e
+  vindas por pergunta) e formula a resposta final a partir do resultado.
+- Mantém o histórico da conversa na sessão do usuário (botão "Nova conversa"
+  para reiniciar).
+
+## O que NÃO faz (por design)
+
+**Só consulta.** Nenhuma tool de escrita é exposta ao modelo — o assistente
+não aplica tag, não grava comentário, não cadastra domínio/steward/dashboard/
+termo, não decide item do backlog de aprovação. Para qualquer ação, o usuário
+precisa ir até a tela correspondente do app.
+
+## Fontes de dados disponíveis ao assistente (tools)
+
+| Tool | O que devolve |
+|---|---|
+| `tags_e_comentarios_da_tabela` | Comentário e, por coluna, tipo/comentário/tags de uma tabela específica (catalog/schema/table). |
+| `tags_governadas_disponiveis` | Catálogo de governed tags (chaves e valores permitidos). |
+| `dominios_e_subdominios` | Domínios e sub-domínios cadastrados. |
+| `data_stewards` | Stewards cadastrados, com domínio/sub-domínio. |
+| `dashboards_cadastrados` | Dashboards (AI/BI) cadastrados, com domínio/sub-domínio. |
+| `padroes_de_dado_pessoal` | Padrões que classificam uma coluna como dado pessoal. |
+| `termos_de_negocio` | Glossário de termos/indicadores (ver [10. Módulo — Glossário](./10-modulo-glossario-termos.md)). |
+| `backlog_de_aprovacao_de_tags` | Itens do backlog de tags, opcionalmente filtrado por status. |
+| `log_auditoria` | Log de comentários ou de tags (mais recentes primeiro, com limite). |
+
+Todas as tools executam como **service principal** (mesma identidade que os
+cadastros — o assistente não herda os grants de Unity Catalog do usuário que
+está perguntando; ele só enxerga o que o SP consegue ler, incluindo tags/
+comentários de tabelas dentro de `ALLOWED_CATALOGS`).
+
+## Arquitetura do backend
+
+O app monta um cliente compatível com a API da OpenAI (`pip install openai`),
+apontando para o **Unity AI Gateway do próprio workspace**:
+
+```
+base_url = "{host-do-workspace}/ai-gateway/mlflow/v1"   # não é o /serving-endpoints clássico
+```
+
+autenticado com um token OAuth do service principal, obtido na hora de cada
+chamada (não é cacheado — o token expira). O modelo consultado é o
+**model service** identificado por `LLM_ENDPOINT` (`catalogo.schema.nome`),
+registrado no Unity Catalog e servido pelo AI Gateway — **cada instalação
+aponta para o seu próprio modelo**, o produto não traz um modelo embutido.
+
+## Compatibilidade de modelo — um ponto de atenção real
+
+Alguns modelos servidos pelo AI Gateway (ex.: modelos "OSS" com raciocínio
+interno) devolvem `message.content` como uma **lista de blocos** (um bloco
+`reasoning` + um bloco `text`) em vez de uma string simples. Se o app
+mostrasse esse conteúdo cru, o raciocínio interno do modelo (que não deveria
+aparecer) vazaria para a tela. O app já trata isso: uma função normalizadora
+extrai **só** os blocos do tipo `text` antes de exibir a resposta. Se você
+trocar de modelo numa instalação nova e a resposta aparecer com lixo/JSON
+cru na tela, é sinal de que esse modelo devolve o conteúdo num formato ainda
+não coberto — ver [12. Troubleshooting](./12-troubleshooting.md).
+
+## Habilitando numa instalação nova
+
+1. Confirme os pré-requisitos em [03. Pré-requisitos](./03-pre-requisitos.md)
+   (AI Gateway disponível + pelo menos um modelo hospedado no workspace).
+2. Registre/identifique o model service (`catalogo.schema.nome`) que o AI
+   Gateway vai servir.
+3. Conceda ao service principal do app permissão para invocar esse endpoint.
+4. No `app.yaml`, defina `LLM_ENABLED=true` e `LLM_ENDPOINT=<catalogo.schema.nome>`.
+5. Redeploy. Teste com uma pergunta simples ("quais domínios estão
+   cadastrados?") antes de liberar para os usuários finais.
+
+Sem `LLM_ENABLED=true` **e** `LLM_ENDPOINT` preenchido, o painel mostra
+apenas "Assistente de IA não configurado" — o resto do app funciona
+normalmente.

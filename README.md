@@ -1,33 +1,53 @@
 # Governança & Cadastros — Unity Catalog (Databricks App)
 
-App Streamlit com duas áreas complementares:
+App Streamlit com quatro áreas complementares:
 
 1. **Governança de Dados** — usuários de negócio aplicam/alteram **tags governadas**
-   e **comentários** em colunas de tabelas do Unity Catalog, com amostra de dados
-   e filtro para encontrar lacunas de documentação.
-2. **Cadastros** — Domínios, Sub-domínios, Data Stewards e Permissões (dados
-   internos do app, com controle de acesso por papéis).
+   e **comentários** em colunas de tabelas do Unity Catalog, com amostra de dados,
+   filtro para encontrar lacunas de documentação e uma regra de compliance que
+   desvia tentativas de tag incorreta em colunas de dado pessoal para um backlog
+   de aprovação.
+2. **Cadastros e Administração** — Domínios, Sub-domínios, Data Stewards,
+   Dashboards (AI/BI) vinculados a domínio, Padrões de Dado Pessoal, Backlog de
+   Aprovação de Tags, Usuários & Permissões (RBAC) e trilha de auditoria (dados
+   internos do app).
+3. **Assistente de Governança (IA)** — painel de chat, via Unity AI Gateway, que
+   responde perguntas em linguagem natural sobre tudo o que está cadastrado/
+   governado no app. Só consulta — nunca aplica tag, comentário ou cadastro
+   sozinho. Módulo opcional (`LLM_ENABLED`).
+4. **Glossário de Termos de Negócio** — cadastro de Termos e Indicadores (KPIs)
+   com dono, classificação de segurança/privacidade e, para indicadores,
+   fórmula/memória de cálculo.
 
-> 📚 **Documentação completa** por tema (arquitetura, permissões, ambientes,
-> deploy, guia de uso, referência técnica, troubleshooting e cadastros) em
-> [`docs/`](./docs/README.md).
+> 📚 **Documentação de produto** (para instalar em outro workspace/cliente —
+> arquitetura, pré-requisitos, instalação, configuração, permissões, cada
+> módulo em detalhe, personalização multi-cliente, troubleshooting e
+> changelog) em [`docs-produto/`](./docs-produto/README.md).
+>
+> A pasta [`docs/`](./docs/README.md) é a documentação técnica **do ambiente
+> pessoal atual** (nomes de warehouse/catálogo/schema específicos daquela
+> instalação) — cobre só Governança de Dados e Cadastros; para os módulos
+> novos e para instalar em outro lugar, use `docs-produto/`.
 
 ## Menu (navegação à esquerda)
 
-O app usa `st.navigation`, com dois grupos, **nesta ordem**:
+O app usa `st.navigation`, com grupos (a visibilidade de cada tela depende do
+papel/flags do usuário — ver [`docs-produto/06-permissoes`](./docs-produto/06-permissoes.md)):
 
 1. **Cadastros** (no topo) → Domínios · Sub-domínios · Data Stewards ·
-   Permissões (*Permissões* só aparece para o papel **admin**).
-2. **Governança** (abaixo) → **Governança de Dados — Unity Catalog** (página
-   inicial/default do app).
-
-Futuras operações do sistema entram abaixo de **Cadastros** também.
+   Dashboards · Padrões de Dado Pessoal · Termos de Negócio · Usuários &
+   Permissões.
+2. **Governança** → **Governança de Dados — Unity Catalog** (página inicial/
+   default do app, com o **Assistente de Governança (IA)** ancorado ao lado,
+   se habilitado) + links de Dashboards cadastrados que o usuário tem acesso.
+3. **Aprovações** → Backlog de Aprovação de Tags (admin ou papel `aprovador_tags`).
+4. **Auditoria** → Relatório de Auditoria · Log de comentários · Log de tags.
 
 ## Dois modelos de autenticação (coexistem)
 
 | Área | Executa como | Detalhe |
 |---|---|---|
-| **Governança** (comentários de tabela/coluna + tags) | **Leitura OBO · escrita SP** | **Leituras** (navegação, colunas, amostras, comentário atual) rodam com a identidade do **usuário logado** (OBO), respeitando os grants dele. **Escritas** (`COMMENT ON`/`ALTER … TAGS`) rodam com o **service principal** (que detém `MODIFY`/`APPLY TAG`), então o usuário **não precisa de `MODIFY`**. Antes de cada escrita, um **portão de acesso** confirma via OBO que o usuário enxerga a tabela — só documenta o que ele tem acesso. |
+| **Governança** (comentários de tabela/coluna + tags) | **Leitura OBO · tags OBO · comentário SP** | **Leituras** (navegação, colunas, amostras, comentário atual) e **tags** (`ALTER TABLE … SET/UNSET TAGS`) rodam com a identidade do **usuário logado** (OBO), respeitando os grants dele — inclusive `APPLY TAG`/`ASSIGN`; quem não tem a permissão simplesmente não consegue aplicar a tag. Só o **comentário** (`COMMENT ON TABLE`/`COMMENT ON COLUMN`) roda com o **service principal** (que detém `MODIFY`), porque nenhum usuário tem `MODIFY` na tabela — isso é a única exceção. Antes de gravar o comentário, um **portão de acesso** confirma via OBO que o usuário enxerga a tabela — só documenta o que ele tem acesso. |
 | **Cadastros** | **Service principal do App** | Dados do app (não do usuário). Quem pode editar é controlado por **RBAC** (tabela `permissoes`: `admin`/`editor`/`leitor`). A página de Governança **não** usa esse RBAC. |
 
 `USE_ON_BEHALF_OF_USER=true`. Se o token do usuário não estiver disponível, o app
@@ -58,9 +78,13 @@ cai automaticamente para o service principal (fallback).
   a lista oficial de chaves e valores permitidos. (O `information_schema.column_tags`
   mostra apenas as tags **já aplicadas**, não o catálogo permitido.)
 - **Tags aplicadas:** lidas de `<catalog>.information_schema.column_tags` (OBO).
-- **Escritas (`COMMENT ON`/`ALTER … TAGS`):** executadas pelo **service principal**,
-  precedidas de um **portão de acesso** (`user_can_access_table`) que confirma via
-  OBO que o usuário logado enxerga a tabela no `information_schema`.
+- **Tags (`ALTER TABLE … SET/UNSET TAGS`):** executadas via **OBO**, com o token do
+  usuário logado — governadas pelas permissões do próprio Unity Catalog
+  (`APPLY TAG`/`ASSIGN`).
+- **Comentário (`COMMENT ON TABLE`/`COMMENT ON COLUMN`):** única escrita que roda
+  pelo **service principal** (detém `MODIFY`), precedida de um **portão de acesso**
+  (`user_can_access_table`) que confirma via OBO que o usuário logado enxerga a
+  tabela no `information_schema`.
 
 ## Variáveis de ambiente
 
@@ -75,9 +99,12 @@ cai automaticamente para o service principal (fallback).
 | `SEED_ADMIN_EMAIL` | Não (``) | Admin inicial semeado se a tabela `permissoes` estiver vazia. |
 | `DATABRICKS_ACCOUNT_ID` | Não | Habilita a busca de usuários no **nível de conta** (Account SCIM API) — encontra usuários ainda não provisionados no workspace local. Vazio = busca só no workspace. Requer permissão do SP na conta (ver docs/04-permissoes). |
 | `DATABRICKS_ACCOUNT_HOST` | Não (`https://accounts.azuredatabricks.net`) | Host do console de contas. Só mude fora do Azure. |
+| `LLM_ENABLED` | Não (`false`) | `true` habilita o painel do **Assistente de Governança (IA)**. |
+| `LLM_ENDPOINT` | Só se `LLM_ENABLED=true` | Nome completo (`catalogo.schema.nome_do_modelo`) do model service no Unity Catalog, servido pelo Unity AI Gateway. Sem isso, o painel mostra "não configurado" em vez de dar erro. |
 
 As variáveis ficam no `app.yaml`. O app é subido **manualmente** pelo Databricks
-(ver [docs/06-deploy](./docs/06-deploy.md)).
+(ver [docs/06-deploy](./docs/06-deploy.md); para instalar em outro workspace,
+ver [docs-produto/04-instalacao](./docs-produto/04-instalacao.md)).
 
 ---
 
@@ -118,15 +145,18 @@ governança (tags/comentários) feita em DEV**. Portanto:
 
 Detalhes completos em [docs/04-permissoes](./docs/04-permissoes.md).
 
-- **Governança — usuário (steward):** só **leitura**. `CAN USE` no warehouse do
-  ambiente + `USE CATALOG`/`USE SCHEMA`/`SELECT` nos schemas que vai documentar.
-  **Sem `MODIFY`/`APPLY TAG`** — o `SELECT` já basta para o portão de acesso liberar
-  a edição do comentário/tag (a escrita é feita pelo SP).
+- **Governança — usuário (steward):** `CAN USE` no warehouse do ambiente +
+  `USE CATALOG`/`USE SCHEMA`/`SELECT` nos schemas que vai documentar (isso já
+  libera **comentar**, via o portão de acesso). **Sem `MODIFY`** — quem comenta
+  não precisa dele, é emprestado pelo SP. Para **aplicar/remover tags** (que
+  rodam via OBO, com o token do próprio usuário), precisa também de
+  **`APPLY TAG`** no objeto e **`ASSIGN`** na governed tag (concedido pela UI →
+  Governance Hub → Governed Tags → Account Permissions).
 - **Service principal do App:** `CAN USE` no warehouse; **`USE SCHEMA`/`SELECT`/
-  `MODIFY`/`APPLY TAG`** nos schemas de dados que o app governa (limitados ao
-  ambiente/allowlist) + **`ASSIGN`** nas governed tags (só via UI → Governance Hub →
-  Governed Tags → Account Permissions); e, no catálogo `apps`, `USE CATALOG` +
-  `USE SCHEMA`/`CREATE TABLE`/`SELECT`/`MODIFY` no schema do ambiente (cadastros).
+  `MODIFY`** nos schemas de dados que o app governa (limitados ao ambiente/
+  allowlist) — só para o comentário, já que as tags não passam mais pelo SP; e,
+  no catálogo `apps`, `USE CATALOG` + `USE SCHEMA`/`CREATE TABLE`/`SELECT`/
+  `MODIFY` no schema do ambiente (cadastros).
 
 > O dropdown de tags lista **todas** as governed tags (sem filtro por `ASSIGN`);
 > aplicar sem permissão retorna `PERMISSION_DENIED`. Os **objetos** aparecem
