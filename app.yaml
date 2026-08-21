@@ -47,3 +47,13 @@ env:
 
   # Dashboards AI/BI (Lakeview) não são mais configurados aqui: são cadastrados
   # dentro do app, em Cadastros → Dashboards, vinculados a um Domínio/Sub-domínio.
+
+  # Assistente de IA (painel "Assistente de Governança"). Usa o Unity AI
+  # Gateway (system.ai / model service registrado em UC) — não o
+  # /serving-endpoints clássico. O SP do app precisa de EXECUTE no model
+  # service (ver docs/04-permissoes.md).
+  - name: LLM_ENABLED
+    value: "true"
+  # Nome completo (catalog.schema.name) do model service no AI Gateway.
+  - name: LLM_ENDPOINT
+    value: "apps.governanca_unity_catalog_prd.assistente_governanca"

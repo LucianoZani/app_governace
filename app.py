@@ -92,6 +92,12 @@ ACCOUNT_HOST = os.environ.get(
     "DATABRICKS_ACCOUNT_HOST", "https://accounts.azuredatabricks.net"
 ).strip()
 
+# Painel "Assistente de Governança" (chat com IA). Usa o Unity AI Gateway
+# (model service registrado em UC, não o /serving-endpoints clássico) — o
+# nome em LLM_ENDPOINT é o full name catalog.schema.model do model service.
+LLM_ENABLED = os.environ.get("LLM_ENABLED", "false").strip().lower() == "true"
+LLM_ENDPOINT = os.environ.get("LLM_ENDPOINT", "").strip()
+
 # Quantidade de linhas de amostra exibidas por coluna.
 SAMPLE_ROWS = 5
 
@@ -209,6 +215,24 @@ def get_client(prefer_user: bool = False) -> WorkspaceClient:
             # "more than one authorization method configured: oauth and pat".
             return WorkspaceClient(host=host, token=token, auth_type="pat")
     return get_service_principal_client()
+
+
+def get_llm_client():
+    """Cliente OpenAI-compatible apontado para o Unity AI Gateway do workspace.
+
+    NÃO cacheado: o token OAuth do service principal expira, então pegamos um
+    token fresco (``config.authenticate()``) a cada chamada — mesmo espírito
+    de ``get_client()``, que também monta um cliente novo por chamada.
+    """
+    from openai import OpenAI
+
+    cfg = get_service_principal_client().config
+    headers = cfg.authenticate()
+    token = (headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    if not token:
+        raise RuntimeError("Não foi possível obter um token do service principal para o assistente.")
+    base_url = f"{cfg.host.rstrip('/')}/ai-gateway/mlflow/v1"
+    return OpenAI(api_key=token, base_url=base_url)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +503,10 @@ def render_sidebar() -> None:
         if st.button("🔄 Atualizar dados em tela", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
+        if LLM_ENABLED:
+            st.session_state["show_assistant"] = st.checkbox(
+                "🤖 Mostrar assistente", value=st.session_state.get("show_assistant", True)
+            )
 
 
 def select_object(user: str) -> tuple[str | None, str | None, str | None]:
@@ -1139,10 +1167,21 @@ _CAD_SCHEMA_BASE = os.environ.get("CADASTRO_SCHEMA", "governanca_unity_catalog")
 CAD_SCHEMA = f"{_CAD_SCHEMA_BASE}_{ENVIRONMENT}"
 SEED_ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "t.guilherme.massafer@ero.com").strip().lower()
 
+# Glossário de termos de negócio / indicadores — mesmo catálogo `apps`, schema
+# próprio (`ontologia_<env>`) pra não misturar com as tabelas de cadastro do
+# app. O schema em si é criado manualmente (ver docs/04-permissoes.md); aqui
+# só criamos a tabela, igual às demais.
+ONTOLOGIA_SCHEMA = f"ontologia_{ENVIRONMENT}"
+
 
 def _cad(table: str) -> str:
     """Nome totalmente qualificado de uma tabela de cadastro."""
     return f"{q_ident(CAD_CATALOG)}.{q_ident(CAD_SCHEMA)}.{q_ident(table)}"
+
+
+def _ont(table: str) -> str:
+    """Nome totalmente qualificado de uma tabela do glossário/ontologia."""
+    return f"{q_ident(CAD_CATALOG)}.{q_ident(ONTOLOGIA_SCHEMA)}.{q_ident(table)}"
 
 
 @st.cache_resource(show_spinner=False)
@@ -1206,6 +1245,19 @@ def ensure_cadastro_tables() -> bool:
         f"motivo STRING, solicitante STRING, status STRING, "
         f"aprovador STRING, decidido_em TIMESTAMP, motivo_decisao STRING, "
         f"ambiente STRING, criado_em TIMESTAMP)",
+        # Glossário de termos de negócio / indicadores. Campos exclusivos de
+        # indicador (variaveis_utilizadas, fonte_variavel, memoria_calculo,
+        # tipo_grafico, dimensoes) ficam em branco pra um "Termo" comum — não
+        # há validação condicional, só orientação na tela.
+        f"CREATE TABLE IF NOT EXISTS {_ont('termos_negocio')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
+        f"tipo STRING, nome STRING, objetivo STRING, observacoes STRING, "
+        f"palavras_chave STRING, macroprocesso STRING, "
+        f"dominio_id BIGINT, subdominio_id BIGINT, data_owner STRING, data_steward STRING, "
+        f"rotulo_seguranca STRING, rotulo_privacidade STRING, "
+        f"nivel_apuracao STRING, unidade STRING, "
+        f"variaveis_utilizadas STRING, fonte_variavel STRING, memoria_calculo STRING, "
+        f"tipo_grafico STRING, dimensoes STRING, restricoes STRING, {audit})",
     ]
     for stmt in ddl:
         run_exec(stmt)  # SP
@@ -1298,6 +1350,17 @@ def list_dashboards() -> pd.DataFrame:
     return run_query(
         f"SELECT id, dominio_id, subdominio_id, nome, descricao, url, icone, "
         f"coalesce(ativo,true) AS ativo FROM {_cad('dashboards')} ORDER BY nome"
+    )
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_termos_negocio() -> pd.DataFrame:
+    return run_query(
+        f"SELECT id, tipo, nome, objetivo, observacoes, palavras_chave, macroprocesso, "
+        f"dominio_id, subdominio_id, data_owner, data_steward, "
+        f"rotulo_seguranca, rotulo_privacidade, nivel_apuracao, unidade, "
+        f"variaveis_utilizadas, fonte_variavel, memoria_calculo, tipo_grafico, "
+        f"dimensoes, restricoes FROM {_ont('termos_negocio')} ORDER BY nome"
     )
 
 
@@ -1422,6 +1485,7 @@ def _clear_cad_caches() -> None:
     for f in (
         list_dominios, list_subdominios, list_stewards, list_permissoes,
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
+        list_termos_negocio,
     ):
         try:
             f.clear()
@@ -1444,6 +1508,335 @@ def _show_cad_feedback() -> None:
 def _count(sql: str) -> int:
     df = run_query(sql)
     return int(df.iloc[0, 0]) if not df.empty else 0
+
+
+# ---------------------------------------------------------------------------
+# Assistente de Governança (chat com IA)
+# ---------------------------------------------------------------------------
+# Painel de chat com function-calling sobre os dados que o próprio app já
+# expõe (tags, comentários, cadastros, backlog, auditoria). v1 é SOMENTE
+# LEITURA: o assistente explica/consulta, mas quem aplica tag ou grava
+# comentário continua sendo o usuário pela tela normal — evita dar poder de
+# escrita ao LLM antes de validar o comportamento dele em produção.
+
+_DF_ROW_CAP = 200  # teto de linhas por resultado de tool, pra não estourar o contexto do modelo
+
+
+def _df_records(df: pd.DataFrame, cap: int = _DF_ROW_CAP) -> list[dict]:
+    return df.head(cap).to_dict("records")
+
+
+ASSISTANT_SYSTEM_PROMPT = """Você é o assistente do app de Governança de Dados — Unity Catalog.
+
+Você ajuda usuários de negócio e da governança a entender e consultar o que já
+está registrado no app: tags governadas e comentários aplicados em tabelas e
+colunas do Unity Catalog, os cadastros de domínios/sub-domínios/data stewards/
+dashboards, o glossário de termos de negócio e indicadores, os padrões que
+classificam uma coluna como dado pessoal, o backlog de aprovação de tags e os
+logs de auditoria.
+
+Regras importantes:
+- Você é SOMENTE CONSULTA. Você não aplica tag, não grava comentário, não
+  cadastra/edita termo de negócio e não aprova/rejeita item de backlog — se o
+  usuário pedir uma dessas ações, explique que ele mesmo faz isso pela tela do
+  app (Governança, Cadastros → Termos de Negócio, ou Aprovações → Backlog) e,
+  se ajudar, oriente o caminho.
+- Use as ferramentas disponíveis para responder com dados reais em vez de
+  chutar. Se uma pergunta pedir dados de uma tabela específica, peça
+  catalog/schema/table se o usuário não tiver informado.
+- Se não tiver uma ferramenta ou dado que cubra a pergunta, diga claramente
+  que não tem essa informação em vez de inventar.
+- Responda em português, de forma direta e objetiva.
+"""
+
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "tags_e_comentarios_da_tabela",
+            "description": (
+                "Comentário da tabela e, para cada coluna, seu comentário e as tags "
+                "governadas aplicadas. Requer catalog/schema/table exatos."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "catalog": {"type": "string"},
+                    "schema": {"type": "string"},
+                    "table": {"type": "string"},
+                },
+                "required": ["catalog", "schema", "table"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tags_governadas_disponiveis",
+            "description": "Catálogo de tags governadas (Governed Tags) e seus valores permitidos.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dominios_e_subdominios",
+            "description": "Domínios e sub-domínios cadastrados no app.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "data_stewards",
+            "description": "Data stewards cadastrados, com o domínio/sub-domínio de cada um.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dashboards_cadastrados",
+            "description": "Dashboards (AI/BI) cadastrados no app, com domínio/sub-domínio.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "padroes_de_dado_pessoal",
+            "description": "Padrões (palavras-chave) que classificam uma coluna como dado pessoal.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "termos_de_negocio",
+            "description": (
+                "Glossário de termos de negócio e indicadores cadastrados: nome, "
+                "objetivo, domínio/sub-domínio, data owner/steward, rótulos de "
+                "segurança/privacidade e, para indicadores, variáveis, fórmula "
+                "(memória de cálculo), tipo de gráfico e dimensões."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "backlog_de_aprovacao_de_tags",
+            "description": "Itens do backlog de aprovação de tags de dado pessoal.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pendente", "aprovado", "rejeitado"],
+                        "description": "Filtra por status. Omitido = todos.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_auditoria",
+            "description": "Log de auditoria (mais recentes primeiro) de comentários ou de tags alterados.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tipo": {"type": "string", "enum": ["comentarios", "tags"]},
+                    "limit": {"type": "integer", "description": "Máximo de registros (padrão 20, teto 100)."},
+                },
+                "required": ["tipo"],
+            },
+        },
+    },
+]
+
+
+def _execute_tool(name: str, args: dict, user: str) -> dict:
+    """Executa uma tool e devolve um dict serializável (lista de records ou erro)."""
+    try:
+        if name == "tags_e_comentarios_da_tabela":
+            catalog, schema, table = args["catalog"], args["schema"], args["table"]
+            columns = get_columns(user, catalog, schema, table)
+            applied_tags = get_applied_column_tags(user, catalog, schema, table)
+            comment = get_table_comment(user, catalog, schema, table)
+            return {
+                "comentario_da_tabela": comment,
+                "colunas": [
+                    {
+                        "coluna": c.name,
+                        "tipo": c.data_type,
+                        "comentario": c.comment,
+                        "tags": applied_tags.get(c.name, {}),
+                    }
+                    for c in columns
+                ],
+            }
+        if name == "tags_governadas_disponiveis":
+            return {"tags_governadas": get_governed_tags()}
+        if name == "dominios_e_subdominios":
+            return {
+                "dominios": _df_records(list_dominios()),
+                "subdominios": _df_records(list_subdominios()),
+            }
+        if name == "data_stewards":
+            return {"data_stewards": _df_records(list_stewards())}
+        if name == "dashboards_cadastrados":
+            return {"dashboards": _df_records(list_dashboards())}
+        if name == "padroes_de_dado_pessoal":
+            return {"padroes_de_dado_pessoal": _df_records(list_padroes_dado_pessoal())}
+        if name == "termos_de_negocio":
+            return {"termos_de_negocio": _df_records(list_termos_negocio())}
+        if name == "backlog_de_aprovacao_de_tags":
+            return {"backlog": _df_records(list_tag_backlog(args.get("status")))}
+        if name == "log_auditoria":
+            limit = min(int(args.get("limit") or 20), 100)
+            if args.get("tipo") == "tags":
+                return {"log_tags": _df_records(list_log_tags(limit), cap=limit)}
+            return {"log_comentarios": _df_records(list_log_comentarios(limit), cap=limit)}
+        return {"erro": f"Ferramenta desconhecida: {name}"}
+    except Exception as exc:
+        return {"erro": str(exc)}
+
+
+def _extract_text(content) -> str:
+    """Normaliza ``message.content`` para texto puro.
+
+    A maioria dos modelos devolve uma string simples, mas alguns (ex.: GPT
+    OSS via AI Gateway) devolvem uma lista de blocos — inclusive um bloco
+    ``reasoning`` com o raciocínio interno, que NÃO deve aparecer pro
+    usuário. Aqui pegamos só os blocos ``text``.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+            if block_type != "text":
+                continue
+            text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    return str(content) if content else ""
+
+
+def run_assistant_turn(user_text: str, user: str) -> str:
+    """Processa uma pergunta do usuário no painel do assistente e devolve a resposta final.
+
+    Faz o loop de tool-calling localmente (até MAX_ITERATIONS idas e vindas);
+    só a mensagem final do assistente é persistida no histórico da sessão —
+    as mensagens de tool call ficam só dentro deste loop.
+    """
+    MAX_ITERATIONS = 6
+    try:
+        client = get_llm_client()
+    except Exception as exc:
+        return f"Não consegui me conectar ao assistente de IA: {exc}"
+
+    history = [
+        {"role": m["role"], "content": m["content"]}
+        for m in st.session_state.get("chat_messages", [])
+    ]
+    messages = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}]
+
+    for _ in range(MAX_ITERATIONS):
+        try:
+            response = client.chat.completions.create(
+                model=LLM_ENDPOINT,
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+                max_tokens=1500,
+            )
+        except Exception as exc:
+            return f"O assistente de IA falhou ao responder: {exc}"
+
+        msg = response.choices[0].message
+        clean_content = _extract_text(msg.content)
+        if not msg.tool_calls:
+            return clean_content or "(sem resposta)"
+
+        import json as _json
+
+        messages.append({
+            "role": "assistant",
+            "content": clean_content or None,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ],
+        })
+        for tc in msg.tool_calls:
+            args = _json.loads(tc.function.arguments) if tc.function.arguments else {}
+            result = _execute_tool(tc.function.name, args, user)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": _json.dumps(result, default=str, ensure_ascii=False),
+            })
+
+    return (
+        f"Não consegui concluir em {MAX_ITERATIONS} passos — tente uma pergunta mais "
+        "simples ou dividida em partes menores."
+    )
+
+
+def render_assistant_panel(user: str) -> None:
+    st.markdown("### 🤖 Assistente de Governança")
+    if not LLM_ENABLED or not LLM_ENDPOINT:
+        st.info("Assistente de IA não configurado (`LLM_ENABLED`/`LLM_ENDPOINT`).")
+        return
+    st.caption("Respostas geradas por IA — confira antes de agir. Só consulta; não aplica tag/comentário.")
+
+    if "chat_messages" not in st.session_state:
+        st.session_state["chat_messages"] = []
+
+    if st.button("🧹 Nova conversa", use_container_width=True):
+        st.session_state["chat_messages"] = []
+        st.rerun()
+
+    def _ask(question: str) -> None:
+        # Chama o assistente ANTES de gravar a pergunta em chat_messages: o
+        # histórico usado como contexto (run_assistant_turn) é o que já está
+        # em chat_messages, e a pergunta atual é adicionada às mensagens só
+        # dentro da função — gravar aqui antes duplicaria a última pergunta.
+        with st.spinner("Consultando…"):
+            answer = run_assistant_turn(question, user)
+        st.session_state["chat_messages"].append({"role": "user", "content": question})
+        st.session_state["chat_messages"].append({"role": "assistant", "content": answer})
+        st.rerun()
+
+    history_box = st.container(height=420)
+    with history_box:
+        for m in st.session_state["chat_messages"]:
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+
+    if not st.session_state["chat_messages"]:
+        st.caption("Sugestões:")
+        for label in (
+            "Quais domínios existem?",
+            "Quais termos de negócio e indicadores estão cadastrados?",
+            "O que está pendente no backlog de aprovação de tags?",
+            "Quem são os data stewards cadastrados?",
+        ):
+            if st.button(label, use_container_width=True, key=f"assist_qp_{label}"):
+                _ask(label)
+
+    prompt = st.chat_input("Pergunte ao assistente…")
+    if prompt:
+        _ask(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -1907,6 +2300,205 @@ def page_padroes_dado_pessoal() -> None:
         if st.button(f"🗑️ Excluir padrão '{cur['padrao']}'"):
             run_exec(f"DELETE FROM {_cad('padroes_dado_pessoal')} WHERE id = {int(cur['id'])}")
             _finish_write("Padrão excluído.")
+
+
+_NIVEL_APURACAO_OPTIONS = ["", "Diário", "Semanal", "Mensal", "Trimestral", "Semestral", "Anual", "Sob demanda"]
+_TERMO_TIPO_OPTIONS = ["Termo", "Indicador"]
+
+
+def page_termos_negocio() -> None:
+    st.title("📖 Termos de Negócio")
+    st.caption(
+        "Glossário de termos de negócio e indicadores. Os campos de indicador "
+        "(variáveis, fonte, memória de cálculo, tipo de gráfico, dimensões) ficam "
+        "sempre visíveis — só preencha quando o registro for um **Indicador**."
+    )
+    _show_cad_feedback()
+    role = st.session_state.get("role", "leitor")
+    user = st.session_state.get("user", "")
+
+    doms = list_dominios().to_dict("records")
+    subs = list_subdominios().to_dict("records")
+    stewards = list_stewards().to_dict("records")
+    dom_nome = {d["id"]: d["nome"] for d in doms}
+    sub_nome = {s["id"]: s["nome"] for s in subs}
+    try:
+        governed_tags = get_governed_tags()
+    except Exception:
+        governed_tags = {}
+    seguranca_opts = [""] + governed_tags.get("seguranca", [])
+    privacidade_opts = [""] + governed_tags.get("privacidade", [])
+
+    termos = list_termos_negocio()
+    show = termos.copy()
+    if not show.empty:
+        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "—") if pd.notna(i) else "—")
+    st.dataframe(
+        (show.rename(columns={
+            "tipo": "Tipo", "nome": "Nome", "data_owner": "Data Owner",
+            "nivel_apuracao": "Nível de Apuração",
+        })[["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner", "Nível de Apuração"]]
+         if not show.empty else show),
+        use_container_width=True, hide_index=True,
+    )
+
+    if not can_edit(role):
+        st.info("Seu perfil é **leitor** — visualização apenas.")
+        return
+    if not doms:
+        st.warning("Cadastre um **Domínio** primeiro.")
+        return
+
+    recs = termos.to_dict("records")
+    opts = ["(novo)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
+    st.divider()
+    st.markdown("#### Adicionar / editar")
+    sel = st.selectbox("Registro", options=opts, key="term_sel")
+    editing = sel != "(novo)"
+    cur = recs[opts.index(sel) - 1] if editing else {
+        "id": None, "tipo": "Termo", "nome": "", "objetivo": "", "observacoes": "",
+        "palavras_chave": "", "macroprocesso": "", "dominio_id": None, "subdominio_id": None,
+        "data_owner": "", "data_steward": "", "rotulo_seguranca": "", "rotulo_privacidade": "",
+        "nivel_apuracao": "", "unidade": "", "variaveis_utilizadas": "", "fonte_variavel": "",
+        "memoria_calculo": "", "tipo_grafico": "", "dimensoes": "", "restricoes": "",
+    }
+
+    # Domínio/sub-domínio e a busca de data owner ficam FORA do form (reativos),
+    # pra filtrar sub-domínio e steward conforme o domínio escolhido — igual
+    # `page_dashboards`/`page_stewards`.
+    dom_ids = [d["id"] for d in doms]
+    dom_idx = dom_ids.index(cur["dominio_id"]) if editing and cur["dominio_id"] in dom_ids else 0
+    dom_id = st.selectbox(
+        "Domínio de dados *", options=dom_ids, index=dom_idx,
+        format_func=lambda i: dom_nome.get(i, i), key="term_dom",
+    )
+    sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id]
+    sub_options = [None] + sub_ids_all
+    cur_sub = cur.get("subdominio_id")
+    sub_idx = sub_options.index(cur_sub) if editing and cur_sub in sub_options else 0
+    sub_id = st.selectbox(
+        "Sub-domínio", options=sub_options, index=sub_idx, key="term_sub",
+        format_func=lambda i: "(nenhum)" if i is None else sub_nome.get(i, i),
+    )
+
+    dom_stewards = [
+        s for s in stewards if s["dominio_id"] == dom_id and (sub_id is None or s["subdominio_id"] == sub_id)
+    ]
+    if dom_stewards:
+        steward_opts = ["(nenhum)"] + [f'{s["nome"]} <{s["email"]}>' for s in dom_stewards]
+        cur_steward_idx = steward_opts.index(cur["data_steward"]) if editing and cur.get("data_steward") in steward_opts else 0
+        data_steward = st.selectbox("Data steward", options=steward_opts, index=cur_steward_idx, key="term_steward")
+        data_steward = "" if data_steward == "(nenhum)" else data_steward
+    else:
+        st.caption("Nenhum steward cadastrado para esse domínio/sub-domínio — cadastre em Data Stewards, se necessário.")
+        data_steward = st.text_input("Data steward (texto livre)", value=cur.get("data_steward") or "", key="term_steward_txt")
+
+    users = list_users_for_search()
+    owner_manual = st.toggle(
+        "✍️ Informar data owner manualmente", value=not users, disabled=not users, key="term_owner_manual",
+    )
+    if users and not owner_manual:
+        term_owner = st.text_input("🔍 Buscar data owner (nome ou e-mail)", key="term_owner_search")
+        data_owner = cur.get("data_owner") or ""
+        if term_owner:
+            t = term_owner.lower()
+            matches = [u for u in users if t in u["nome"].lower() or t in u["email"].lower()][:50]
+            if matches:
+                pick = st.selectbox(
+                    "Resultado", options=matches, format_func=lambda u: f'{u["nome"]} <{u["email"]}>',
+                    key="term_owner_pick",
+                )
+                data_owner = f'{pick["nome"]} <{pick["email"]}>'
+            else:
+                st.caption("Nenhum usuário encontrado — ative *Informar manualmente* acima.")
+    else:
+        data_owner = st.text_input("Data owner", value=cur.get("data_owner") or "", key="term_owner_txt")
+
+    with st.form("form_termo"):
+        c1, c2 = st.columns(2)
+        with c1:
+            tipo = st.selectbox(
+                "Tipo *", options=_TERMO_TIPO_OPTIONS,
+                index=_TERMO_TIPO_OPTIONS.index(cur["tipo"]) if cur.get("tipo") in _TERMO_TIPO_OPTIONS else 0,
+            )
+            nome = st.text_input("Nome do termo *", value=cur["nome"] or "")
+            macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "")
+        with c2:
+            palavras_chave = st.text_input("Palavras-chave", value=cur.get("palavras_chave") or "")
+            nivel_apuracao = st.selectbox(
+                "Nível de apuração", options=_NIVEL_APURACAO_OPTIONS,
+                index=_NIVEL_APURACAO_OPTIONS.index(cur["nivel_apuracao"]) if cur.get("nivel_apuracao") in _NIVEL_APURACAO_OPTIONS else 0,
+            )
+            unidade = st.text_input("Unidade", value=cur.get("unidade") or "", help="Ex.: R$, %, un, dias")
+        objetivo = st.text_area("Objetivo", value=cur.get("objetivo") or "")
+
+        st.markdown("##### Classificação")
+        c3, c4 = st.columns(2)
+        with c3:
+            rotulo_seguranca = st.selectbox(
+                "Rótulo de segurança", options=seguranca_opts,
+                index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
+            )
+        with c4:
+            rotulo_privacidade = st.selectbox(
+                "Rótulo de privacidade", options=privacidade_opts,
+                index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
+            )
+
+        st.markdown("##### Indicador (preencha quando `Tipo = Indicador`)")
+        variaveis_utilizadas = st.text_area("Variáveis utilizadas nos dados/contexto", value=cur.get("variaveis_utilizadas") or "")
+        fonte_variavel = st.text_input("Fonte da variável", value=cur.get("fonte_variavel") or "")
+        memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "")
+        c5, c6 = st.columns(2)
+        with c5:
+            tipo_grafico = st.text_input("Tipo de gráfico", value=cur.get("tipo_grafico") or "", help="Ex.: linha, barra, pizza, tabela")
+        with c6:
+            dimensoes = st.text_input("Dimensões usadas no indicador", value=cur.get("dimensoes") or "")
+        restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "")
+
+        observacoes = st.text_area("Observações", value=cur.get("observacoes") or "")
+        saved = st.form_submit_button("💾 Salvar", type="primary")
+
+    if saved:
+        nome = (nome or "").strip()
+        if not nome:
+            st.warning("Informe o nome do termo.")
+            return
+        sub_sql = "NULL" if sub_id is None else str(int(sub_id))
+        values = dict(
+            tipo=tipo, nome=nome, objetivo=objetivo, observacoes=observacoes,
+            palavras_chave=palavras_chave, macroprocesso=macroprocesso,
+            data_owner=data_owner, data_steward=data_steward,
+            rotulo_seguranca=rotulo_seguranca, rotulo_privacidade=rotulo_privacidade,
+            nivel_apuracao=nivel_apuracao, unidade=unidade,
+            variaveis_utilizadas=variaveis_utilizadas, fonte_variavel=fonte_variavel,
+            memoria_calculo=memoria_calculo, tipo_grafico=tipo_grafico,
+            dimensoes=dimensoes, restricoes=restricoes,
+        )
+        if editing:
+            set_clause = ", ".join(f"{col} = {q_str(val)}" for col, val in values.items())
+            run_exec(
+                f"UPDATE {_ont('termos_negocio')} SET {set_clause}, "
+                f"dominio_id = {int(dom_id)}, subdominio_id = {sub_sql}, "
+                f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                f"WHERE id = {int(cur['id'])}"
+            )
+        else:
+            cols = ["dominio_id", "subdominio_id", *values.keys(), "criado_em", "criado_por"]
+            vals_sql = [str(int(dom_id)), sub_sql, *[q_str(v) for v in values.values()], "current_timestamp()", q_str(user)]
+            run_exec(
+                f"INSERT INTO {_ont('termos_negocio')} ({', '.join(cols)}) "
+                f"VALUES ({', '.join(vals_sql)})"
+            )
+        _finish_write("Termo de negócio salvo.")
+
+    if editing:
+        st.divider()
+        st.markdown("#### Excluir")
+        if st.button(f"🗑️ Excluir termo '{cur['nome']}'"):
+            run_exec(f"DELETE FROM {_ont('termos_negocio')} WHERE id = {int(cur['id'])}")
+            _finish_write("Termo de negócio excluído.")
 
 
 def page_permissoes() -> None:
@@ -2395,6 +2987,7 @@ def main() -> None:
             st.Page(page_stewards, title="Data Stewards", icon="🧑‍💼"),
             st.Page(page_dashboards, title="Dashboards", icon="📊"),
             st.Page(page_padroes_dado_pessoal, title="Padrões de Dado Pessoal", icon="🧬"),
+            st.Page(page_termos_negocio, title="Termos de Negócio", icon="📖"),
         ]
         if is_admin:  # gestão de usuários/permissões é sempre admin-only
             cadastros.append(st.Page(page_permissoes, title="Usuários & Permissões", icon="🔒"))
@@ -2411,7 +3004,17 @@ def main() -> None:
             st.Page(page_log_tags, title="Log de tags", icon="🏷️"),
         ]
     nav = st.navigation(pages)
-    nav.run()
+
+    show_assistant = LLM_ENABLED and st.session_state.get("show_assistant", True)
+    if show_assistant:
+        main_col, chat_col = st.columns([2.3, 1], gap="large")
+    else:
+        main_col, chat_col = st.container(), None
+    with main_col:
+        nav.run()
+    if chat_col is not None:
+        with chat_col:
+            render_assistant_panel(user)
 
 
 if __name__ == "__main__":

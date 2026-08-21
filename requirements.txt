@@ -17,3 +17,7 @@ starlette>=0.46,<1.4.0
 # Statement Execution API (SDK) para o conector clássico. O app usa o SDK
 # por padrão, mas mantemos a dependência disponível para extensões.
 databricks-sql-connector>=3.0
+
+# Cliente OpenAI-compatible usado pelo painel "Assistente de Governança" para
+# falar com o Unity AI Gateway (system.ai / model services em UC).
+openai>=1.0
