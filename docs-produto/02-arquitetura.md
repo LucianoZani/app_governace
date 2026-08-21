@@ -57,19 +57,13 @@ do `ALTER TABLE … TAGS`, dentro do próprio fluxo de escrita da Governança.
 ## Onde entra o Unity AI Gateway (Assistente de IA)
 
 O módulo de Assistente de Governança é **opcional** (`LLM_ENABLED=false` por
-padrão) e usa o **Unity AI Gateway** do próprio workspace de destino — não um
-serviço externo. O app monta um cliente compatível com a API da OpenAI
-apontando para `{host-do-workspace}/ai-gateway/mlflow/v1`, autenticado com um
-token OAuth do service principal obtido na hora (não cacheado, pois o token
-expira). O modelo consultado é identificado por `LLM_ENDPOINT` — o **nome
-completo** (`catalogo.schema.nome_do_modelo`) de um **model service**
-registrado no Unity Catalog daquele workspace, servido pelo AI Gateway.
-
-> Isso significa que o modelo de IA usado **não é fixo no código** — cada
-> instalação aponta para o model service que existir (ou for criado) no seu
-> próprio workspace. Ver pré-requisitos em
-> [03. Pré-requisitos](./03-pre-requisitos.md) e detalhes em
-> [09. Módulo — Assistente de Governança (IA)](./09-modulo-assistente-ia.md).
+padrão) e roda como service principal, consultando o **Unity AI Gateway** do
+próprio workspace — nunca um serviço externo por padrão. O modelo de IA
+**não é fixo no código**: cada instalação aponta para o seu próprio
+**model service** (`LLM_ENDPOINT`), registrado no Unity Catalog daquele
+workspace. Pré-requisitos em [03. Pré-requisitos](./03-pre-requisitos.md);
+arquitetura completa do backend e passo a passo de criação do model service
+em [09. Módulo — Assistente de Governança (IA)](./09-modulo-assistente-ia.md).
 
 ## Diagrama de componentes
 

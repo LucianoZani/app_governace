@@ -61,12 +61,10 @@ acesso — sem `CREATE TABLE`, o app falha no bootstrap.
 ### Se o módulo Assistente de IA estiver habilitado
 
 O SP precisa do privilégio **`EXECUTE`** no model service referenciado em
-`LLM_ENDPOINT` — concedido na aba **Permissões** do próprio model service
-(**IA/ML → Gateway de IA → Modelos → `<nome>` → Permissões → Conceder**), não
-num schema/catálogo. O assistente reaproveita as mesmas leituras do SP acima
-para as tools — não precisa de grants adicionais além do necessário para
-elas. Detalhes de como o model service é criado em
-[09. Módulo — Assistente de IA](./09-modulo-assistente-ia.md).
+`LLM_ENDPOINT` (concedido no próprio objeto do model service, não num
+schema/catálogo) — reaproveita as mesmas leituras do SP acima para as tools,
+sem grants adicionais. Onde conceder e como o model service é criado:
+[09. Módulo — Assistente de IA](./09-modulo-assistente-ia.md#habilitando-numa-instala%C3%A7%C3%A3o-nova).
 
 ### Se `DATABRICKS_ACCOUNT_ID` estiver definido
 

@@ -18,8 +18,7 @@ Confirme tudo isto **antes** de começar a instalação ([04. Instalação](./04
 | Requisito | Por quê |
 |---|---|
 | **Unity AI Gateway disponível** no workspace | Nem toda edição/plano de Databricks tem o AI Gateway habilitado. Confirme em **IA/ML → Gateway de IA** (ou com o time de plataforma) antes de prometer esse módulo ao cliente. |
-| **Um model service criado no Unity Catalog** (`catalogo.schema.nome`) apontando pra um modelo | O app não traz modelo nenhum embutido — ele aponta para um model service registrado no UC. Criado em **IA/ML → Gateway de IA → Modelos → + Model**; na aba **Roteamento** do model service, aponte pra um dos **"Frontier models hosted by Databricks"** já disponíveis por padrão (`system.ai.*`, pay-per-token — ex.: `system.ai.gpt-oss-120b`), pra um endpoint de Model Serving próprio, ou (aba **Fornecedores**) pra um provedor externo com API key. Passo detalhado em [09. Módulo — Assistente de IA](./09-modulo-assistente-ia.md#habilitando-numa-instala%C3%A7%C3%A3o-nova). |
-| **Grant `EXECUTE` do service principal no model service** | Sem `EXECUTE` no objeto do model service (aba **Permissões** dele → Conceder), o assistente falha ao chamar o endpoint mesmo com `LLM_ENABLED=true` (ver [06. Permissões](./06-permissoes.md)). |
+| **Um model service criado no Unity Catalog**, com `EXECUTE` concedido ao service principal do app | O app não traz modelo nenhum embutido — aponta pra um model service registrado no UC (ex.: um modelo já hospedado pela própria Databricks, `system.ai.*`, sem provisionar nada). Passo a passo completo de criação e do grant em [09. Módulo — Assistente de IA](./09-modulo-assistente-ia.md#habilitando-numa-instala%C3%A7%C3%A3o-nova). |
 
 > Sem AI Gateway/modelo disponível, **não é bloqueante para o resto do app**:
 > deixe `LLM_ENABLED=false` e os módulos de Governança, Cadastros e Glossário
