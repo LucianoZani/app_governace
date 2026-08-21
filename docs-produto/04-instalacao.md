@@ -88,7 +88,9 @@ máquina de quem instala.
 ### Opção A — Databricks Asset Bundle (recomendado pra instalações repetíveis)
 
 O repositório já traz um `databricks.yml`. Edite o(s) `workspace.host` em
-`targets` pro workspace de destino e rode:
+`targets` pro workspace de destino (os valores no arquivo são placeholders
+tipo `<workspace-dev>.azuredatabricks.net` — **não funcionam como estão**) e
+rode:
 
 ```bash
 databricks bundle validate -t prd
@@ -100,6 +102,14 @@ Isso substitui os três comandos da Opção B por um só, e dá pra manter
 continua sendo a fonte das variáveis de ambiente — ajuste-o (Passo 3) antes
 de rodar `bundle deploy`, exatamente como nas outras opções. Requer CLI do
 Databricks autenticada (ver [03. Pré-requisitos](./03-pre-requisitos.md)).
+
+> ⚠️ **Sempre rode `databricks bundle validate -t <target>` antes do
+> primeiro deploy num cliente novo**, já com o host real no lugar do
+> placeholder e a CLI autenticada nesse workspace. Sem credencial, o comando
+> falha com erro de autenticação mesmo que o `databricks.yml` esteja correto
+> — isso não substitui o validate; só confirma que o arquivo em si não tem
+> erro de sintaxe/schema. O `validate` de verdade confere se o workspace, os
+> recursos e as permissões batem antes de qualquer coisa ser criada.
 
 ### Opção B — CLI do Databricks, comandos soltos
 
