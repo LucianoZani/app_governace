@@ -17,9 +17,9 @@ Confirme tudo isto **antes** de começar a instalação ([04. Instalação](./04
 
 | Requisito | Por quê |
 |---|---|
-| **Unity AI Gateway disponível** no workspace | Nem toda edição/plano de Databricks tem o AI Gateway habilitado. Confirme em **Serving** → **AI Gateway** (ou com o time de plataforma) antes de prometer esse módulo ao cliente. |
-| **Ao menos um modelo hospedado** acessível via AI Gateway (endpoint tipo *model serving*/*foundation model*) | O app não traz modelo nenhum embutido — ele aponta para um model service já existente no workspace (`catalogo.schema.nome_do_modelo`). Se o workspace não tiver nenhum modelo hospedado nem acesso a *foundation models* do provedor, este módulo específico não vai funcionar (o resto do app funciona normalmente). |
-| **Permissão do service principal para invocar o model service** | Grant de uso do endpoint de serving para o SP do app (ver [06. Permissões](./06-permissoes.md)). |
+| **Unity AI Gateway disponível** no workspace | Nem toda edição/plano de Databricks tem o AI Gateway habilitado. Confirme em **IA/ML → Gateway de IA** (ou com o time de plataforma) antes de prometer esse módulo ao cliente. |
+| **Um model service criado no Unity Catalog** (`catalogo.schema.nome`) apontando pra um modelo | O app não traz modelo nenhum embutido — ele aponta para um model service registrado no UC. Criado em **IA/ML → Gateway de IA → Modelos → + Model**; na aba **Roteamento** do model service, aponte pra um dos **"Frontier models hosted by Databricks"** já disponíveis por padrão (`system.ai.*`, pay-per-token — ex.: `system.ai.gpt-oss-120b`), pra um endpoint de Model Serving próprio, ou (aba **Fornecedores**) pra um provedor externo com API key. Passo detalhado em [09. Módulo — Assistente de IA](./09-modulo-assistente-ia.md#habilitando-numa-instala%C3%A7%C3%A3o-nova). |
+| **Grant `EXECUTE` do service principal no model service** | Sem `EXECUTE` no objeto do model service (aba **Permissões** dele → Conceder), o assistente falha ao chamar o endpoint mesmo com `LLM_ENABLED=true` (ver [06. Permissões](./06-permissoes.md)). |
 
 > Sem AI Gateway/modelo disponível, **não é bloqueante para o resto do app**:
 > deixe `LLM_ENABLED=false` e os módulos de Governança, Cadastros e Glossário

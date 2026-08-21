@@ -73,9 +73,32 @@ não coberto — ver [12. Troubleshooting](./12-troubleshooting.md).
 
 1. Confirme os pré-requisitos em [03. Pré-requisitos](./03-pre-requisitos.md)
    (AI Gateway disponível + pelo menos um modelo hospedado no workspace).
-2. Registre/identifique o model service (`catalogo.schema.nome`) que o AI
-   Gateway vai servir.
-3. Conceda ao service principal do app permissão para invocar esse endpoint.
+2. **Crie o model service no Unity Catalog** (é isso que dá o nome de 3
+   níveis usado em `LLM_ENDPOINT`):
+   - No menu lateral do workspace: **IA/ML → Gateway de IA** → aba
+     **Modelos** → **+ Model**.
+   - Dê um nome (ex.: `assistente_governanca`) e escolha o catálogo/schema
+     onde ele vai ficar registrado — pode ser o mesmo schema de cadastros do
+     app (`CADASTRO_CATALOG.CADASTRO_SCHEMA_<env>`) ou outro de sua escolha;
+     o nome completo (`catalogo.schema.nome`) é o valor que vai em
+     `LLM_ENDPOINT`.
+   - Na aba **Roteamento** do model service criado, defina o grupo
+     **Principal** — o modelo que será tentado primeiro. Workspaces com
+     Unity Catalog geralmente já têm alguns **"Frontier models hosted by
+     Databricks"** disponíveis por padrão em `system.ai.*` (pay-per-token,
+     sem provisionar nada) — ex.: `system.ai.gpt-oss-120b`,
+     `system.ai.llama-4-maverick`. Também é possível apontar para um modelo
+     próprio (Model Serving) ou, via a aba **Fornecedores**, configurar um
+     provedor externo com API key própria. Dá pra adicionar um modelo de
+     **fallback** além do principal.
+   - Opcional (aba **Visão geral** → "Configuração de governança"):
+     monitoramento de uso, tabela de inferência, limites de taxa e políticas
+     (guardrails) — nenhum é obrigatório pro módulo funcionar.
+3. **Conceda `EXECUTE`** no model service para o service principal do app —
+   aba **Permissões** do model service → **Conceder** → selecione o SP →
+   marque `EXECUTE` ("dá a capacidade de usar uma função, modelo ou
+   serviço"). Sem isso, o assistente falha ao chamar o endpoint mesmo com
+   `LLM_ENABLED=true`.
 4. No `app.yaml`, defina `LLM_ENABLED=true` e `LLM_ENDPOINT=<catalogo.schema.nome>`.
 5. Redeploy. Teste com uma pergunta simples ("quais domínios estão
    cadastrados?") antes de liberar para os usuários finais.
@@ -83,3 +106,10 @@ não coberto — ver [12. Troubleshooting](./12-troubleshooting.md).
 Sem `LLM_ENABLED=true` **e** `LLM_ENDPOINT` preenchido, o painel mostra
 apenas "Assistente de IA não configurado" — o resto do app funciona
 normalmente.
+
+> Nota de privacidade: por padrão (`system.ai.*`), o modelo é hospedado pelo
+> próprio Databricks dentro do perímetro de dados do workspace — a pergunta e
+> o resultado das tools não saem para um provedor externo. Isso só muda se a
+> instalação configurar deliberadamente um **provedor externo** (aba
+> Fornecedores) como modelo principal ou de fallback — nesse caso, avalie com
+> o time de segurança/privacidade do cliente antes de habilitar.
