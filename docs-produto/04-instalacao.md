@@ -82,10 +82,26 @@ vai governar, além dos schemas do Passo 2.
 
 ## Passo 5 — Deploy
 
-Dois caminhos possíveis — escolha conforme o que estiver disponível na
+Três caminhos possíveis — escolha conforme o que estiver disponível na
 máquina de quem instala.
 
-### Opção A — CLI do Databricks (mais rápido)
+### Opção A — Databricks Asset Bundle (recomendado pra instalações repetíveis)
+
+O repositório já traz um `databricks.yml`. Edite o(s) `workspace.host` em
+`targets` pro workspace de destino e rode:
+
+```bash
+databricks bundle validate -t prd
+databricks bundle deploy   -t prd
+```
+
+Isso substitui os três comandos da Opção B por um só, e dá pra manter
+`targets` separados por ambiente/cliente no mesmo bundle. O `app.yaml`
+continua sendo a fonte das variáveis de ambiente — ajuste-o (Passo 3) antes
+de rodar `bundle deploy`, exatamente como nas outras opções. Requer CLI do
+Databricks autenticada (ver [03. Pré-requisitos](./03-pre-requisitos.md)).
+
+### Opção B — CLI do Databricks, comandos soltos
 
 ```bash
 databricks apps create governanca-unity-catalog
@@ -102,7 +118,7 @@ databricks apps deploy governanca-unity-catalog \
 > pode apagar o código do app no próximo deploy dessas pipelines. Use uma
 > pasta dedicada ao app.
 
-### Opção B — Workspace UI manual (sem CLI autenticada)
+### Opção C — Workspace UI manual (sem CLI autenticada)
 
 1. No workspace, vá em **Apps** → **Create app** e aponte o *source code
    path* para uma pasta do Workspace onde você importou os arquivos do

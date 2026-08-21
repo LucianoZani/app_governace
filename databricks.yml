@@ -1,0 +1,42 @@
+# Databricks Asset Bundle para o app `governanca-unity-catalog`.
+#
+# Uso:
+#   databricks bundle validate -t <target>
+#   databricks bundle deploy   -t <target>
+#
+# Isso substitui o fluxo manual (`databricks apps create` + `databricks sync`
+# + `databricks apps deploy`, ver docs-produto/04-instalacao.md) por um único
+# comando. As variáveis de ambiente do app continuam vindo do `app.yaml` —
+# ajuste-o pro workspace de destino antes de rodar `bundle deploy`, exatamente
+# como no fluxo manual. O bundle não substitui essa etapa, só empacota os
+# comandos de deploy.
+#
+# Edite os hosts em `targets` (abaixo) pro workspace de cada instalação antes
+# de usar.
+
+bundle:
+  name: governanca-unity-catalog
+
+variables:
+  app_name:
+    description: "Nome do Databricks App"
+    default: governanca-unity-catalog
+
+resources:
+  apps:
+    governanca_unity_catalog:
+      name: ${var.app_name}
+      description: "Governança & Cadastros — Unity Catalog"
+      source_code_path: .
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<workspace-dev>.azuredatabricks.net
+
+  prd:
+    mode: production
+    workspace:
+      host: https://<workspace-prd>.azuredatabricks.net
