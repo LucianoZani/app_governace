@@ -12,10 +12,26 @@ métrica significa, quem é dono dela e como é calculada.
 | **Indicador** | Cadastros | criar/editar/excluir **indicadores** (KPIs); exige papel `admin`/`editor` |
 | **Termos de Negócio** (consulta) | Glossário | busca aberta e card de detalhe somente leitura sobre termos **e** indicadores; sempre visível |
 
-As duas telas de edição compartilham o mesmo formulário base (nome, objetivo,
-domínio/sub-domínio, data owner/steward, palavras-chave, macroprocesso,
-classificação de segurança/privacidade, observações). A tela **Indicador**
-acrescenta os campos exclusivos de KPI.
+As duas telas de edição compartilham o mesmo formulário base (nome,
+domínio/sub-domínio, data owner/steward, macroprocesso, palavras-chave e a
+definição/objetivo). A tela **Indicador** acrescenta a classificação de
+segurança/privacidade, observações e os campos exclusivos de KPI.
+
+### Formulário de Glossário de Negócio
+
+Enxuto: **Nome do termo**, **Macroprocesso**, **Palavras-chave**, **Definição**,
+mais Domínio / Sub-domínio / Data Owner / Data Steward. Não tem classificação
+de segurança/privacidade nem observações (isso é só de Indicador). O campo
+antes chamado "Objetivo" aparece aqui como **Definição** (a coluna no banco
+continua `objetivo`).
+
+### Palavras-chave em "chips"
+
+Nas duas telas, o campo **Palavras-chave** funciona por adição: digite uma
+palavra e tecle **Enter** — ela vira um chip abaixo do campo e o campo limpa
+para a próxima. Clique no `✕` de um chip para removê-lo. É gravado na coluna
+`palavras_chave` como texto separado por vírgula (compatível com registros
+antigos).
 
 ## Campos exclusivos de Indicador
 

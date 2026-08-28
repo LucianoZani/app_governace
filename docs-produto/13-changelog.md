@@ -3,6 +3,16 @@
 Histórico de versões do produto, com base no histórico de commits do
 repositório (`git log`).
 
+## v1.5 — 2026-08-28
+
+- **Glossário de Negócio enxuto** — o formulário perdeu a seção de
+  Classificação (rótulos de segurança/privacidade) e o campo Observações
+  (que passam a ser exclusivos de **Indicador**). "Objetivo" virou
+  **Definição** na tela e no card de detalhe (coluna no banco segue `objetivo`).
+- **Palavras-chave em "chips"** (Glossário e Indicador) — digita + Enter
+  adiciona a palavra abaixo do campo e limpa o campo; `✕` remove. Gravado
+  como CSV em `palavras_chave` (compatível com registros antigos).
+
 ## v1.4 — 2026-08-28
 
 - **Glossário de Negócio e Indicador em telas/tabelas separadas** — a tela

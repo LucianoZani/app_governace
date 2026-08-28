@@ -2628,6 +2628,50 @@ def _select_pessoa_cadastrada(
     return st.text_input(f"{label} (texto livre)", value=cur_value or "", key=f"{key_prefix}_txt")
 
 
+def _kw_list_key(kp: str) -> str:
+    return f"{kp}_kw_list"
+
+
+def _sync_keywords_state(kp: str, record_key: str, initial_csv: str) -> None:
+    """(Re)carrega a lista de palavras-chave quando o registro em edição muda —
+    pra não misturar as palavras de um termo com as de outro."""
+    marker = f"{kp}_kw_for"
+    if st.session_state.get(marker) != record_key:
+        st.session_state[_kw_list_key(kp)] = [
+            w.strip() for w in (initial_csv or "").split(",") if w.strip()
+        ]
+        st.session_state[marker] = record_key
+        st.session_state[f"{kp}_kw_input"] = ""
+
+
+def _add_keyword(kp: str) -> None:
+    """Callback do Enter no campo de palavra-chave: adiciona o texto à lista e
+    limpa o campo pra digitar a próxima."""
+    val = (st.session_state.get(f"{kp}_kw_input") or "").strip()
+    lst = st.session_state.setdefault(_kw_list_key(kp), [])
+    if val and val.lower() not in {w.lower() for w in lst}:
+        lst.append(val)
+    st.session_state[f"{kp}_kw_input"] = ""
+
+
+def _render_keyword_chips(kp: str) -> list[str]:
+    """Mostra as palavras-chave já adicionadas como 'chips' com um ✕ pra
+    remover. Devolve a lista atual (pra gravar como CSV no save)."""
+    lst: list[str] = st.session_state.get(_kw_list_key(kp), [])
+    if lst:
+        st.caption("Palavras-chave adicionadas (clique para remover):")
+        per_row = min(len(lst), 4)
+        cols = st.columns(per_row)
+        for i, w in enumerate(list(lst)):
+            with cols[i % per_row]:
+                if st.button(f"✕ {w}", key=f"{kp}_kw_rm_{i}", use_container_width=True):
+                    lst.pop(i)
+                    st.rerun()
+    else:
+        st.caption("Nenhuma palavra-chave adicionada ainda.")
+    return lst
+
+
 def _render_glossario_editor(
     *, is_indicador: bool, ont_table: str, list_fn, titulo: str, icone: str,
 ) -> None:
@@ -2641,8 +2685,8 @@ def _render_glossario_editor(
         "apuração, memória de cálculo e as tabelas/colunas que compõem a "
         "dimensão e a métrica."
         if is_indicador else
-        "Glossário de termos de negócio: nome, objetivo, dono e classificação "
-        "de segurança/privacidade."
+        "Glossário de termos de negócio: nome, definição, palavras-chave, "
+        "domínio e responsáveis (Data Owner / Steward)."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
@@ -2723,6 +2767,9 @@ def _render_glossario_editor(
         "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward",
     )
 
+    record_key = str(cur.get("id")) if editing else "novo"
+    _sync_keywords_state(kp, record_key, cur.get("palavras_chave") or "")
+
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
@@ -2732,28 +2779,37 @@ def _render_glossario_editor(
         )
         macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "", key=f"{kp}_macro")
     with c2:
-        palavras_chave = st.text_input("Palavras-chave", value=cur.get("palavras_chave") or "", key=f"{kp}_kw")
-    objetivo = st.text_area("Objetivo", value=cur.get("objetivo") or "", key=f"{kp}_obj")
-
-    st.markdown("##### Classificação")
-    c3, c4 = st.columns(2)
-    with c3:
-        rotulo_seguranca = st.selectbox(
-            "Rótulo de segurança", options=seguranca_opts,
-            index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
-            key=f"{kp}_seg",
+        st.text_input(
+            "Palavras-chave", key=f"{kp}_kw_input",
+            placeholder="digite uma palavra e tecle Enter",
+            on_change=_add_keyword, args=(kp,),
         )
-    with c4:
-        rotulo_privacidade = st.selectbox(
-            "Rótulo de privacidade", options=privacidade_opts,
-            index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
-            key=f"{kp}_priv",
-        )
+    kw_list = _render_keyword_chips(kp)
+    objetivo = st.text_area(
+        "Objetivo" if is_indicador else "Definição",
+        value=cur.get("objetivo") or "", key=f"{kp}_obj",
+    )
 
+    rotulo_seguranca = rotulo_privacidade = observacoes = ""
     variaveis_utilizadas = memoria_calculo = restricoes = unidade = nivel_apuracao = ""
     dim_items: list[dict] = []
     met_items: list[dict] = []
     if is_indicador:
+        st.markdown("##### Classificação")
+        c3, c4 = st.columns(2)
+        with c3:
+            rotulo_seguranca = st.selectbox(
+                "Rótulo de segurança", options=seguranca_opts,
+                index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
+                key=f"{kp}_seg",
+            )
+        with c4:
+            rotulo_privacidade = st.selectbox(
+                "Rótulo de privacidade", options=privacidade_opts,
+                index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
+                key=f"{kp}_priv",
+            )
+
         st.markdown("##### Indicador")
         c5, c6 = st.columns(2)
         with c5:
@@ -2779,7 +2835,6 @@ def _render_glossario_editor(
         variaveis_utilizadas = st.text_area("Variáveis utilizadas", value=cur.get("variaveis_utilizadas") or "", key="term_vars")
         restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "", key="term_restr")
 
-        record_key = str(cur.get("id")) if editing else "novo"
         _sync_tabela_picker_state("dim", record_key, _parse_tabelas_json(cur.get("dimensao_tabelas")))
         _sync_tabela_picker_state("met", record_key, _parse_tabelas_json(cur.get("metrica_tabelas")))
 
@@ -2789,8 +2844,7 @@ def _render_glossario_editor(
         met_items = _render_tabela_picker(user, "met")
 
         memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "", key="term_memoria")
-
-    observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key=f"{kp}_obs")
+        observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key=f"{kp}_obs")
 
     rotulo_item = "indicador" if is_indicador else "termo"
     st.divider()
@@ -2801,16 +2855,18 @@ def _render_glossario_editor(
         if not nome:
             st.warning(f"Informe o nome do {rotulo_item}.")
             return
+        palavras_chave = ", ".join(kw_list)
         dom_sql = "NULL" if dom_id is None else str(int(dom_id))
         sub_sql = "NULL" if sub_id is None else str(int(sub_id))
         values = dict(
-            tipo=tipo, nome=nome, objetivo=objetivo, observacoes=observacoes,
+            tipo=tipo, nome=nome, objetivo=objetivo,
             palavras_chave=palavras_chave, macroprocesso=macroprocesso,
             data_owner=data_owner, data_steward=data_steward,
-            rotulo_seguranca=rotulo_seguranca, rotulo_privacidade=rotulo_privacidade,
         )
         if is_indicador:
             values.update(
+                observacoes=observacoes,
+                rotulo_seguranca=rotulo_seguranca, rotulo_privacidade=rotulo_privacidade,
                 nivel_apuracao=nivel_apuracao, unidade=unidade,
                 variaveis_utilizadas=variaveis_utilizadas, memoria_calculo=memoria_calculo,
                 restricoes=restricoes,
@@ -2837,6 +2893,8 @@ def _render_glossario_editor(
         for kind in ("dim", "met"):
             st.session_state.pop(f"term_{kind}_items", None)
             st.session_state.pop(f"term_{kind}_items_for", None)
+        st.session_state.pop(_kw_list_key(kp), None)
+        st.session_state.pop(f"{kp}_kw_for", None)
         _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} salvo.")
 
     if editing:
@@ -2880,15 +2938,14 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
     if cur.get("palavras_chave"):
         st.markdown(f"**Palavras-chave:** {cur['palavras_chave']}")
     if cur.get("objetivo"):
-        st.markdown("**Objetivo**")
+        st.markdown("**Objetivo**" if is_indicador else "**Definição**")
         st.write(cur["objetivo"])
 
-    st.markdown(
-        f"**Rótulo de segurança:** {cur.get('rotulo_seguranca') or '—'}  |  "
-        f"**Rótulo de privacidade:** {cur.get('rotulo_privacidade') or '—'}"
-    )
-
     if is_indicador:
+        st.markdown(
+            f"**Rótulo de segurança:** {cur.get('rotulo_seguranca') or '—'}  |  "
+            f"**Rótulo de privacidade:** {cur.get('rotulo_privacidade') or '—'}"
+        )
         st.markdown("#### Indicador")
         c1, c2 = st.columns(2)
         c1.markdown(f"**Unidade**\n\n{cur.get('unidade') or '—'}")
@@ -2939,7 +2996,7 @@ def page_consulta_termos() -> None:
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         busca = st.text_input(
-            "Buscar", placeholder="nome, palavra-chave ou objetivo…", key="cons_busca",
+            "Buscar", placeholder="nome, palavra-chave, definição/objetivo…", key="cons_busca",
         )
     with c2:
         tipo_f = st.selectbox("Tipo", options=["(todos)"] + _TERMO_TIPO_OPTIONS, key="cons_tipo")
