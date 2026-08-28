@@ -92,7 +92,7 @@ Flags por usuário (além do papel), editáveis em Usuários & Permissões:
 | `ver_cadastros` | Grupo **Cadastros** no menu, para não-admin. |
 | `ver_logs` | Grupo **Auditoria** (logs de comentário/tag), para não-admin. |
 | `aprovador_tags` | Tela de aprovação do backlog de tags de dado pessoal, para não-admin. |
-| `power_steward` | **Não libera nada** — é só um rótulo. Marca o usuário como *Power Steward*, fazendo-o aparecer no dropdown **Power Steward** da tela Indicador ([10. Glossário](./10-modulo-glossario-termos.md)). |
+| `power_steward` | **Não libera tela nenhuma** — é um rótulo. Marca o usuário como *Power Steward*: (a) ele aparece no dropdown **Power Steward** da tela Indicador ([10. Glossário](./10-modulo-glossario-termos.md)); (b) a tela **Início** mostra o bloco "Meus indicadores" com os indicadores onde ele é o Power Steward. Lido em `get_user_perms`. |
 
 O admin inicial é semeado automaticamente a partir de `SEED_ADMIN_EMAIL` na
 primeira execução, se a tabela de permissões estiver vazia.

@@ -1378,30 +1378,40 @@ def _as_bool(v) -> bool:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_user_perms(email: str) -> dict:
-    """Papel + flags de acesso do usuário. Admin implica ver tudo.
+    """Papel + flags de acesso do usuário. Admin implica ver tudo (menos
+    `power_steward`, que é sempre lido do banco — admin não vira Power Steward
+    automaticamente).
 
-    Retorna ``{"papel", "ver_logs", "ver_cadastros", "aprovador_tags"}``. Para
-    não-admin, as flags vêm das colunas homônimas de ``permissoes`` (default
-    False). Admin sempre True em todas — enxerga Cadastros, Auditoria e o
-    backlog de aprovação de tags independentemente das flags.
+    Retorna ``{"papel", "ver_logs", "ver_cadastros", "aprovador_tags",
+    "power_steward"}``. Para não-admin, as flags vêm das colunas homônimas de
+    ``permissoes`` (default False).
     """
-    base = {"papel": "leitor", "ver_logs": False, "ver_cadastros": False, "aprovador_tags": False}
+    base = {
+        "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
+        "aprovador_tags": False, "power_steward": False,
+    }
     if not email:
         return base
     df = run_query(
-        f"SELECT papel, ver_logs, ver_cadastros, aprovador_tags FROM {_cad('permissoes')} "
-        f"WHERE lower(email) = {q_str(email.lower())} LIMIT 1"
+        f"SELECT papel, ver_logs, ver_cadastros, aprovador_tags, power_steward "
+        f"FROM {_cad('permissoes')} WHERE lower(email) = {q_str(email.lower())} LIMIT 1"
     )
     if df.empty:
         return base
-    papel = (df.iloc[0]["papel"] or "leitor").strip().lower()
+    row = df.iloc[0]
+    papel = (row["papel"] or "leitor").strip().lower()
+    power_steward = _as_bool(row["power_steward"])
     if papel == "admin":
-        return {"papel": "admin", "ver_logs": True, "ver_cadastros": True, "aprovador_tags": True}
+        return {
+            "papel": "admin", "ver_logs": True, "ver_cadastros": True,
+            "aprovador_tags": True, "power_steward": power_steward,
+        }
     return {
         "papel": papel,
-        "ver_logs": _as_bool(df.iloc[0]["ver_logs"]),
-        "ver_cadastros": _as_bool(df.iloc[0]["ver_cadastros"]),
-        "aprovador_tags": _as_bool(df.iloc[0]["aprovador_tags"]),
+        "ver_logs": _as_bool(row["ver_logs"]),
+        "ver_cadastros": _as_bool(row["ver_cadastros"]),
+        "aprovador_tags": _as_bool(row["aprovador_tags"]),
+        "power_steward": power_steward,
     }
 
 
@@ -1605,7 +1615,7 @@ def _clear_cad_caches() -> None:
     for f in (
         list_dominios, list_subdominios, list_stewards, list_permissoes,
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
-        list_glossario_negocio, list_indicadores, list_termos_negocio,
+        list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
     ):
         try:
             f.clear()
@@ -3556,6 +3566,282 @@ def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Tela de início — painel adaptado por papel/flags
+# ---------------------------------------------------------------------------
+
+_INICIO_CSS = """
+<style>
+.inicio-chip {
+    display: inline-block; font-size: 12px; font-weight: 500;
+    padding: 2px 9px; margin: 0 4px 4px 0; border-radius: 999px;
+    background: #eef0fb; color: #3b4aa0;
+}
+.inicio-chip.leitor { background: #f0f2f6; color: #5c6575; }
+/* destaque âmbar no card de pendências */
+.st-key-inicio_pend { border-left: 3px solid #d98324 !important; }
+</style>
+"""
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _novos_na_semana() -> dict:
+    """Quantos registros de cada cadastro foram criados nos últimos 7 dias —
+    para os `delta` dos `st.metric` da tela de início."""
+    wk = "criado_em >= current_timestamp() - INTERVAL 7 DAYS"
+    try:
+        return {
+            "dominios": _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE {wk}"),
+            "subdominios": _count(f"SELECT count(*) FROM {_cad('subdominios')} WHERE {wk}"),
+            "stewards": _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE {wk}"),
+            "termos": _count(f"SELECT count(*) FROM {_ont('glossario_negocio')} WHERE {wk}"),
+            "indicadores": _count(f"SELECT count(*) FROM {_ont('indicadores')} WHERE {wk}"),
+        }
+    except Exception:
+        return {}
+
+
+def _lacunas_cadastro(doms, subs, stew, glo, ind) -> list[tuple]:
+    """(contagem, texto, chave_nav) das lacunas de cadastro — tudo em memória."""
+    stw = stew[stew["tipo"] == "Steward"] if not stew.empty else stew
+    dom_ok = set(stw["dominio_id"].dropna().tolist()) if not stw.empty else set()
+    sub_ok = set(stw["subdominio_id"].dropna().tolist()) if not stw.empty else set()
+    out: list[tuple] = []
+    n = sum(1 for d in doms.to_dict("records") if d["id"] not in dom_ok)
+    if n:
+        out.append((n, f"{n} domínio(s) sem Data Steward", "stewards"))
+    n = sum(1 for s in subs.to_dict("records") if s["id"] not in sub_ok)
+    if n:
+        out.append((n, f"{n} sub-domínio(s) sem Data Steward", "stewards"))
+    n = sum(1 for r in ind.to_dict("records") if not str(r.get("power_steward") or "").strip())
+    if n:
+        out.append((n, f"{n} indicador(es) sem Power Steward", "indicadores"))
+    n = sum(1 for r in glo.to_dict("records") if not str(r.get("objetivo") or "").strip())
+    if n:
+        out.append((n, f"{n} termo(s) sem definição", "glossario_edit"))
+    n = sum(1 for r in ind.to_dict("records") + glo.to_dict("records") if not pd.notna(r.get("dominio_id")))
+    if n:
+        out.append((n, f"{n} termo(s)/indicador(es) sem domínio", None))
+    return out
+
+
+def _meus_indicadores(ind, email: str) -> list[dict]:
+    if ind.empty:
+        return []
+    e = (email or "").lower()
+    return [r for r in ind.to_dict("records") if str(r.get("power_steward") or "").lower() == e]
+
+
+def _fmt_ts(v) -> str:
+    ts = pd.to_datetime(v, errors="coerce")
+    return ts.strftime("%d/%m %H:%M") if pd.notna(ts) else str(v)[:16]
+
+
+def _atividade_recente(limit: int = 8) -> tuple[list[str], int]:
+    """Últimas alterações de comentário + tag (texto pronto) e a contagem da
+    semana."""
+    try:
+        lc = list_log_comentarios(40)
+        lt = list_log_tags(40)
+    except Exception:
+        return [], 0
+
+    def _obj(r) -> str:
+        return ".".join(
+            str(x) for x in (r.get("catalogo"), r.get("db_schema"), r.get("tabela"), r.get("coluna")) if x
+        )
+
+    linhas: list[tuple] = []
+    for r in lc.to_dict("records"):
+        linhas.append((r.get("criado_em"),
+                       f"comentário {r.get('acao', '')} em `{_obj(r)}` — {r.get('usuario', '')}"))
+    for r in lt.to_dict("records"):
+        linhas.append((r.get("criado_em"),
+                       f"tag `{r.get('tag_chave', '')}` {r.get('acao', '')} em `{_obj(r)}` — {r.get('usuario', '')}"))
+    df = pd.DataFrame(linhas, columns=["ts", "txt"])
+    if not df.empty:
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+        df = df.sort_values("ts", ascending=False, na_position="last")
+    itens = [f"`{_fmt_ts(ts)}` · {txt}" for ts, txt in zip(df["ts"], df["txt"])][:limit] if not df.empty else []
+
+    try:
+        n_wk = _count(
+            f"SELECT (SELECT count(*) FROM {_cad('log_comentarios')} "
+            f"WHERE criado_em >= current_timestamp() - INTERVAL 7 DAYS) + "
+            f"(SELECT count(*) FROM {_cad('log_tags')} "
+            f"WHERE criado_em >= current_timestamp() - INTERVAL 7 DAYS)"
+        )
+    except Exception:
+        n_wk = 0
+    return itens, n_wk
+
+
+def _atalho(chave: str, label: str, icon: str | None = None) -> None:
+    """Renderiza um atalho (page_link) só se a página existe pro papel atual."""
+    pg = st.session_state.get("_nav_pages", {}).get(chave)
+    if pg is not None:
+        st.page_link(pg, label=label, icon=icon)
+
+
+def page_inicio() -> None:
+    st.markdown(_INICIO_CSS, unsafe_allow_html=True)
+    user = st.session_state.get("user", "")
+    role = st.session_state.get("role", "leitor")
+    perms = st.session_state.get("perms", {}) or {}
+    is_admin = role == "admin"
+    can_aprov = is_admin or bool(perms.get("aprovador_tags"))
+    can_cad = is_admin or bool(perms.get("ver_cadastros"))
+    can_logs = is_admin or bool(perms.get("ver_logs"))
+    is_power = bool(perms.get("power_steward"))
+
+    try:
+        doms, subs, stew = list_dominios(), list_subdominios(), list_stewards()
+        glo, ind, dash = list_glossario_negocio(), list_indicadores(), list_dashboards()
+    except Exception as exc:
+        st.error(f"Não foi possível carregar o painel: {exc}")
+        return
+
+    # ---- Cabeçalho ----
+    nome = user.split("@")[0] if "@" in user else (user or "")
+    st.title(f"🧭 Olá{', ' + nome if nome else ''}")
+
+    if is_admin:
+        chips = ["admin"] + (["Power Steward"] if is_power else [])
+    else:
+        chips = [role] + [
+            lbl for flag, lbl in (
+                ("power_steward", "Power Steward"),
+                ("aprovador_tags", "Aprovador de tags"),
+                ("ver_cadastros", "Ver cadastros"),
+                ("ver_logs", "Ver logs"),
+            ) if perms.get(flag)
+        ]
+    cls = "inicio-chip leitor" if role == "leitor" else "inicio-chip"
+    st.markdown("".join(f'<span class="{cls}">{c}</span>' for c in chips), unsafe_allow_html=True)
+
+    n_pend = len(list_tag_backlog("pendente")) if can_aprov else 0
+    lacunas = _lacunas_cadastro(doms, subs, stew, glo, ind) if can_cad else []
+    n_lac = sum(x[0] for x in lacunas)
+    meus_ind = _meus_indicadores(ind, user) if (is_power or is_admin) else []
+
+    if is_admin:
+        partes = []
+        if n_pend:
+            partes.append(f"**{n_pend}** tag(s) aguardando aprovação")
+        if n_lac:
+            partes.append(f"**{n_lac}** lacuna(s) de cadastro")
+        st.caption("Você tem " + (" e ".join(partes) + "." if partes else "tudo em dia por aqui. 🎉"))
+    elif can_aprov:
+        st.caption(f"Você tem **{n_pend}** tag(s) aguardando sua aprovação."
+                   if n_pend else "Nenhuma tag aguardando aprovação. 🎉")
+    elif is_power:
+        st.caption(f"Você é Power Steward de **{len(meus_ind)}** indicador(es).")
+    else:
+        st.caption("Acesso de leitura — use o glossário e o Assistente para explorar o que já existe.")
+
+    st.divider()
+
+    # ---- Números ----
+    novos = _novos_na_semana()
+    kpis = [
+        ("Domínios", len(doms), novos.get("dominios")),
+        ("Sub-domínios", len(subs), novos.get("subdominios")),
+        ("Owners & Stewards", len(stew), novos.get("stewards")),
+        ("Termos de negócio", len(glo), novos.get("termos")),
+        ("Indicadores", len(ind), novos.get("indicadores")),
+        ("Dashboards", len(dash), None),
+    ]
+    linha = st.columns(3) + st.columns(3)
+    for col, (lbl, val, delta) in zip(linha, kpis):
+        col.metric(lbl, val, delta=(f"+{delta} na semana" if delta else None))
+
+    st.write("")
+    esq, dir_ = st.columns(2)
+
+    # ---- Pendências de aprovação ----
+    if can_aprov:
+        with esq.container(border=True, key="inicio_pend"):
+            st.markdown(f"##### ⏳ Pendências de aprovação  ·  {n_pend}")
+            if n_pend == 0:
+                st.caption("Nada pendente. 🎉")
+            else:
+                pend = list_tag_backlog("pendente").head(5).to_dict("records")
+                for r in pend:
+                    obj = ".".join(str(x) for x in (r.get("catalogo"), r.get("db_schema"),
+                                                    r.get("tabela"), r.get("coluna")) if x)
+                    st.markdown(
+                        f"`{obj}` — tag `{r.get('tag_chave', '')}` → \"{r.get('valor_novo', '')}\"  \n"
+                        f"<small>por {r.get('solicitante', '')} · {_fmt_ts(r.get('criado_em'))}</small>",
+                        unsafe_allow_html=True,
+                    )
+            _atalho("backlog", "Abrir backlog de aprovação", "✅")
+
+    # ---- Saúde dos cadastros ----
+    if can_cad:
+        with dir_.container(border=True):
+            st.markdown("##### 🩺 Saúde dos cadastros")
+            if not lacunas:
+                st.markdown("✅ Cadastros em dia.")
+            else:
+                for cnt, txt, chave in lacunas:
+                    st.markdown(f"⚠️ &nbsp;{txt}", unsafe_allow_html=True)
+                    if chave:
+                        _atalho(chave, "corrigir")
+
+    # ---- Meus indicadores ----
+    if is_power or (is_admin and meus_ind):
+        with esq.container(border=True):
+            st.markdown("##### 📈 Meus indicadores")
+            if not meus_ind:
+                st.caption("Você ainda não é Power Steward de nenhum indicador.")
+            else:
+                dom_nome = {d["id"]: d["nome"] for d in doms.to_dict("records")}
+                for r in meus_ind[:6]:
+                    dm = dom_nome.get(r.get("dominio_id"), "—")
+                    niv = r.get("nivel_apuracao") or "—"
+                    st.markdown(f"**{r['nome']}** · {dm} · {niv}")
+            _atalho("indicadores", "Abrir Indicadores", "📈")
+
+    # ---- Atividade recente ----
+    if can_logs:
+        with dir_.container(border=True):
+            itens, n_wk = _atividade_recente(8)
+            st.markdown(f"##### 🕓 Atividade recente  ·  {n_wk} esta semana")
+            if not itens:
+                st.caption("Ainda não há alterações registradas.")
+            else:
+                for it in itens:
+                    st.markdown(f"- {it}")
+            _atalho("auditoria", "Ver relatório de auditoria", "📋")
+
+    # ---- Leitor: comece por aqui ----
+    if role == "leitor":
+        with st.container(border=True):
+            st.markdown("##### 👋 Comece por aqui")
+            st.markdown(
+                f"- **{len(glo)}** termos e **{len(ind)}** indicadores documentados no glossário."
+            )
+            _atalho("consulta", "Consultar o glossário", "📚")
+            if LLM_ENABLED:
+                st.caption("Dúvidas? Pergunte ao **Assistente de Governança** no painel à direita.")
+
+    # ---- Atalhos ----
+    with st.container(border=True):
+        st.markdown("##### 🔗 Atalhos")
+        a, b, c = st.columns(3)
+        with a:
+            _atalho("governanca", "Aplicar governança numa tabela", "🏷️")
+            _atalho("consulta", "Consultar glossário", "📚")
+        with b:
+            if can_aprov:
+                _atalho("backlog", "Aprovar tags pendentes", "✅")
+            _atalho("indicadores", "Novo indicador", "📈")
+        with c:
+            _atalho("glossario_edit", "Novo termo de negócio", "📖")
+            if can_logs:
+                _atalho("auditoria", "Ver auditoria", "📋")
+
+
+# ---------------------------------------------------------------------------
 # Entrada / navegação
 # ---------------------------------------------------------------------------
 
@@ -3577,7 +3863,10 @@ def main() -> None:
     # Identidade do usuário (OBO) + papel/flags nos cadastros (RBAC).
     user = current_username()
     st.session_state["user"] = user
-    perms = {"papel": "leitor", "ver_logs": False, "ver_cadastros": False, "aprovador_tags": False}
+    perms = {
+        "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
+        "aprovador_tags": False, "power_steward": False,
+    }
     try:
         ensure_cadastro_tables()
         perms = get_user_perms(user)
@@ -3586,15 +3875,23 @@ def main() -> None:
     role = perms["papel"]
     is_admin = role == "admin"
     st.session_state["role"] = role
+    st.session_state["perms"] = perms
 
     render_sidebar()
     if st.session_state.get("cad_bootstrap_error"):
         st.sidebar.warning("Cadastros indisponíveis: " + st.session_state["cad_bootstrap_error"][:200])
 
+    # Páginas — algumas guardadas em `nav_pages` pros atalhos da tela de Início
+    # (só entram no dict se o papel permite, então os atalhos já respeitam o RBAC).
+    nav_pages: dict = {}
+    pg_inicio = st.Page(page_inicio, title="Início", icon="🧭", default=True)
+    pg_governanca = st.Page(page_governanca, title="Governança de Dados — Unity Catalog", icon="🏷️")
+    pg_consulta = st.Page(page_consulta_termos, title="Termos de Negócio", icon="📚")
+    nav_pages["governanca"] = pg_governanca
+    nav_pages["consulta"] = pg_consulta
+
     # Governança sempre visível. Cadastros/Auditoria conforme flags (admin vê tudo).
-    governanca = [
-        st.Page(page_governanca, title="Governança de Dados — Unity Catalog", icon="🏷️", default=True),
-    ]
+    governanca = [pg_governanca]
     try:
         for row in user_visible_dashboards(user, is_admin):
             governanca.append(
@@ -3605,34 +3902,39 @@ def main() -> None:
             )
     except Exception as exc:
         st.session_state.setdefault("cad_bootstrap_error", str(exc))
-    pages: dict = {}
+    pages: dict = {"Painel": [pg_inicio]}
     if is_admin or perms["ver_cadastros"]:
+        pg_stewards = st.Page(page_stewards, title="Data Owners & Stewards", icon="🧑‍💼")
+        pg_glossario_edit = st.Page(page_glossario_negocio, title="Glossário de Negócio", icon="📖")
+        pg_indicadores = st.Page(page_indicadores, title="Indicador", icon="📈")
+        nav_pages.update(stewards=pg_stewards, glossario_edit=pg_glossario_edit, indicadores=pg_indicadores)
         cadastros = [
             st.Page(page_dominios, title="Domínios", icon="🗂️"),
             st.Page(page_subdominios, title="Sub-domínios", icon="🗃️"),
-            st.Page(page_stewards, title="Data Owners & Stewards", icon="🧑‍💼"),
+            pg_stewards,
             st.Page(page_dashboards, title="Dashboards", icon="📊"),
             st.Page(page_padroes_dado_pessoal, title="Padrões de Dado Pessoal", icon="🧬"),
-            st.Page(page_glossario_negocio, title="Glossário de Negócio", icon="📖"),
-            st.Page(page_indicadores, title="Indicador", icon="📈"),
+            pg_glossario_edit,
+            pg_indicadores,
         ]
         if is_admin:  # gestão de usuários/permissões é sempre admin-only
             cadastros.append(st.Page(page_permissoes, title="Usuários & Permissões", icon="🔒"))
         pages["Cadastros"] = cadastros
     pages["Governança"] = governanca
-    pages["Glossário"] = [
-        st.Page(page_consulta_termos, title="Termos de Negócio", icon="📚"),
-    ]
+    pages["Glossário"] = [pg_consulta]
     if is_admin or perms["aprovador_tags"]:
-        pages["Aprovações"] = [
-            st.Page(page_tag_backlog, title="Backlog de Aprovação de Tags", icon="✅"),
-        ]
+        pg_backlog = st.Page(page_tag_backlog, title="Backlog de Aprovação de Tags", icon="✅")
+        nav_pages["backlog"] = pg_backlog
+        pages["Aprovações"] = [pg_backlog]
     if is_admin or perms["ver_logs"]:
+        pg_relatorio = st.Page(page_relatorio_auditoria, title="Relatório de Auditoria", icon="📋")
+        nav_pages["auditoria"] = pg_relatorio
         pages["Auditoria"] = [
-            st.Page(page_relatorio_auditoria, title="Relatório de Auditoria", icon="📋"),
+            pg_relatorio,
             st.Page(page_log_comentarios, title="Log de comentários", icon="📜"),
             st.Page(page_log_tags, title="Log de tags", icon="🏷️"),
         ]
+    st.session_state["_nav_pages"] = nav_pages
     nav = st.navigation(pages)
 
     nav.run()

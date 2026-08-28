@@ -8,6 +8,7 @@ descrito em [06. Permissões](./06-permissoes.md).
 
 | Grupo (menu) | Telas | Visível para |
 |---|---|---|
+| **Painel** | Início (painel adaptado por papel — ver [14. Tela — Início](./14-tela-inicio.md)) | sempre visível; é a tela default |
 | **Cadastros** | Domínios · Sub-domínios · Data Owners & Stewards · Dashboards · Padrões de Dado Pessoal · Glossário de Negócio · Indicador | admin, ou usuário com a flag `ver_cadastros` |
 | **Cadastros** (admin) | Usuários & Permissões | só admin |
 | **Governança** | Governança de Dados — Unity Catalog | sempre visível |

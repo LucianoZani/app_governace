@@ -3,6 +3,17 @@
 Histórico de versões do produto, com base no histórico de commits do
 repositório (`git log`).
 
+## v1.6 — 2026-08-28
+
+- **Tela de Início (painel)** — nova primeira tela do app (menu Painel →
+  Início, agora a default). Painel de orientação com blocos que aparecem
+  conforme o papel/flags: cabeçalho com resumo, faixa de números (`st.metric`
+  com delta da semana), pendências de aprovação, saúde dos cadastros
+  (lacunas), meus indicadores (Power Steward), atividade recente e atalhos.
+  Tudo a partir das listas já em cache — sem varredura de catálogo. Ver
+  [14. Tela — Início](./14-tela-inicio.md).
+- `get_user_perms` agora também devolve `power_steward`.
+
 ## v1.5 — 2026-08-28
 
 - **Glossário de Negócio enxuto** — o formulário perdeu a seção de

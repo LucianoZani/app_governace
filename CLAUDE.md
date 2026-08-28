@@ -73,6 +73,14 @@ própria UI do app (que lê como SP).
 
 ## Histórico de sessões / decisões
 
+- **2026-08-28** (fim) — Nova **tela de Início** (`page_inicio`, menu "Painel",
+  `default=True` — tirado de `page_governanca`). Painel adaptado por papel:
+  cabeçalho c/ resumo, `st.metric` (delta via `_novos_na_semana`), pendências
+  de aprovação, saúde dos cadastros (`_lacunas_cadastro`), meus indicadores
+  (Power Steward), atividade recente (`_atividade_recente`), atalhos
+  (`_atalho` + `st.session_state["_nav_pages"]`). `get_user_perms` passou a
+  devolver `power_steward`; `main()` grava `st.session_state["perms"]`. PoC
+  visual aprovada antes (artifact). Doc: `docs-produto/14-tela-inicio.md`.
 - **2026-08-28** (mais tarde) — Ajustes no glossário: **Glossário de Negócio**
   enxuto (sem Classificação/Observações — agora só de Indicador); "Objetivo" →
   **Definição** (coluna no banco segue `objetivo`). **Palavras-chave em chips**

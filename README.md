@@ -1,6 +1,7 @@
 # Governança & Cadastros — Unity Catalog (Databricks App)
 
-App Streamlit com quatro áreas complementares:
+App Streamlit com quatro áreas complementares, mais uma **tela de Início**
+(painel adaptado por papel — pendências acionáveis + panorama da governança):
 
 1. **Governança de Dados** — usuários de negócio aplicam/alteram **tags governadas**
    e **comentários** em colunas de tabelas do Unity Catalog, com amostra de dados,
