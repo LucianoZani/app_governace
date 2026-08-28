@@ -2670,28 +2670,7 @@ def _add_keyword(kp: str) -> None:
     st.session_state[f"{kp}_kw_input"] = ""
 
 
-def _sync_editor_fields(kp: str, record_key: str) -> None:
-    """Quando o registro selecionado no editor de glossário/indicador muda,
-    remove as keys dos widgets do formulário do session_state — assim eles
-    renascem com os valores do novo registro (o Streamlit prioriza o
-    session_state sobre `value`/`index` quando o widget tem key)."""
-    marker = f"{kp}_fields_for"
-    if st.session_state.get(marker) == record_key:
-        return
-    st.session_state[marker] = record_key
-    for suf in (
-        "dom", "sub", "owner_sel", "owner_txt", "steward_sel", "steward_txt",
-        "nome", "macro", "obj", "seg", "priv", "obs",
-    ):
-        st.session_state.pop(f"{kp}_{suf}", None)
-    for k in (
-        "ind_power_steward", "term_unidade", "term_unidade_custom",
-        "term_nivel", "term_vars", "term_restr", "term_memoria",
-    ):
-        st.session_state.pop(k, None)
-
-
-def _render_power_steward_select(cur_email: str) -> str:
+def _render_power_steward_select(cur_email: str, wkey: str) -> str:
     """Dropdown de Power Steward (tela Indicador). A lista vem dos usuários com
     a flag `power_steward` em Usuários & Permissões — mostra o nome, grava o
     e-mail. Opcional."""
@@ -2718,7 +2697,7 @@ def _render_power_steward_select(cur_email: str) -> str:
     idx = options.index(cur_email) if cur_email in options else 0
     picked = st.selectbox(
         "Power Steward", options=options, index=idx,
-        format_func=_label, key="ind_power_steward",
+        format_func=_label, key=wkey,
     )
     if not ps_emails:
         st.caption(
@@ -2816,11 +2795,13 @@ def _render_glossario_editor(
         "memoria_calculo": "", "restricoes": "", "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
     }
 
-    # Ao trocar o registro selecionado, limpa as keys dos widgets do form pra
-    # eles renascerem com os valores do novo registro (Streamlit prioriza o
-    # session_state sobre `value`/`index` quando o widget tem key).
+    # As keys dos widgets abaixo levam o id do registro (`_{rk}`): quando o
+    # usuário troca o "Registro", cada campo vira um widget novo e renasce com o
+    # valor do registro escolhido (o Streamlit prioriza o session_state sobre
+    # `value`/`index` quando a key não muda). Palavras-chave e os pickers de
+    # tabela têm sincronização própria (`_sync_*`).
     record_key = str(cur.get("id")) if editing else "novo"
-    _sync_editor_fields(kp, record_key)
+    rk = record_key
     _sync_keywords_state(kp, record_key, cur.get("palavras_chave") or "")
 
     # Todos os widgets ficam fora de st.form por causa do picker de tabelas/
@@ -2828,7 +2809,7 @@ def _render_glossario_editor(
     # catalog/schema/table (igual select_object/render_editor).
     power_steward = ""
     if is_indicador:
-        power_steward = _render_power_steward_select(cur.get("power_steward") or "")
+        power_steward = _render_power_steward_select(cur.get("power_steward") or "", f"ind_ps_{rk}")
 
     dom_ids = [d["id"] for d in doms]
     dom_options = [None] + dom_ids
@@ -2836,22 +2817,22 @@ def _render_glossario_editor(
     dom_idx = dom_options.index(cur_dom) if editing and cur_dom in dom_options else 0
     dom_id = st.selectbox(
         "Domínio de dados", options=dom_options, index=dom_idx,
-        format_func=lambda i: "(nenhum)" if i is None else dom_nome.get(i, i), key=f"{kp}_dom",
+        format_func=lambda i: "(nenhum)" if i is None else dom_nome.get(i, i), key=f"{kp}_dom_{rk}",
     )
     sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id] if dom_id is not None else []
     sub_options = [None] + sub_ids_all
     cur_sub = cur.get("subdominio_id")
     sub_idx = sub_options.index(cur_sub) if editing and cur_sub in sub_options else 0
     sub_id = st.selectbox(
-        "Sub-domínio", options=sub_options, index=sub_idx, key=f"{kp}_sub",
+        "Sub-domínio", options=sub_options, index=sub_idx, key=f"{kp}_sub_{rk}",
         format_func=lambda i: "(nenhum)" if i is None else sub_nome.get(i, i),
     )
 
     data_owner = _select_pessoa_cadastrada(
-        "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", f"{kp}_owner",
+        "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", f"{kp}_owner_{rk}",
     )
     data_steward = _select_pessoa_cadastrada(
-        "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward",
+        "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward_{rk}",
     )
 
     st.divider()
@@ -2859,9 +2840,9 @@ def _render_glossario_editor(
     with c1:
         nome = st.text_input(
             "Nome do indicador *" if is_indicador else "Nome do termo *",
-            value=cur["nome"] or "", key=f"{kp}_nome",
+            value=cur["nome"] or "", key=f"{kp}_nome_{rk}",
         )
-        macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "", key=f"{kp}_macro")
+        macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "", key=f"{kp}_macro_{rk}")
     with c2:
         st.text_input(
             "Palavras-chave", key=f"{kp}_kw_input",
@@ -2871,7 +2852,7 @@ def _render_glossario_editor(
     kw_list = _render_keyword_chips(kp)
     objetivo = st.text_area(
         "Objetivo" if is_indicador else "Definição",
-        value=cur.get("objetivo") or "", key=f"{kp}_obj",
+        value=cur.get("objetivo") or "", key=f"{kp}_obj_{rk}",
     )
 
     rotulo_seguranca = rotulo_privacidade = observacoes = ""
@@ -2885,13 +2866,13 @@ def _render_glossario_editor(
             rotulo_seguranca = st.selectbox(
                 "Rótulo de segurança", options=seguranca_opts,
                 index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
-                key=f"{kp}_seg",
+                key=f"{kp}_seg_{rk}",
             )
         with c4:
             rotulo_privacidade = st.selectbox(
                 "Rótulo de privacidade", options=privacidade_opts,
                 index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
-                key=f"{kp}_priv",
+                key=f"{kp}_priv_{rk}",
             )
 
         st.markdown("##### Indicador")
@@ -2900,13 +2881,13 @@ def _render_glossario_editor(
             default_unidade = cur.get("unidade") or ""
             unidade_opts = _UNIDADE_OPTIONS if default_unidade in _UNIDADE_OPTIONS else [default_unidade] + _UNIDADE_OPTIONS
             unidade_sel = st.selectbox(
-                "Unidade", options=unidade_opts, index=unidade_opts.index(default_unidade), key="term_unidade",
+                "Unidade", options=unidade_opts, index=unidade_opts.index(default_unidade), key=f"term_unidade_{rk}",
             )
             if unidade_sel == "Outra…":
                 unidade = st.text_input(
                     "Unidade (digite)",
                     value="" if default_unidade in _UNIDADE_OPTIONS else default_unidade,
-                    key="term_unidade_custom",
+                    key=f"term_unidade_custom_{rk}",
                 )
             else:
                 unidade = unidade_sel
@@ -2914,10 +2895,10 @@ def _render_glossario_editor(
             nivel_apuracao = st.selectbox(
                 "Nível de apuração", options=_NIVEL_APURACAO_OPTIONS,
                 index=_NIVEL_APURACAO_OPTIONS.index(cur["nivel_apuracao"]) if cur.get("nivel_apuracao") in _NIVEL_APURACAO_OPTIONS else 0,
-                key="term_nivel",
+                key=f"term_nivel_{rk}",
             )
-        variaveis_utilizadas = st.text_area("Variáveis utilizadas", value=cur.get("variaveis_utilizadas") or "", key="term_vars")
-        restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "", key="term_restr")
+        variaveis_utilizadas = st.text_area("Variáveis utilizadas", value=cur.get("variaveis_utilizadas") or "", key=f"term_vars_{rk}")
+        restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "", key=f"term_restr_{rk}")
 
         _sync_tabela_picker_state("dim", record_key, _parse_tabelas_json(cur.get("dimensao_tabelas")))
         _sync_tabela_picker_state("met", record_key, _parse_tabelas_json(cur.get("metrica_tabelas")))
@@ -2927,8 +2908,8 @@ def _render_glossario_editor(
         st.markdown("###### Métrica — tabelas e colunas que formam a métrica")
         met_items = _render_tabela_picker(user, "met")
 
-        memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "", key="term_memoria")
-        observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key=f"{kp}_obs")
+        memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "", key=f"term_memoria_{rk}")
+        observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key=f"{kp}_obs_{rk}")
 
     rotulo_item = "indicador" if is_indicador else "termo"
     st.divider()
@@ -2980,7 +2961,14 @@ def _render_glossario_editor(
             st.session_state.pop(f"term_{kind}_items_for", None)
         st.session_state.pop(_kw_list_key(kp), None)
         st.session_state.pop(f"{kp}_kw_for", None)
-        st.session_state.pop(f"{kp}_fields_for", None)
+        # Se foi um "novo", zera os campos (keys sufixadas com `_novo`).
+        if not editing:
+            for suf in ("dom", "sub", "owner_sel", "owner_txt", "steward_sel",
+                        "steward_txt", "nome", "macro", "obj", "seg", "priv", "obs"):
+                st.session_state.pop(f"{kp}_{suf}_novo", None)
+            for base in ("ind_ps", "term_unidade", "term_unidade_custom",
+                         "term_nivel", "term_vars", "term_restr", "term_memoria"):
+                st.session_state.pop(f"{base}_novo", None)
         _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} salvo.")
 
     if editing:
