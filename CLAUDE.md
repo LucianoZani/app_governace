@@ -73,6 +73,16 @@ própria UI do app (que lê como SP).
 
 ## Histórico de sessões / decisões
 
+- **2026-08-28** (mais tarde) — Ajustes no glossário: **Glossário de Negócio**
+  enxuto (sem Classificação/Observações — agora só de Indicador); "Objetivo" →
+  **Definição** (coluna no banco segue `objetivo`). **Palavras-chave em chips**
+  (digita+Enter). **Power Steward** no Indicador: nova flag `power_steward` em
+  `permissoes` (checkbox em Usuários & Permissões) + nova coluna
+  `power_steward` em `indicadores`; primeiro campo do form, dropdown dos
+  usuários com a flag. Tela vazia mostra "Nenhum … cadastrado ainda.".
+  **Bug antigo corrigido**: o editor de glossário/indicador não recarregava os
+  campos ao trocar o "Registro" — agora as keys dos widgets levam o id do
+  registro (`_{rk}`). Commits até `872159b`.
 - **2026-08-28** — Módulo de glossário **dividido em duas telas/tabelas**:
   "Termos de Negócio (edição)" (com seletor de tipo) virou **Glossário de
   Negócio** (`apps.ontologia_<env>.glossario_negocio`) e **Indicador**
