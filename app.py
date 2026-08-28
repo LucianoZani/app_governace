@@ -3636,6 +3636,12 @@ def _fmt_ts(v) -> str:
     return ts.strftime("%d/%m %H:%M") if pd.notna(ts) else str(v)[:16]
 
 
+_ACAO_PART = {
+    "aplicar": "aplicada", "inserir": "adicionado", "alterar": "alterado",
+    "remover": "removida", "aprovar": "aprovada", "rejeitar": "rejeitada",
+}
+
+
 def _atividade_recente(limit: int = 8) -> tuple[list[str], int]:
     """Últimas alterações de comentário + tag (texto pronto) e a contagem da
     semana."""
@@ -3650,13 +3656,19 @@ def _atividade_recente(limit: int = 8) -> tuple[list[str], int]:
             str(x) for x in (r.get("catalogo"), r.get("db_schema"), r.get("tabela"), r.get("coluna")) if x
         )
 
+    def _quem(r) -> str:
+        return str(r.get("usuario") or "").split("@")[0]
+
+    def _verbo(r) -> str:
+        return _ACAO_PART.get(str(r.get("acao") or "").lower(), str(r.get("acao") or ""))
+
     linhas: list[tuple] = []
     for r in lc.to_dict("records"):
         linhas.append((r.get("criado_em"),
-                       f"comentário {r.get('acao', '')} em `{_obj(r)}` — {r.get('usuario', '')}"))
+                       f"comentário {_verbo(r)} em `{_obj(r)}` — {_quem(r)}"))
     for r in lt.to_dict("records"):
         linhas.append((r.get("criado_em"),
-                       f"tag `{r.get('tag_chave', '')}` {r.get('acao', '')} em `{_obj(r)}` — {r.get('usuario', '')}"))
+                       f"tag `{r.get('tag_chave', '')}` {_verbo(r)} em `{_obj(r)}` — {_quem(r)}"))
     df = pd.DataFrame(linhas, columns=["ts", "txt"])
     if not df.empty:
         df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
@@ -3701,8 +3713,14 @@ def page_inicio() -> None:
         return
 
     # ---- Cabeçalho ----
-    nome = user.split("@")[0] if "@" in user else (user or "")
-    st.title(f"🧭 Olá{', ' + nome if nome else ''}")
+    raw = user.split("@")[0] if "@" in user else (user or "")
+    if "." in raw:
+        nome = raw.split(".")[0].capitalize()
+    elif 0 < len(raw) <= 14:
+        nome = raw.capitalize()
+    else:
+        nome = ""
+    st.title(f"🧭 Olá, {nome}" if nome else "🧭 Início")
 
     if is_admin:
         chips = ["admin"] + (["Power Steward"] if is_power else [])
@@ -3768,9 +3786,11 @@ def page_inicio() -> None:
                 for r in pend:
                     obj = ".".join(str(x) for x in (r.get("catalogo"), r.get("db_schema"),
                                                     r.get("tabela"), r.get("coluna")) if x)
+                    valor = r.get("valor_novo") or "—"
+                    quem = str(r.get("solicitante") or "").split("@")[0]
                     st.markdown(
-                        f"`{obj}` — tag `{r.get('tag_chave', '')}` → \"{r.get('valor_novo', '')}\"  \n"
-                        f"<small>por {r.get('solicitante', '')} · {_fmt_ts(r.get('criado_em'))}</small>",
+                        f"`{obj}` — tag `{r.get('tag_chave', '')}` → \"{valor}\"  \n"
+                        f"<small>por {quem} · {_fmt_ts(r.get('criado_em'))}</small>",
                         unsafe_allow_html=True,
                     )
             _atalho("backlog", "Abrir backlog de aprovação", "✅")
