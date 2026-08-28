@@ -1246,24 +1246,30 @@ def ensure_cadastro_tables() -> bool:
         f"motivo STRING, solicitante STRING, status STRING, "
         f"aprovador STRING, decidido_em TIMESTAMP, motivo_decisao STRING, "
         f"ambiente STRING, criado_em TIMESTAMP)",
-        # Glossário de termos de negócio / indicadores. Campos exclusivos de
-        # indicador (variaveis_utilizadas, memoria_calculo, restricoes,
-        # nivel_apuracao, unidade, dimensao_tabelas, metrica_tabelas) ficam em
-        # branco/"[]" pra um "Termo" comum. dimensao_tabelas e metrica_tabelas
-        # guardam uma lista JSON de [{"catalogo","schema","tabela","colunas":[...]}]
-        # — várias tabelas e colunas podem compor tanto a dimensão quanto a
-        # métrica. `fonte_variavel`, `tipo_grafico` e `dimensoes` são colunas
-        # legadas (versão anterior do módulo) mantidas só por compatibilidade
-        # com registros antigos — a tela não lê/grava mais nelas.
-        f"CREATE TABLE IF NOT EXISTS {_ont('termos_negocio')} "
+        # Glossário de negócio e indicadores — duas telas de edição, duas
+        # tabelas. `glossario_negocio` guarda os termos comuns; `indicadores`
+        # acrescenta os campos exclusivos de KPI (nivel_apuracao, unidade,
+        # variaveis_utilizadas, memoria_calculo, restricoes) e o par
+        # dimensao_tabelas/metrica_tabelas — cada um uma lista JSON de
+        # [{"catalogo","schema","tabela","colunas":[...]}] montada no picker de
+        # tabelas/colunas. A coluna `tipo` (valor fixo 'Termo'/'Indicador') é
+        # redundante mas mantida nas duas pra tela de consulta e card de
+        # detalhe (que leem `tipo`) e a união em list_termos_negocio não
+        # precisarem ramificar. Migração da antiga `termos_negocio` logo abaixo.
+        f"CREATE TABLE IF NOT EXISTS {_ont('glossario_negocio')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
+        f"tipo STRING, nome STRING, objetivo STRING, observacoes STRING, "
+        f"palavras_chave STRING, macroprocesso STRING, "
+        f"dominio_id BIGINT, subdominio_id BIGINT, data_owner STRING, data_steward STRING, "
+        f"rotulo_seguranca STRING, rotulo_privacidade STRING, {audit})",
+        f"CREATE TABLE IF NOT EXISTS {_ont('indicadores')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
         f"tipo STRING, nome STRING, objetivo STRING, observacoes STRING, "
         f"palavras_chave STRING, macroprocesso STRING, "
         f"dominio_id BIGINT, subdominio_id BIGINT, data_owner STRING, data_steward STRING, "
         f"rotulo_seguranca STRING, rotulo_privacidade STRING, "
-        f"nivel_apuracao STRING, unidade STRING, "
-        f"variaveis_utilizadas STRING, fonte_variavel STRING, memoria_calculo STRING, "
-        f"tipo_grafico STRING, dimensoes STRING, restricoes STRING, "
+        f"nivel_apuracao STRING, unidade STRING, variaveis_utilizadas STRING, "
+        f"memoria_calculo STRING, restricoes STRING, "
         f"dimensao_tabelas STRING, metrica_tabelas STRING, {audit})",
     ]
     for stmt in ddl:
@@ -1299,20 +1305,45 @@ def ensure_cadastro_tables() -> bool:
             run_exec(f"UPDATE {_cad('data_stewards')} SET tipo = 'Steward' WHERE tipo IS NULL")
     except Exception:
         pass
-    # Colunas `dimensao_tabelas`/`metrica_tabelas` em `termos_negocio`
-    # (idempotente p/ tabelas já existentes, criadas antes do redesenho do
-    # picker de tabelas/colunas). Registros antigos ficam com NULL, que o
-    # parser de JSON trata como lista vazia.
+    # Migração da antiga `termos_negocio` (registro único com seletor de tipo)
+    # para as duas tabelas novas. Roda uma vez: copia por tipo e dropa a origem.
+    # Idempotente — se `termos_negocio` não existe mais, não faz nada. Se algum
+    # INSERT falhar, o DROP não roda e o próximo boot tenta de novo.
     try:
-        cols_df = run_query(
-            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+        tbl_df = run_query(
+            f"SELECT lower(table_name) AS t FROM {q_ident(CAD_CATALOG)}.information_schema.tables "
             f"WHERE lower(table_schema) = {q_str(ONTOLOGIA_SCHEMA.lower())} "
             f"AND lower(table_name) = 'termos_negocio'"
         )
-        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
-        for col in ("dimensao_tabelas", "metrica_tabelas"):
-            if col not in existing_cols:
-                run_exec(f"ALTER TABLE {_ont('termos_negocio')} ADD COLUMNS ({col} STRING)")
+        if not tbl_df.empty:
+            _comuns = (
+                "nome, objetivo, observacoes, palavras_chave, macroprocesso, "
+                "dominio_id, subdominio_id, data_owner, data_steward, "
+                "rotulo_seguranca, rotulo_privacidade, "
+                "criado_em, criado_por, atualizado_em, atualizado_por"
+            )
+            _ind = (
+                "nivel_apuracao, unidade, variaveis_utilizadas, memoria_calculo, restricoes"
+            )
+            # Cada destino é preenchido só se ainda estiver vazio — assim, se um
+            # INSERT falhar, o próximo boot retoma esse sem duplicar o que já foi.
+            if _count(f"SELECT count(*) FROM {_ont('glossario_negocio')}") == 0:
+                run_exec(
+                    f"INSERT INTO {_ont('glossario_negocio')} (tipo, {_comuns}) "
+                    f"SELECT 'Termo', {_comuns} FROM {_ont('termos_negocio')} "
+                    f"WHERE lower(coalesce(tipo, 'termo')) <> 'indicador'"
+                )
+            if _count(f"SELECT count(*) FROM {_ont('indicadores')}") == 0:
+                run_exec(
+                    f"INSERT INTO {_ont('indicadores')} "
+                    f"(tipo, {_comuns}, {_ind}, dimensao_tabelas, metrica_tabelas) "
+                    f"SELECT 'Indicador', {_comuns}, {_ind}, "
+                    f"coalesce(dimensao_tabelas, '[]'), coalesce(metrica_tabelas, '[]') "
+                    f"FROM {_ont('termos_negocio')} WHERE lower(tipo) = 'indicador'"
+                )
+            # Só dropa a origem depois que os dois INSERTs acima passaram sem
+            # exceção (o try/except garante isso).
+            run_exec(f"DROP TABLE IF EXISTS {_ont('termos_negocio')}")
     except Exception:
         pass
     # Semeia o admin inicial se a tabela de permissões estiver vazia.
@@ -1392,14 +1423,48 @@ def list_dashboards() -> pd.DataFrame:
     )
 
 
+# Colunas comuns às duas telas do glossário (ordem estável — usada nos SELECTs
+# e para casar com o INSERT/UPDATE das telas de edição).
+_GLOSSARIO_COLS_COMUNS = (
+    "id, tipo, nome, objetivo, observacoes, palavras_chave, macroprocesso, "
+    "dominio_id, subdominio_id, data_owner, data_steward, "
+    "rotulo_seguranca, rotulo_privacidade"
+)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_glossario_negocio() -> pd.DataFrame:
+    return run_query(
+        f"SELECT {_GLOSSARIO_COLS_COMUNS} FROM {_ont('glossario_negocio')} ORDER BY nome"
+    )
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_indicadores() -> pd.DataFrame:
+    return run_query(
+        f"SELECT {_GLOSSARIO_COLS_COMUNS}, nivel_apuracao, unidade, "
+        f"variaveis_utilizadas, memoria_calculo, restricoes, "
+        f"dimensao_tabelas, metrica_tabelas FROM {_ont('indicadores')} ORDER BY nome"
+    )
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def list_termos_negocio() -> pd.DataFrame:
+    """União das duas tabelas do glossário — para a tela de consulta (só
+    leitura) e para o Assistente de IA. O lado do glossário projeta os campos
+    exclusivos de indicador como vazios."""
     return run_query(
-        f"SELECT id, tipo, nome, objetivo, observacoes, palavras_chave, macroprocesso, "
-        f"dominio_id, subdominio_id, data_owner, data_steward, "
-        f"rotulo_seguranca, rotulo_privacidade, nivel_apuracao, unidade, "
+        f"SELECT {_GLOSSARIO_COLS_COMUNS}, "
+        f"CAST(NULL AS STRING) AS nivel_apuracao, CAST(NULL AS STRING) AS unidade, "
+        f"CAST(NULL AS STRING) AS variaveis_utilizadas, "
+        f"CAST(NULL AS STRING) AS memoria_calculo, CAST(NULL AS STRING) AS restricoes, "
+        f"'[]' AS dimensao_tabelas, '[]' AS metrica_tabelas "
+        f"FROM {_ont('glossario_negocio')} "
+        f"UNION ALL "
+        f"SELECT {_GLOSSARIO_COLS_COMUNS}, nivel_apuracao, unidade, "
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
-        f"dimensao_tabelas, metrica_tabelas FROM {_ont('termos_negocio')} ORDER BY nome"
+        f"dimensao_tabelas, metrica_tabelas FROM {_ont('indicadores')} "
+        f"ORDER BY nome"
     )
 
 
@@ -1524,7 +1589,7 @@ def _clear_cad_caches() -> None:
     for f in (
         list_dominios, list_subdominios, list_stewards, list_permissoes,
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
-        list_termos_negocio,
+        list_glossario_negocio, list_indicadores, list_termos_negocio,
     ):
         try:
             f.clear()
@@ -1579,7 +1644,7 @@ Regras importantes:
   cadastra/edita termo de negócio e não aprova/rejeita item de backlog — se o
   usuário pedir uma dessas ações, explique que ele mesmo faz isso pela tela do
   app (Governança, Glossário → Termos de Negócio para consultar, Cadastros →
-  Termos de Negócio (edição) para editar, ou Aprovações → Backlog) e,
+  Glossário de Negócio / Indicador para editar, ou Aprovações → Backlog) e,
   se ajudar, oriente o caminho.
 - Use as ferramentas disponíveis para responder com dados reais em vez de
   chutar. Se uma pergunta pedir dados de uma tabela específica, peça
@@ -1657,11 +1722,12 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "termos_de_negocio",
             "description": (
-                "Glossário de termos de negócio e indicadores cadastrados: tipo "
-                "(Termo/Indicador), nome, objetivo, domínio/sub-domínio, data "
-                "owner/steward, rótulos de segurança/privacidade e, para "
-                "indicadores, variáveis, fórmula (memória de cálculo), restrições "
-                "e as tabelas/colunas que compõem a dimensão e a métrica."
+                "Glossário de negócio e indicadores cadastrados (as duas telas "
+                "de edição juntas): tipo (Termo/Indicador), nome, objetivo, "
+                "domínio/sub-domínio, data owner/steward, rótulos de segurança/"
+                "privacidade e, para indicadores, variáveis, fórmula (memória de "
+                "cálculo), restrições e as tabelas/colunas que compõem a "
+                "dimensão e a métrica."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -2562,11 +2628,21 @@ def _select_pessoa_cadastrada(
     return st.text_input(f"{label} (texto livre)", value=cur_value or "", key=f"{key_prefix}_txt")
 
 
-def page_termos_negocio() -> None:
-    st.title("📖 Termos de Negócio")
+def _render_glossario_editor(
+    *, is_indicador: bool, ont_table: str, list_fn, titulo: str, icone: str,
+) -> None:
+    """Corpo compartilhado das duas telas de edição do glossário (Glossário de
+    Negócio e Indicador). `is_indicador` liga os campos exclusivos de KPI e
+    escolhe a tabela de destino (`ont_table`)."""
+    kp = "ind" if is_indicador else "glo"  # prefixo de key dos widgets (por tela)
+    st.title(f"{icone} {titulo}")
     st.caption(
-        "Glossário de termos de negócio e indicadores. Escolha o **tipo** logo "
-        "abaixo — os campos do formulário mudam de acordo com a escolha."
+        "Cadastro de indicadores (KPIs): objetivo, dono, unidade, nível de "
+        "apuração, memória de cálculo e as tabelas/colunas que compõem a "
+        "dimensão e a métrica."
+        if is_indicador else
+        "Glossário de termos de negócio: nome, objetivo, dono e classificação "
+        "de segurança/privacidade."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
@@ -2584,16 +2660,19 @@ def page_termos_negocio() -> None:
     seguranca_opts = [""] + governed_tags.get("seguranca", [])
     privacidade_opts = [""] + governed_tags.get("privacidade", [])
 
-    termos = list_termos_negocio()
+    termos = list_fn()
     show = termos.copy()
     if not show.empty:
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, "—") if pd.notna(i) else "—")
         show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "—") if pd.notna(i) else "—")
+    cols_show = ["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner"]
+    if is_indicador:
+        cols_show.append("Nível de Apuração")
     st.dataframe(
         (show.rename(columns={
             "tipo": "Tipo", "nome": "Nome", "data_owner": "Data Owner",
             "nivel_apuracao": "Nível de Apuração",
-        })[["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner", "Nível de Apuração"]]
+        })[cols_show]
          if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
@@ -2602,53 +2681,46 @@ def page_termos_negocio() -> None:
         st.info("Seu perfil é **leitor** — visualização apenas.")
         return
 
+    tipo = "Indicador" if is_indicador else "Termo"
     recs = termos.to_dict("records")
     opts = ["(novo)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
     st.divider()
     st.markdown("#### Adicionar / editar")
-    sel = st.selectbox("Registro", options=opts, key="term_sel")
+    sel = st.selectbox("Registro", options=opts, key=f"{kp}_sel")
     editing = sel != "(novo)"
     cur = recs[opts.index(sel) - 1] if editing else {
-        "id": None, "tipo": "Termo", "nome": "", "objetivo": "", "observacoes": "",
+        "id": None, "tipo": tipo, "nome": "", "objetivo": "", "observacoes": "",
         "palavras_chave": "", "macroprocesso": "", "dominio_id": None, "subdominio_id": None,
         "data_owner": "", "data_steward": "", "rotulo_seguranca": "", "rotulo_privacidade": "",
         "nivel_apuracao": "", "unidade": "", "variaveis_utilizadas": "",
         "memoria_calculo": "", "restricoes": "", "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
     }
 
-    # Tipo primeiro e fora do form (reativo): decide quais campos aparecem
-    # embaixo. Todos os demais widgets também ficam fora do form por causa do
-    # picker de tabelas/colunas do indicador, que precisa recarregar a cada
-    # escolha de catalog/schema/table (igual select_object/render_editor).
-    tipo = st.selectbox(
-        "Tipo *", options=_TERMO_TIPO_OPTIONS,
-        index=_TERMO_TIPO_OPTIONS.index(cur["tipo"]) if cur.get("tipo") in _TERMO_TIPO_OPTIONS else 0,
-        key="term_tipo",
-    )
-    is_indicador = tipo == "Indicador"
-
+    # Todos os widgets ficam fora de st.form por causa do picker de tabelas/
+    # colunas do indicador, que precisa recarregar a cada escolha de
+    # catalog/schema/table (igual select_object/render_editor).
     dom_ids = [d["id"] for d in doms]
     dom_options = [None] + dom_ids
     cur_dom = cur.get("dominio_id")
     dom_idx = dom_options.index(cur_dom) if editing and cur_dom in dom_options else 0
     dom_id = st.selectbox(
         "Domínio de dados", options=dom_options, index=dom_idx,
-        format_func=lambda i: "(nenhum)" if i is None else dom_nome.get(i, i), key="term_dom",
+        format_func=lambda i: "(nenhum)" if i is None else dom_nome.get(i, i), key=f"{kp}_dom",
     )
     sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id] if dom_id is not None else []
     sub_options = [None] + sub_ids_all
     cur_sub = cur.get("subdominio_id")
     sub_idx = sub_options.index(cur_sub) if editing and cur_sub in sub_options else 0
     sub_id = st.selectbox(
-        "Sub-domínio", options=sub_options, index=sub_idx, key="term_sub",
+        "Sub-domínio", options=sub_options, index=sub_idx, key=f"{kp}_sub",
         format_func=lambda i: "(nenhum)" if i is None else sub_nome.get(i, i),
     )
 
     data_owner = _select_pessoa_cadastrada(
-        "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", "term_owner",
+        "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", f"{kp}_owner",
     )
     data_steward = _select_pessoa_cadastrada(
-        "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", "term_steward",
+        "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward",
     )
 
     st.divider()
@@ -2656,12 +2728,12 @@ def page_termos_negocio() -> None:
     with c1:
         nome = st.text_input(
             "Nome do indicador *" if is_indicador else "Nome do termo *",
-            value=cur["nome"] or "", key="term_nome",
+            value=cur["nome"] or "", key=f"{kp}_nome",
         )
-        macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "", key="term_macro")
+        macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "", key=f"{kp}_macro")
     with c2:
-        palavras_chave = st.text_input("Palavras-chave", value=cur.get("palavras_chave") or "", key="term_kw")
-    objetivo = st.text_area("Objetivo", value=cur.get("objetivo") or "", key="term_obj")
+        palavras_chave = st.text_input("Palavras-chave", value=cur.get("palavras_chave") or "", key=f"{kp}_kw")
+    objetivo = st.text_area("Objetivo", value=cur.get("objetivo") or "", key=f"{kp}_obj")
 
     st.markdown("##### Classificação")
     c3, c4 = st.columns(2)
@@ -2669,13 +2741,13 @@ def page_termos_negocio() -> None:
         rotulo_seguranca = st.selectbox(
             "Rótulo de segurança", options=seguranca_opts,
             index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
-            key="term_seg",
+            key=f"{kp}_seg",
         )
     with c4:
         rotulo_privacidade = st.selectbox(
             "Rótulo de privacidade", options=privacidade_opts,
             index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
-            key="term_priv",
+            key=f"{kp}_priv",
         )
 
     variaveis_utilizadas = memoria_calculo = restricoes = unidade = nivel_apuracao = ""
@@ -2718,15 +2790,16 @@ def page_termos_negocio() -> None:
 
         memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "", key="term_memoria")
 
-    observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key="term_obs")
+    observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key=f"{kp}_obs")
 
+    rotulo_item = "indicador" if is_indicador else "termo"
     st.divider()
-    saved = st.button("💾 Salvar", type="primary", key="term_save")
+    saved = st.button("💾 Salvar", type="primary", key=f"{kp}_save")
 
     if saved:
         nome = (nome or "").strip()
         if not nome:
-            st.warning("Informe o nome do termo.")
+            st.warning(f"Informe o nome do {rotulo_item}.")
             return
         dom_sql = "NULL" if dom_id is None else str(int(dom_id))
         sub_sql = "NULL" if sub_id is None else str(int(sub_id))
@@ -2735,18 +2808,19 @@ def page_termos_negocio() -> None:
             palavras_chave=palavras_chave, macroprocesso=macroprocesso,
             data_owner=data_owner, data_steward=data_steward,
             rotulo_seguranca=rotulo_seguranca, rotulo_privacidade=rotulo_privacidade,
-            nivel_apuracao=(nivel_apuracao if is_indicador else ""),
-            unidade=(unidade if is_indicador else ""),
-            variaveis_utilizadas=(variaveis_utilizadas if is_indicador else ""),
-            memoria_calculo=(memoria_calculo if is_indicador else ""),
-            restricoes=(restricoes if is_indicador else ""),
-            dimensao_tabelas=(_dump_tabelas_json(dim_items) if is_indicador else "[]"),
-            metrica_tabelas=(_dump_tabelas_json(met_items) if is_indicador else "[]"),
         )
+        if is_indicador:
+            values.update(
+                nivel_apuracao=nivel_apuracao, unidade=unidade,
+                variaveis_utilizadas=variaveis_utilizadas, memoria_calculo=memoria_calculo,
+                restricoes=restricoes,
+                dimensao_tabelas=_dump_tabelas_json(dim_items),
+                metrica_tabelas=_dump_tabelas_json(met_items),
+            )
         if editing:
             set_clause = ", ".join(f"{col} = {q_str(val)}" for col, val in values.items())
             run_exec(
-                f"UPDATE {_ont('termos_negocio')} SET {set_clause}, "
+                f"UPDATE {_ont(ont_table)} SET {set_clause}, "
                 f"dominio_id = {dom_sql}, subdominio_id = {sub_sql}, "
                 f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                 f"WHERE id = {int(cur['id'])}"
@@ -2755,7 +2829,7 @@ def page_termos_negocio() -> None:
             cols = ["dominio_id", "subdominio_id", *values.keys(), "criado_em", "criado_por"]
             vals_sql = [dom_sql, sub_sql, *[q_str(v) for v in values.values()], "current_timestamp()", q_str(user)]
             run_exec(
-                f"INSERT INTO {_ont('termos_negocio')} ({', '.join(cols)}) "
+                f"INSERT INTO {_ont(ont_table)} ({', '.join(cols)}) "
                 f"VALUES ({', '.join(vals_sql)})"
             )
         # Limpa o estado do picker de tabelas pra não vazar seleção entre
@@ -2763,14 +2837,28 @@ def page_termos_negocio() -> None:
         for kind in ("dim", "met"):
             st.session_state.pop(f"term_{kind}_items", None)
             st.session_state.pop(f"term_{kind}_items_for", None)
-        _finish_write("Termo de negócio salvo.")
+        _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} salvo.")
 
     if editing:
         st.divider()
         st.markdown("#### Excluir")
-        if st.button(f"🗑️ Excluir termo '{cur['nome']}'"):
-            run_exec(f"DELETE FROM {_ont('termos_negocio')} WHERE id = {int(cur['id'])}")
-            _finish_write("Termo de negócio excluído.")
+        if st.button(f"🗑️ Excluir {rotulo_item} '{cur['nome']}'", key=f"{kp}_del"):
+            run_exec(f"DELETE FROM {_ont(ont_table)} WHERE id = {int(cur['id'])}")
+            _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} excluído.")
+
+
+def page_glossario_negocio() -> None:
+    _render_glossario_editor(
+        is_indicador=False, ont_table="glossario_negocio",
+        list_fn=list_glossario_negocio, titulo="Glossário de Negócio", icone="📖",
+    )
+
+
+def page_indicadores() -> None:
+    _render_glossario_editor(
+        is_indicador=True, ont_table="indicadores",
+        list_fn=list_indicadores, titulo="Indicador", icone="📈",
+    )
 
 
 def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
@@ -3378,7 +3466,8 @@ def main() -> None:
             st.Page(page_stewards, title="Data Owners & Stewards", icon="🧑‍💼"),
             st.Page(page_dashboards, title="Dashboards", icon="📊"),
             st.Page(page_padroes_dado_pessoal, title="Padrões de Dado Pessoal", icon="🧬"),
-            st.Page(page_termos_negocio, title="Termos de Negócio (edição)", icon="📖"),
+            st.Page(page_glossario_negocio, title="Glossário de Negócio", icon="📖"),
+            st.Page(page_indicadores, title="Indicador", icon="📈"),
         ]
         if is_admin:  # gestão de usuários/permissões é sempre admin-only
             cadastros.append(st.Page(page_permissoes, title="Usuários & Permissões", icon="🔒"))

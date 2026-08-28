@@ -8,7 +8,7 @@ descrito em [06. Permissões](./06-permissoes.md).
 
 | Grupo (menu) | Telas | Visível para |
 |---|---|---|
-| **Cadastros** | Domínios · Sub-domínios · Data Owners & Stewards · Dashboards · Padrões de Dado Pessoal · Termos de Negócio (edição) | admin, ou usuário com a flag `ver_cadastros` |
+| **Cadastros** | Domínios · Sub-domínios · Data Owners & Stewards · Dashboards · Padrões de Dado Pessoal · Glossário de Negócio · Indicador | admin, ou usuário com a flag `ver_cadastros` |
 | **Cadastros** (admin) | Usuários & Permissões | só admin |
 | **Governança** | Governança de Dados — Unity Catalog | sempre visível |
 | **Glossário** | Termos de Negócio (consulta) | sempre visível |

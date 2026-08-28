@@ -3,6 +3,18 @@
 Histórico de versões do produto, com base no histórico de commits do
 repositório (`git log`).
 
+## v1.4 — 2026-08-28
+
+- **Glossário de Negócio e Indicador em telas/tabelas separadas** — a tela
+  única "Termos de Negócio (edição)" com seletor de tipo foi dividida em
+  duas entradas no grupo **Cadastros**: **Glossário de Negócio** (termos) e
+  **Indicador** (KPIs, com os campos próprios e o picker de tabelas de
+  dimensão/métrica). Cada uma grava em sua tabela — `ontologia_<env>.
+  glossario_negocio` e `ontologia_<env>.indicadores`. A tabela antiga
+  `termos_negocio` é migrada por tipo no bootstrap e então removida
+  (migração idempotente). A tela de **consulta** (grupo Glossário) continua
+  única, mostrando termos e indicadores juntos.
+
 ## v1.3 — 2026-08-28
 
 - **Data Owners & Stewards unificados** — Owner e Steward passam a ser o
