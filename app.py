@@ -2691,7 +2691,7 @@ def _render_power_steward_select(cur_email: str) -> str:
         if not em:
             return "(nenhum)"
         nm = name_by_email.get(em.lower())
-        return f"{nm} <{em}>" if nm else em
+        return f"{nm} <{em}>" if nm and nm.lower() != em.lower() else em
 
     options = [""] + ps_emails
     idx = options.index(cur_email) if cur_email in options else 0
@@ -3013,7 +3013,8 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
                 nm = {u["email"].lower(): u["nome"] for u in list_users_for_search()}.get(ps_email.lower())
             except Exception:
                 nm = None
-            st.markdown(f"**Power Steward:** {f'{nm} <{ps_email}>' if nm else ps_email}")
+            ps_txt = f"{nm} <{ps_email}>" if nm and nm.lower() != ps_email.lower() else ps_email
+            st.markdown(f"**Power Steward:** {ps_txt}")
         c1, c2 = st.columns(2)
         c1.markdown(f"**Unidade**\n\n{cur.get('unidade') or '—'}")
         c2.markdown(f"**Nível de apuração**\n\n{cur.get('nivel_apuracao') or '—'}")
