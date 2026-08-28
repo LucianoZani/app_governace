@@ -5,6 +5,17 @@ repositório (`git log`).
 
 ## v1.3 — 2026-08-28
 
+- **Data Owners & Stewards unificados** — Owner e Steward passam a ser o
+  mesmo cadastro/tela, com um seletor de tipo. Coluna `tipo` em
+  `data_stewards` (migração idempotente; registros antigos → `Steward`).
+- **Termos de Negócio: edição × consulta** — a tela de cadastro virou
+  "Termos de Negócio (edição)" (grupo Cadastros) e há uma nova tela de
+  consulta só-leitura no grupo **Glossário**.
+- **Indicadores: formulário condicional + picker de tabelas** — escolher
+  "Indicador" revela os campos próprios; dimensão e métrica agora são
+  montadas com um seletor Catalog→Schema→Table+colunas (colunas
+  `dimensao_tabelas`/`metrica_tabelas` em JSON). Campos legados
+  `fonte_variavel`/`tipo_grafico`/`dimensoes` ficam só por compatibilidade.
 - **Assistente de IA como painel recolhível à direita** — o painel de chat
   deixou de ser uma coluna fixa que ocupava 1/3 da tela o tempo todo.
   Agora fica ancorado à direita (largura fixa, ~380px), recolhe com o botão

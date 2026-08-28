@@ -8,10 +8,12 @@ descrito em [06. Permissões](./06-permissoes.md).
 
 | Grupo (menu) | Telas | Visível para |
 |---|---|---|
-| **Cadastros** | Domínios · Sub-domínios · Data Stewards · Dashboards · Padrões de Dado Pessoal | admin, ou usuário com a flag `ver_cadastros` |
-| **Cadastros** (admin) | Usuários & Permissões · Backlog de Aprovação de Tags | admin, ou usuário com `aprovador_tags` (só o Backlog) |
+| **Cadastros** | Domínios · Sub-domínios · Data Owners & Stewards · Dashboards · Padrões de Dado Pessoal · Termos de Negócio (edição) | admin, ou usuário com a flag `ver_cadastros` |
+| **Cadastros** (admin) | Usuários & Permissões | só admin |
 | **Governança** | Governança de Dados — Unity Catalog | sempre visível |
-| **Auditoria** | Log de comentários · Log de tags | admin, ou usuário com `ver_logs` |
+| **Glossário** | Termos de Negócio (consulta) | sempre visível |
+| **Aprovações** | Backlog de Aprovação de Tags | admin, ou usuário com `aprovador_tags` |
+| **Auditoria** | Relatório de Auditoria · Log de comentários · Log de tags | admin, ou usuário com `ver_logs` |
 
 Admin enxerga tudo, independente das flags. Dentro de cada tela de cadastro,
 **editar** exige papel `admin`/`editor`; `leitor` só visualiza.
@@ -25,27 +27,39 @@ sub-domínio por domínio). **Exclusão bloqueada** quando há vínculos: não �
 possível excluir um domínio com sub-domínios/stewards, nem um sub-domínio com
 stewards.
 
-## Data Stewards
+## Data Owners & Stewards
 
 Vincula uma pessoa (nome + e-mail) a um domínio + sub-domínio — define quem é
-a referência daquela área para dúvidas de governança. O campo de busca traz
-usuários do workspace (e da conta, se `DATABRICKS_ACCOUNT_ID` estiver
-configurado); se a busca não encontrar ninguém, um toggle libera entrada
-manual (nome + e-mail). Um mesmo e-mail pode ser steward de mais de um
-domínio/sub-domínio, mas não duas vezes do **mesmo** vínculo.
+a referência daquela área. **Data Owner** e **Data Steward** usam o mesmo
+cadastro e a mesma tela: um seletor **Tipo** no topo do formulário
+(`Owner` / `Steward`) decide qual dos dois o registro representa. A tabela
+lista os dois juntos com a coluna Tipo.
 
-> Cadastrar alguém como steward aqui só grava o registro — **não** concede
-> nenhum acesso ao workspace ou aos dados. Se a pessoa não tiver os grants
-> de Unity Catalog e o `CAN_USE` no app, ela não consegue de fato documentar
-> nada, mesmo constando como steward.
+O campo de busca traz usuários do workspace (e da conta, se
+`DATABRICKS_ACCOUNT_ID` estiver configurado); se a busca não encontrar
+ninguém, um toggle libera entrada manual (nome + e-mail). A unicidade é por
+**(tipo, e-mail, domínio, sub-domínio)** — a mesma pessoa pode ser Owner e
+Steward do mesmo vínculo, ou responsável por vários domínios, mas não duas
+vezes no exato mesmo papel/vínculo.
+
+Instalações criadas antes desta unificação: a coluna `tipo` é adicionada de
+forma idempotente no bootstrap e os registros antigos (sem tipo) viram
+`Steward`. O filtro de visibilidade de **Dashboards** (ver abaixo) considera
+apenas quem for `Steward`.
+
+> Cadastrar alguém aqui só grava o registro — **não** concede nenhum acesso
+> ao workspace ou aos dados. Se a pessoa não tiver os grants de Unity Catalog
+> e o `CAN_USE` no app, ela não consegue de fato documentar nada, mesmo
+> constando como owner/steward.
 
 ## Dashboards
 
 Cadastro de links para dashboards (AI/BI, Lakeview ou qualquer URL) já
 publicados, vinculados a um Domínio e opcionalmente a um Sub-domínio. Quem
 enxerga o link no menu de Governança é quem for **admin** ou **Data Steward**
-daquele domínio/sub-domínio — o módulo reaproveita o cadastro de stewards em
-vez de manter uma lista de acesso separada.
+(tipo `Steward`) daquele domínio/sub-domínio — o módulo reaproveita o
+cadastro de Data Owners & Stewards em vez de manter uma lista de acesso
+separada.
 
 ## Padrões de Dado Pessoal
 
@@ -96,7 +110,7 @@ cadastro propriamente ditas:
 |---|---|
 | `dominios` | nome, descricao |
 | `subdominios` | dominio_id, nome, descricao |
-| `data_stewards` | dominio_id, subdominio_id, nome, email |
+| `data_stewards` | tipo (`Owner`/`Steward`), dominio_id, subdominio_id, nome, email |
 | `dashboards` | dominio_id, subdominio_id, nome, descricao, url, icone, ativo |
 | `padroes_dado_pessoal` | padrao, descricao |
 | `tag_backlog` | catalogo/schema/tabela/coluna, tag_chave, valor_anterior/novo, acao, motivo, solicitante, status, aprovador, decidido_em, motivo_decisao (append + update no `status`) |

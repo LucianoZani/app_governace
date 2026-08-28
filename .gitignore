@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 
+# Backups locais e arquivos com timestamp que o upload do Workspace cria
+# (ex.: "app 2026-08-28 15:37:35.py") — nunca devem entrar no repo
+*.bak
+*.bak-*
+app *.py
+
 # Ambiente local / editores
 .venv/
 venv/
