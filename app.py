@@ -499,7 +499,8 @@ def render_sidebar() -> None:
         )
         role = st.session_state.get("role")
         if role:
-            st.caption(f"Perfil (cadastros): **{role}**")
+            registrado = bool((st.session_state.get("perms") or {}).get("registrado", True))
+            st.caption(f"Perfil (cadastros): **{role if registrado else 'visitante (não cadastrado)'}**")
         st.divider()
         if st.button("🔄 Atualizar dados em tela", use_container_width=True):
             st.cache_data.clear()
@@ -1388,7 +1389,7 @@ def get_user_perms(email: str) -> dict:
     """
     base = {
         "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
-        "aprovador_tags": False, "power_steward": False,
+        "aprovador_tags": False, "power_steward": False, "registrado": False,
     }
     if not email:
         return base
@@ -1404,7 +1405,7 @@ def get_user_perms(email: str) -> dict:
     if papel == "admin":
         return {
             "papel": "admin", "ver_logs": True, "ver_cadastros": True,
-            "aprovador_tags": True, "power_steward": power_steward,
+            "aprovador_tags": True, "power_steward": power_steward, "registrado": True,
         }
     return {
         "papel": papel,
@@ -1412,6 +1413,7 @@ def get_user_perms(email: str) -> dict:
         "ver_cadastros": _as_bool(row["ver_cadastros"]),
         "aprovador_tags": _as_bool(row["aprovador_tags"]),
         "power_steward": power_steward,
+        "registrado": True,
     }
 
 
@@ -3694,6 +3696,29 @@ def _atalho(chave: str, label: str, icon: str | None = None) -> None:
         st.page_link(pg, label=label, icon=icon)
 
 
+def _nome_amigavel(email: str) -> str:
+    """Nome de exibição do usuário logado: tenta o displayName do workspace/conta
+    (SCIM), depois heurística sobre o e-mail. '' se não achar nada legível."""
+    e = (email or "").strip()
+    if not e:
+        return ""
+    try:
+        for u in list_users_for_search():
+            if str(u.get("email", "")).lower() == e.lower():
+                nm = str(u.get("nome") or "").strip()
+                if nm and nm.lower() != e.lower():
+                    return nm.split()[0].capitalize() if " " in nm else nm
+                break
+    except Exception:
+        pass
+    raw = e.split("@")[0] if "@" in e else e
+    if "." in raw:
+        return raw.split(".")[0].capitalize()
+    if 0 < len(raw) <= 14:
+        return raw.capitalize()
+    return ""
+
+
 def page_inicio() -> None:
     st.markdown(_INICIO_CSS, unsafe_allow_html=True)
     user = st.session_state.get("user", "")
@@ -3713,16 +3738,16 @@ def page_inicio() -> None:
         return
 
     # ---- Cabeçalho ----
-    raw = user.split("@")[0] if "@" in user else (user or "")
-    if "." in raw:
-        nome = raw.split(".")[0].capitalize()
-    elif 0 < len(raw) <= 14:
-        nome = raw.capitalize()
+    registrado = bool(perms.get("registrado", True))
+    if not registrado:
+        st.title("🧭 Olá, visitante")
     else:
-        nome = ""
-    st.title(f"🧭 Olá, {nome}" if nome else "🧭 Início")
+        nome = _nome_amigavel(user)
+        st.title(f"🧭 Olá, {nome}" if nome else "🧭 Início")
 
-    if is_admin:
+    if not registrado:
+        chips = ["visitante"]
+    elif is_admin:
         chips = ["admin"] + (["Power Steward"] if is_power else [])
     else:
         chips = [role] + [
@@ -3753,6 +3778,9 @@ def page_inicio() -> None:
                    if n_pend else "Nenhuma tag aguardando aprovação. 🎉")
     elif is_power:
         st.caption(f"Você é Power Steward de **{len(meus_ind)}** indicador(es).")
+    elif not registrado:
+        st.caption("Você ainda não tem acesso cadastrado — pode consultar o glossário e o "
+                   "Assistente. Peça a um admin para incluir seu e-mail em **Usuários & Permissões**.")
     else:
         st.caption("Acesso de leitura — use o glossário e o Assistente para explorar o que já existe.")
 
@@ -3885,7 +3913,7 @@ def main() -> None:
     st.session_state["user"] = user
     perms = {
         "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
-        "aprovador_tags": False, "power_steward": False,
+        "aprovador_tags": False, "power_steward": False, "registrado": False,
     }
     try:
         ensure_cadastro_tables()

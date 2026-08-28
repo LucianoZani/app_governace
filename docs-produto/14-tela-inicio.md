@@ -9,7 +9,7 @@ painel de orientação: "o que preciso fazer" + "como está a governança", com
 
 | Bloco | Aparece para | O que mostra |
 |---|---|---|
-| **Cabeçalho** | todos | "Olá, `<nome>`", chips do papel/flags e uma frase-resumo ("Você tem N tags aguardando aprovação e M lacunas de cadastro"). |
+| **Cabeçalho** | todos | "Olá, `<nome>`" (displayName do workspace/conta, ou heurística sobre o e-mail; **"Olá, visitante"** se o usuário não estiver em `permissoes`), chips do papel/flags e uma frase-resumo ("Você tem N tags aguardando aprovação e M lacunas de cadastro"; para visitante, um aviso pra pedir acesso a um admin). |
 | **Números** | todos | 6 `st.metric`: domínios, sub-domínios, owners/stewards, termos, indicadores, dashboards — com `delta` do que foi criado nos últimos 7 dias. |
 | **⏳ Pendências de aprovação** | admin ou `aprovador_tags` | Contagem + as 5 tags mais recentes no backlog + atalho para o Backlog. |
 | **🩺 Saúde dos cadastros** | admin ou `ver_cadastros` | Lacunas: domínios/sub-domínios sem Data Steward, indicadores sem Power Steward, termos sem definição, termos/indicadores sem domínio. Cada uma com atalho "corrigir". Se não há lacuna: "✅ Cadastros em dia." |
