@@ -3,6 +3,16 @@
 Histórico de versões do produto, com base no histórico de commits do
 repositório (`git log`).
 
+## v1.3 — 2026-08-28
+
+- **Assistente de IA como painel recolhível à direita** — o painel de chat
+  deixou de ser uma coluna fixa que ocupava 1/3 da tela o tempo todo.
+  Agora fica ancorado à direita (largura fixa, ~380px), recolhe com o botão
+  "→ Recolher" para uma aba "🤖 Assistente" no canto superior direito, e
+  reabre ao clicar nela. Estado e histórico persistem na sessão.
+  Implementado como `st.container` + CSS `position: fixed` (o Streamlit só
+  tem sidebar nativa à esquerda). Conteúdo do chat inalterado.
+
 ## v1.2 — 2026-08-21
 
 - **Assistente de Governança (IA)** — painel de chat com function calling

@@ -504,10 +504,6 @@ def render_sidebar() -> None:
         if st.button("🔄 Atualizar dados em tela", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-        if LLM_ENABLED:
-            st.session_state["show_assistant"] = st.checkbox(
-                "🤖 Mostrar assistente", value=st.session_state.get("show_assistant", True)
-            )
 
 
 def select_object(user: str) -> tuple[str | None, str | None, str | None]:
@@ -1840,6 +1836,81 @@ def run_assistant_turn(user_text: str, user: str) -> str:
     )
 
 
+# Largura do painel do assistente ancorado à direita (px).
+_ASSISTANT_DOCK_W = 380
+
+# O painel é um st.container(key="assistant_dock") reposicionado por CSS para
+# ficar fixo na borda direita, funcionando como uma segunda sidebar. Quando
+# recolhido, some e no lugar aparece uma aba fina (st.container(key=
+# "assistant_tab")) no canto superior direito.
+# O app roda sempre em tema claro (Databricks Free Edition). Não usamos
+# @media (prefers-color-scheme: dark) aqui: se o SO do usuário está em dark
+# mode mas o Streamlit renderiza claro, o painel ficaria com fundo escuro e
+# texto escuro (ilegível). Fundo claro fixo, igual ao da sidebar esquerda.
+_ASSISTANT_DOCK_CSS = f"""
+<style>
+.st-key-assistant_dock {{
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: {_ASSISTANT_DOCK_W}px;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 4.25rem 1rem 1rem 1rem;
+    background-color: #f0f2f6;
+    border-left: 1px solid rgba(49, 51, 63, 0.2);
+    z-index: 90;
+}}
+[data-testid="stMainBlockContainer"] {{
+    padding-right: {_ASSISTANT_DOCK_W + 48}px !important;
+}}
+@media (max-width: 1100px) {{
+    .st-key-assistant_dock {{ width: 320px; }}
+    [data-testid="stMainBlockContainer"] {{ padding-right: 360px !important; }}
+}}
+</style>
+"""
+
+_ASSISTANT_TAB_CSS = """
+<style>
+.st-key-assistant_tab {
+    position: fixed;
+    top: 4.25rem;
+    right: 0;
+    left: auto !important;
+    /* O container vertical do Streamlit vem com width:100%; sem isto a "aba"
+       ocupa a largura toda e o botão cai no canto esquerdo, atrás da sidebar. */
+    width: fit-content !important;
+    min-width: 0 !important;
+    z-index: 1000000;
+}
+.st-key-assistant_tab button {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    box-shadow: -1px 2px 8px rgba(0, 0, 0, 0.15);
+}
+</style>
+"""
+
+
+def render_assistant_dock(user: str) -> None:
+    """Painel do assistente ancorado à direita, recolhível para uma aba fina."""
+    if not st.session_state.get("show_assistant", True):
+        with st.container(key="assistant_tab"):
+            if st.button("🤖  Assistente", key="assistant_open_btn"):
+                st.session_state["show_assistant"] = True
+                st.rerun()
+        st.markdown(_ASSISTANT_TAB_CSS, unsafe_allow_html=True)
+        return
+
+    with st.container(key="assistant_dock"):
+        if st.button("→  Recolher", key="assistant_close_btn", use_container_width=True):
+            st.session_state["show_assistant"] = False
+            st.rerun()
+        render_assistant_panel(user)
+    st.markdown(_ASSISTANT_DOCK_CSS, unsafe_allow_html=True)
+
+
 def render_assistant_panel(user: str) -> None:
     st.markdown("### 🤖 Assistente de Governança")
     if not LLM_ENABLED or not LLM_ENDPOINT:
@@ -1872,15 +1943,15 @@ def render_assistant_panel(user: str) -> None:
                 st.markdown(m["content"])
 
     if not st.session_state["chat_messages"]:
-        st.caption("Sugestões:")
-        for label in (
-            "Quais domínios existem?",
-            "Quais termos de negócio e indicadores estão cadastrados?",
-            "O que está pendente no backlog de aprovação de tags?",
-            "Quem são os data stewards cadastrados?",
-        ):
-            if st.button(label, use_container_width=True, key=f"assist_qp_{label}"):
-                _ask(label)
+        with st.expander("💡 Sugestões", expanded=True):
+            for label in (
+                "Quais domínios existem?",
+                "Quais termos de negócio e indicadores estão cadastrados?",
+                "O que está pendente no backlog de aprovação de tags?",
+                "Quem são os data stewards cadastrados?",
+            ):
+                if st.button(label, use_container_width=True, key=f"assist_qp_{label}"):
+                    _ask(label)
 
     prompt = st.chat_input("Pergunte ao assistente…")
     if prompt:
@@ -3328,16 +3399,13 @@ def main() -> None:
         ]
     nav = st.navigation(pages)
 
-    show_assistant = LLM_ENABLED and st.session_state.get("show_assistant", True)
-    if show_assistant:
-        main_col, chat_col = st.columns([2.3, 1], gap="large")
-    else:
-        main_col, chat_col = st.container(), None
-    with main_col:
-        nav.run()
-    if chat_col is not None:
-        with chat_col:
-            render_assistant_panel(user)
+    nav.run()
+
+    # Assistente de IA: painel ancorado à direita (segunda "sidebar"), que
+    # recolhe para uma aba fina no canto direito. Streamlit só tem uma sidebar
+    # nativa (esquerda), então o painel é um container fixo via CSS.
+    if LLM_ENABLED:
+        render_assistant_dock(user)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,26 @@ core do produto (Governança + Cadastros), desligado por padrão.
 - Mantém o histórico da conversa na sessão do usuário (botão "Nova conversa"
   para reiniciar).
 
+## Onde aparece na UI
+
+O painel fica **ancorado à direita da tela**, como uma segunda barra
+lateral (a navegação do app fica na esquerda). Tem largura fixa (~380px),
+rola por dentro e empurra o conteúdo principal pra não sobrepor.
+
+- **Recolher:** botão "→ Recolher" no topo do painel. O conteúdo volta a
+  ocupar a largura toda e sobra uma aba "🤖 Assistente" no canto superior
+  direito.
+- **Reabrir:** clicar nessa aba.
+- O estado (aberto/recolhido) e o histórico da conversa ficam na sessão do
+  usuário — recolher não apaga a conversa.
+
+Detalhe de implementação: o Streamlit só tem uma sidebar nativa (a
+esquerda), então o painel é um `st.container` reposicionado por CSS
+(`position: fixed`). Fundo claro fixo — o app roda sempre em tema claro; um
+`@media (prefers-color-scheme: dark)` deixaria o painel escuro com texto
+escuro (ilegível) quando o SO do usuário está em dark mode mas o Streamlit
+renderiza claro.
+
 ## O que NÃO faz (por design)
 
 **Só consulta.** Nenhuma tool de escrita é exposta ao modelo — o assistente
