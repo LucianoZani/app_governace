@@ -40,6 +40,7 @@ Veja o README.md para permissões e deploy.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -1199,9 +1200,13 @@ def ensure_cadastro_tables() -> bool:
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, nome STRING, descricao STRING, {audit})",
         f"CREATE TABLE IF NOT EXISTS {_cad('subdominios')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, dominio_id BIGINT, nome STRING, descricao STRING, {audit})",
+        # Cadastro de responsáveis por domínio/sub-domínio. `tipo` distingue
+        # Data Owner de Data Steward — mesma tabela, mesmo formulário (com um
+        # seletor de tipo no topo), pra reaproveitar toda a lógica de vínculo
+        # a domínio/sub-domínio.
         f"CREATE TABLE IF NOT EXISTS {_cad('data_stewards')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, dominio_id BIGINT, subdominio_id BIGINT, "
-        f"nome STRING, email STRING, {audit})",
+        f"tipo STRING, nome STRING, email STRING, {audit})",
         f"CREATE TABLE IF NOT EXISTS {_cad('permissoes')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, email STRING, papel STRING, {audit})",
         # Dashboards AI/BI (Lakeview) registrados no app, vinculados a um domínio
@@ -1246,9 +1251,14 @@ def ensure_cadastro_tables() -> bool:
         f"aprovador STRING, decidido_em TIMESTAMP, motivo_decisao STRING, "
         f"ambiente STRING, criado_em TIMESTAMP)",
         # Glossário de termos de negócio / indicadores. Campos exclusivos de
-        # indicador (variaveis_utilizadas, fonte_variavel, memoria_calculo,
-        # tipo_grafico, dimensoes) ficam em branco pra um "Termo" comum — não
-        # há validação condicional, só orientação na tela.
+        # indicador (variaveis_utilizadas, memoria_calculo, restricoes,
+        # nivel_apuracao, unidade, dimensao_tabelas, metrica_tabelas) ficam em
+        # branco/"[]" pra um "Termo" comum. dimensao_tabelas e metrica_tabelas
+        # guardam uma lista JSON de [{"catalogo","schema","tabela","colunas":[...]}]
+        # — várias tabelas e colunas podem compor tanto a dimensão quanto a
+        # métrica. `fonte_variavel`, `tipo_grafico` e `dimensoes` são colunas
+        # legadas (versão anterior do módulo) mantidas só por compatibilidade
+        # com registros antigos — a tela não lê/grava mais nelas.
         f"CREATE TABLE IF NOT EXISTS {_ont('termos_negocio')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
         f"tipo STRING, nome STRING, objetivo STRING, observacoes STRING, "
@@ -1257,7 +1267,8 @@ def ensure_cadastro_tables() -> bool:
         f"rotulo_seguranca STRING, rotulo_privacidade STRING, "
         f"nivel_apuracao STRING, unidade STRING, "
         f"variaveis_utilizadas STRING, fonte_variavel STRING, memoria_calculo STRING, "
-        f"tipo_grafico STRING, dimensoes STRING, restricoes STRING, {audit})",
+        f"tipo_grafico STRING, dimensoes STRING, restricoes STRING, "
+        f"dimensao_tabelas STRING, metrica_tabelas STRING, {audit})",
     ]
     for stmt in ddl:
         run_exec(stmt)  # SP
@@ -1275,6 +1286,37 @@ def ensure_cadastro_tables() -> bool:
         for col in ("ver_logs", "ver_cadastros", "aprovador_tags"):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS ({col} BOOLEAN)")
+    except Exception:
+        pass
+    # Coluna `tipo` em `data_stewards` (idempotente p/ tabelas já existentes,
+    # criadas antes de unificar Owner e Steward no mesmo cadastro). Registros
+    # antigos (sem tipo) eram todos stewards.
+    try:
+        cols_df = run_query(
+            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+            f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
+            f"AND lower(table_name) = 'data_stewards'"
+        )
+        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
+        if "tipo" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('data_stewards')} ADD COLUMNS (tipo STRING)")
+            run_exec(f"UPDATE {_cad('data_stewards')} SET tipo = 'Steward' WHERE tipo IS NULL")
+    except Exception:
+        pass
+    # Colunas `dimensao_tabelas`/`metrica_tabelas` em `termos_negocio`
+    # (idempotente p/ tabelas já existentes, criadas antes do redesenho do
+    # picker de tabelas/colunas). Registros antigos ficam com NULL, que o
+    # parser de JSON trata como lista vazia.
+    try:
+        cols_df = run_query(
+            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+            f"WHERE lower(table_schema) = {q_str(ONTOLOGIA_SCHEMA.lower())} "
+            f"AND lower(table_name) = 'termos_negocio'"
+        )
+        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
+        for col in ("dimensao_tabelas", "metrica_tabelas"):
+            if col not in existing_cols:
+                run_exec(f"ALTER TABLE {_ont('termos_negocio')} ADD COLUMNS ({col} STRING)")
     except Exception:
         pass
     # Semeia o admin inicial se a tabela de permissões estiver vazia.
@@ -1341,7 +1383,8 @@ def list_subdominios() -> pd.DataFrame:
 @st.cache_data(ttl=30, show_spinner=False)
 def list_stewards() -> pd.DataFrame:
     return run_query(
-        f"SELECT id, dominio_id, subdominio_id, nome, email FROM {_cad('data_stewards')} ORDER BY nome"
+        f"SELECT id, coalesce(tipo, 'Steward') AS tipo, dominio_id, subdominio_id, nome, email "
+        f"FROM {_cad('data_stewards')} ORDER BY nome"
     )
 
 
@@ -1359,8 +1402,8 @@ def list_termos_negocio() -> pd.DataFrame:
         f"SELECT id, tipo, nome, objetivo, observacoes, palavras_chave, macroprocesso, "
         f"dominio_id, subdominio_id, data_owner, data_steward, "
         f"rotulo_seguranca, rotulo_privacidade, nivel_apuracao, unidade, "
-        f"variaveis_utilizadas, fonte_variavel, memoria_calculo, tipo_grafico, "
-        f"dimensoes, restricoes FROM {_ont('termos_negocio')} ORDER BY nome"
+        f"variaveis_utilizadas, memoria_calculo, restricoes, "
+        f"dimensao_tabelas, metrica_tabelas FROM {_ont('termos_negocio')} ORDER BY nome"
     )
 
 
@@ -1539,7 +1582,8 @@ Regras importantes:
 - Você é SOMENTE CONSULTA. Você não aplica tag, não grava comentário, não
   cadastra/edita termo de negócio e não aprova/rejeita item de backlog — se o
   usuário pedir uma dessas ações, explique que ele mesmo faz isso pela tela do
-  app (Governança, Cadastros → Termos de Negócio, ou Aprovações → Backlog) e,
+  app (Governança, Glossário → Termos de Negócio para consultar, Cadastros →
+  Termos de Negócio (edição) para editar, ou Aprovações → Backlog) e,
   se ajudar, oriente o caminho.
 - Use as ferramentas disponíveis para responder com dados reais em vez de
   chutar. Se uma pergunta pedir dados de uma tabela específica, peça
@@ -1589,7 +1633,10 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "data_stewards",
-            "description": "Data stewards cadastrados, com o domínio/sub-domínio de cada um.",
+            "description": (
+                "Data owners e data stewards cadastrados (campo 'tipo' distingue os "
+                "dois), com o domínio/sub-domínio de cada um."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -1614,10 +1661,11 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "termos_de_negocio",
             "description": (
-                "Glossário de termos de negócio e indicadores cadastrados: nome, "
-                "objetivo, domínio/sub-domínio, data owner/steward, rótulos de "
-                "segurança/privacidade e, para indicadores, variáveis, fórmula "
-                "(memória de cálculo), tipo de gráfico e dimensões."
+                "Glossário de termos de negócio e indicadores cadastrados: tipo "
+                "(Termo/Indicador), nome, objetivo, domínio/sub-domínio, data "
+                "owner/steward, rótulos de segurança/privacidade e, para "
+                "indicadores, variáveis, fórmula (memória de cálculo), restrições "
+                "e as tabelas/colunas que compõem a dimensão e a métrica."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -1846,7 +1894,7 @@ def render_assistant_panel(user: str) -> None:
 
 def page_dominios() -> None:
     st.title("🗂️ Domínios")
-    st.caption("Cadastro principal. Sub-domínios e Data Stewards se vinculam a um domínio.")
+    st.caption("Cadastro principal. Sub-domínios, Data Owners e Data Stewards se vinculam a um domínio.")
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
     user = st.session_state.get("user", "")
@@ -2002,8 +2050,12 @@ def page_subdominios() -> None:
 
 
 def page_stewards() -> None:
-    st.title("🧑‍💼 Data Stewards")
-    st.caption("Vincule um responsável a um Domínio e Sub-domínio.")
+    st.title("🧑‍💼 Data Owners & Stewards")
+    st.caption(
+        "Cadastro de responsáveis vinculados a um Domínio e Sub-domínio. Escolha "
+        "logo abaixo se este registro é um **Data Owner** ou um **Data Steward** — "
+        "os dois usam o mesmo cadastro."
+    )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
     actor = st.session_state.get("user", "")
@@ -2018,8 +2070,8 @@ def page_stewards() -> None:
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
         show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, i))
     st.dataframe(
-        (show.rename(columns={"nome": "Nome", "email": "E-mail"})
-             [["Nome", "E-mail", "Domínio", "Sub-domínio"]] if not show.empty else show),
+        (show.rename(columns={"tipo": "Tipo", "nome": "Nome", "email": "E-mail"})
+             [["Tipo", "Nome", "E-mail", "Domínio", "Sub-domínio"]] if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
 
@@ -2032,6 +2084,9 @@ def page_stewards() -> None:
 
     st.divider()
     st.markdown("#### Adicionar")
+
+    tipo = st.selectbox("Tipo *", options=_PESSOA_TIPO_OPTIONS, key="stw_tipo")
+    tipo_label = tipo.lower()
 
     # Busca de usuário (reativa — fora de form) → pré-preenche nome + e-mail.
     # A lista une workspace + conta (Account SCIM); se mesmo assim o usuário
@@ -2081,7 +2136,7 @@ def page_stewards() -> None:
         key="stw_sub", disabled=not sub_ids,
     ) if sub_ids else None
 
-    if st.button("💾 Adicionar steward", type="primary", disabled=not sub_ids):
+    if st.button(f"💾 Adicionar {tipo_label}", type="primary", disabled=not sub_ids):
         if not (nome and email):
             st.warning("Selecione/informe o usuário (nome e e-mail).")
             return
@@ -2089,20 +2144,22 @@ def page_stewards() -> None:
             st.warning("Informe um e-mail corporativo válido.")
             return
         if _count(
-            f"SELECT count(*) FROM {_cad('data_stewards')} WHERE dominio_id = {int(dom_id)} "
+            f"SELECT count(*) FROM {_cad('data_stewards')} WHERE tipo = {q_str(tipo)} "
+            f"AND dominio_id = {int(dom_id)} "
             f"AND subdominio_id = {int(sub_id)} AND lower(email) = {q_str(email.lower())}"
         ):
-            st.error("Esse steward já está vinculado a este domínio/sub-domínio.")
+            st.error(f"Esse {tipo_label} já está vinculado a este domínio/sub-domínio.")
             return
-        # INSERT atômico: bloqueia o mesmo e-mail no mesmo domínio/sub-domínio.
+        # INSERT atômico: bloqueia o mesmo e-mail (+ tipo) no mesmo domínio/sub-domínio.
         run_exec(
-            f"INSERT INTO {_cad('data_stewards')} (dominio_id, subdominio_id, nome, email, criado_em, criado_por) "
-            f"SELECT {int(dom_id)}, {int(sub_id)}, {q_str(nome)}, {q_str(email)}, current_timestamp(), {q_str(actor)} "
+            f"INSERT INTO {_cad('data_stewards')} (tipo, dominio_id, subdominio_id, nome, email, criado_em, criado_por) "
+            f"SELECT {q_str(tipo)}, {int(dom_id)}, {int(sub_id)}, {q_str(nome)}, {q_str(email)}, current_timestamp(), {q_str(actor)} "
             f"FROM (SELECT 1) WHERE NOT EXISTS "
-            f"(SELECT 1 FROM {_cad('data_stewards')} WHERE dominio_id = {int(dom_id)} "
+            f"(SELECT 1 FROM {_cad('data_stewards')} WHERE tipo = {q_str(tipo)} "
+            f"AND dominio_id = {int(dom_id)} "
             f"AND subdominio_id = {int(sub_id)} AND lower(email) = {q_str(email.lower())})"
         )
-        _finish_write("Data steward adicionado.")
+        _finish_write(f"{tipo} adicionado.")
 
     # Excluir
     recs = stw.to_dict("records")
@@ -2110,15 +2167,15 @@ def page_stewards() -> None:
         st.divider()
         st.markdown("#### Excluir")
         opts = [
-            f'{r["nome"]} <{r["email"]}> — {dom_nome.get(r["dominio_id"], r["dominio_id"])} › '
+            f'[{r["tipo"]}] {r["nome"]} <{r["email"]}> — {dom_nome.get(r["dominio_id"], r["dominio_id"])} › '
             f'{sub_nome.get(r["subdominio_id"], r["subdominio_id"])} (id {r["id"]})'
             for r in recs
         ]
         sel = st.selectbox("Registro", options=opts, key="stw_del_sel")
-        if st.button("🗑️ Excluir steward selecionado"):
+        if st.button("🗑️ Excluir registro selecionado"):
             rid = recs[opts.index(sel)]["id"]
             run_exec(f"DELETE FROM {_cad('data_stewards')} WHERE id = {int(rid)}")
-            _finish_write("Data steward excluído.")
+            _finish_write("Registro excluído.")
 
 
 def page_dashboards() -> None:
@@ -2304,14 +2361,141 @@ def page_padroes_dado_pessoal() -> None:
 
 _NIVEL_APURACAO_OPTIONS = ["", "Diário", "Semanal", "Mensal", "Trimestral", "Semestral", "Anual", "Sob demanda"]
 _TERMO_TIPO_OPTIONS = ["Termo", "Indicador"]
+_UNIDADE_OPTIONS = ["", "R$", "%", "un", "dias", "horas", "quantidade", "índice", "score", "Outra…"]
+_PESSOA_TIPO_OPTIONS = ["Steward", "Owner"]
+
+
+def _parse_tabelas_json(raw: str | None) -> list[dict]:
+    """Desserializa a lista de tabelas/colunas (dimensão ou métrica de um indicador)."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _dump_tabelas_json(items: list[dict]) -> str:
+    return json.dumps(items, ensure_ascii=False)
+
+
+def _sync_tabela_picker_state(kind: str, record_key: str, initial: list[dict]) -> None:
+    """(Re)carrega o estado do picker de tabelas/colunas quando o registro em
+    edição muda — pra não misturar seleções de um termo com as de outro."""
+    marker_key = f"term_{kind}_items_for"
+    items_key = f"term_{kind}_items"
+    if st.session_state.get(marker_key) != record_key:
+        st.session_state[items_key] = [dict(it) for it in initial]
+        st.session_state[marker_key] = record_key
+
+
+def _render_tabela_picker(user: str, kind: str) -> list[dict]:
+    """Picker reativo de tabelas + colunas (multi), no mesmo padrão de
+    Catalog → Schema → Table do módulo de Governança/Catalogação. Cada tabela
+    adicionada pode trazer uma ou mais colunas (vazio = tabela inteira)."""
+    items_key = f"term_{kind}_items"
+    items: list[dict] = st.session_state.setdefault(items_key, [])
+    # "Geração" do formulário de adicionar tabela: incrementada a cada tabela
+    # adicionada, trocando as keys dos widgets abaixo — isso garante que eles
+    # voltem a nascer em branco (apagar a key do session_state sozinho não é
+    # confiável para esse tipo de selectbox).
+    gen = st.session_state.get(f"term_{kind}_gen", 0)
+
+    if items:
+        for idx, it in enumerate(items):
+            cols_txt = ", ".join(it.get("colunas") or []) or "(tabela inteira)"
+            c1, c2 = st.columns([8, 1])
+            with c1:
+                st.caption(f'`{it["catalogo"]}.{it["schema"]}.{it["tabela"]}` — {cols_txt}')
+            with c2:
+                if st.button("🗑️", key=f"term_{kind}_rm_{idx}"):
+                    items.pop(idx)
+                    st.rerun()
+    else:
+        st.caption("Nenhuma tabela adicionada ainda.")
+
+    with st.container(border=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            catalogs = list_catalogs(user)
+            catalog = st.selectbox(
+                "Catalog", options=catalogs, index=None, placeholder="Selecione…",
+                key=f"term_{kind}_new_cat_{gen}",
+            )
+        schema = None
+        with c2:
+            if catalog:
+                try:
+                    schemas = [s for s in list_schemas(user, catalog) if schema_belongs_to_env(s)]
+                except Exception as exc:
+                    schemas = []
+                    st.caption(f"⚠️ Sem acesso a schemas de `{catalog}`: {exc}")
+                schema = st.selectbox(
+                    "Schema", options=schemas, index=None, placeholder="Selecione…",
+                    key=f"term_{kind}_new_schema_{gen}",
+                )
+        table = None
+        with c3:
+            if catalog and schema:
+                try:
+                    tables = list_tables(user, catalog, schema)
+                except Exception as exc:
+                    tables = []
+                    st.caption(f"⚠️ Sem acesso a tabelas de `{catalog}.{schema}`: {exc}")
+                table = st.selectbox(
+                    "Table", options=tables, index=None, placeholder="Selecione…",
+                    key=f"term_{kind}_new_table_{gen}",
+                )
+        if catalog and schema and table:
+            try:
+                col_names = [c.name for c in get_columns(user, catalog, schema, table)]
+            except Exception as exc:
+                col_names = []
+                st.caption(f"⚠️ Sem acesso a colunas de `{catalog}.{schema}.{table}`: {exc}")
+            novas_colunas = st.multiselect(
+                "Colunas (vazio = tabela inteira)", options=col_names,
+                key=f"term_{kind}_new_cols_{gen}",
+            )
+            if st.button("➕ Adicionar tabela", key=f"term_{kind}_add_{gen}"):
+                items.append({
+                    "catalogo": catalog, "schema": schema, "tabela": table,
+                    "colunas": novas_colunas,
+                })
+                st.session_state[f"term_{kind}_gen"] = gen + 1
+                st.rerun()
+    return items
+
+
+def _select_pessoa_cadastrada(
+    label: str, tipo: str, pessoas: list[dict], dom_id, sub_id, cur_value: str, key_prefix: str,
+) -> str:
+    """Dropdown de Data Owner/Data Steward a partir do cadastro (mesma tabela,
+    filtrada por `tipo`), com fallback de texto livre quando não há domínio
+    escolhido ou ninguém cadastrado pra esse domínio/sub-domínio."""
+    candidatos = [
+        p for p in pessoas
+        if p["tipo"] == tipo and dom_id is not None and p["dominio_id"] == dom_id
+        and (sub_id is None or p["subdominio_id"] == sub_id)
+    ]
+    if candidatos:
+        opts = ["(nenhum)"] + [f'{p["nome"]} <{p["email"]}>' for p in candidatos]
+        idx = opts.index(cur_value) if cur_value in opts else 0
+        picked = st.selectbox(label, options=opts, index=idx, key=f"{key_prefix}_sel")
+        return "" if picked == "(nenhum)" else picked
+    msg = (
+        "Selecione um domínio para escolher" if dom_id is None
+        else "Ninguém cadastrado para esse domínio/sub-domínio"
+    )
+    st.caption(f"{msg} — cadastre em Data Owners & Stewards, se necessário.")
+    return st.text_input(f"{label} (texto livre)", value=cur_value or "", key=f"{key_prefix}_txt")
 
 
 def page_termos_negocio() -> None:
     st.title("📖 Termos de Negócio")
     st.caption(
-        "Glossário de termos de negócio e indicadores. Os campos de indicador "
-        "(variáveis, fonte, memória de cálculo, tipo de gráfico, dimensões) ficam "
-        "sempre visíveis — só preencha quando o registro for um **Indicador**."
+        "Glossário de termos de negócio e indicadores. Escolha o **tipo** logo "
+        "abaixo — os campos do formulário mudam de acordo com a escolha."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
@@ -2332,7 +2516,7 @@ def page_termos_negocio() -> None:
     termos = list_termos_negocio()
     show = termos.copy()
     if not show.empty:
-        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, "—") if pd.notna(i) else "—")
         show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "—") if pd.notna(i) else "—")
     st.dataframe(
         (show.rename(columns={
@@ -2346,9 +2530,6 @@ def page_termos_negocio() -> None:
     if not can_edit(role):
         st.info("Seu perfil é **leitor** — visualização apenas.")
         return
-    if not doms:
-        st.warning("Cadastre um **Domínio** primeiro.")
-        return
 
     recs = termos.to_dict("records")
     opts = ["(novo)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
@@ -2360,20 +2541,30 @@ def page_termos_negocio() -> None:
         "id": None, "tipo": "Termo", "nome": "", "objetivo": "", "observacoes": "",
         "palavras_chave": "", "macroprocesso": "", "dominio_id": None, "subdominio_id": None,
         "data_owner": "", "data_steward": "", "rotulo_seguranca": "", "rotulo_privacidade": "",
-        "nivel_apuracao": "", "unidade": "", "variaveis_utilizadas": "", "fonte_variavel": "",
-        "memoria_calculo": "", "tipo_grafico": "", "dimensoes": "", "restricoes": "",
+        "nivel_apuracao": "", "unidade": "", "variaveis_utilizadas": "",
+        "memoria_calculo": "", "restricoes": "", "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
     }
 
-    # Domínio/sub-domínio e a busca de data owner ficam FORA do form (reativos),
-    # pra filtrar sub-domínio e steward conforme o domínio escolhido — igual
-    # `page_dashboards`/`page_stewards`.
-    dom_ids = [d["id"] for d in doms]
-    dom_idx = dom_ids.index(cur["dominio_id"]) if editing and cur["dominio_id"] in dom_ids else 0
-    dom_id = st.selectbox(
-        "Domínio de dados *", options=dom_ids, index=dom_idx,
-        format_func=lambda i: dom_nome.get(i, i), key="term_dom",
+    # Tipo primeiro e fora do form (reativo): decide quais campos aparecem
+    # embaixo. Todos os demais widgets também ficam fora do form por causa do
+    # picker de tabelas/colunas do indicador, que precisa recarregar a cada
+    # escolha de catalog/schema/table (igual select_object/render_editor).
+    tipo = st.selectbox(
+        "Tipo *", options=_TERMO_TIPO_OPTIONS,
+        index=_TERMO_TIPO_OPTIONS.index(cur["tipo"]) if cur.get("tipo") in _TERMO_TIPO_OPTIONS else 0,
+        key="term_tipo",
     )
-    sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id]
+    is_indicador = tipo == "Indicador"
+
+    dom_ids = [d["id"] for d in doms]
+    dom_options = [None] + dom_ids
+    cur_dom = cur.get("dominio_id")
+    dom_idx = dom_options.index(cur_dom) if editing and cur_dom in dom_options else 0
+    dom_id = st.selectbox(
+        "Domínio de dados", options=dom_options, index=dom_idx,
+        format_func=lambda i: "(nenhum)" if i is None else dom_nome.get(i, i), key="term_dom",
+    )
+    sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id] if dom_id is not None else []
     sub_options = [None] + sub_ids_all
     cur_sub = cur.get("subdominio_id")
     sub_idx = sub_options.index(cur_sub) if editing and cur_sub in sub_options else 0
@@ -2382,115 +2573,125 @@ def page_termos_negocio() -> None:
         format_func=lambda i: "(nenhum)" if i is None else sub_nome.get(i, i),
     )
 
-    dom_stewards = [
-        s for s in stewards if s["dominio_id"] == dom_id and (sub_id is None or s["subdominio_id"] == sub_id)
-    ]
-    if dom_stewards:
-        steward_opts = ["(nenhum)"] + [f'{s["nome"]} <{s["email"]}>' for s in dom_stewards]
-        cur_steward_idx = steward_opts.index(cur["data_steward"]) if editing and cur.get("data_steward") in steward_opts else 0
-        data_steward = st.selectbox("Data steward", options=steward_opts, index=cur_steward_idx, key="term_steward")
-        data_steward = "" if data_steward == "(nenhum)" else data_steward
-    else:
-        st.caption("Nenhum steward cadastrado para esse domínio/sub-domínio — cadastre em Data Stewards, se necessário.")
-        data_steward = st.text_input("Data steward (texto livre)", value=cur.get("data_steward") or "", key="term_steward_txt")
-
-    users = list_users_for_search()
-    owner_manual = st.toggle(
-        "✍️ Informar data owner manualmente", value=not users, disabled=not users, key="term_owner_manual",
+    data_owner = _select_pessoa_cadastrada(
+        "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", "term_owner",
     )
-    if users and not owner_manual:
-        term_owner = st.text_input("🔍 Buscar data owner (nome ou e-mail)", key="term_owner_search")
-        data_owner = cur.get("data_owner") or ""
-        if term_owner:
-            t = term_owner.lower()
-            matches = [u for u in users if t in u["nome"].lower() or t in u["email"].lower()][:50]
-            if matches:
-                pick = st.selectbox(
-                    "Resultado", options=matches, format_func=lambda u: f'{u["nome"]} <{u["email"]}>',
-                    key="term_owner_pick",
-                )
-                data_owner = f'{pick["nome"]} <{pick["email"]}>'
-            else:
-                st.caption("Nenhum usuário encontrado — ative *Informar manualmente* acima.")
-    else:
-        data_owner = st.text_input("Data owner", value=cur.get("data_owner") or "", key="term_owner_txt")
+    data_steward = _select_pessoa_cadastrada(
+        "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", "term_steward",
+    )
 
-    with st.form("form_termo"):
-        c1, c2 = st.columns(2)
-        with c1:
-            tipo = st.selectbox(
-                "Tipo *", options=_TERMO_TIPO_OPTIONS,
-                index=_TERMO_TIPO_OPTIONS.index(cur["tipo"]) if cur.get("tipo") in _TERMO_TIPO_OPTIONS else 0,
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        nome = st.text_input(
+            "Nome do indicador *" if is_indicador else "Nome do termo *",
+            value=cur["nome"] or "", key="term_nome",
+        )
+        macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "", key="term_macro")
+    with c2:
+        palavras_chave = st.text_input("Palavras-chave", value=cur.get("palavras_chave") or "", key="term_kw")
+    objetivo = st.text_area("Objetivo", value=cur.get("objetivo") or "", key="term_obj")
+
+    st.markdown("##### Classificação")
+    c3, c4 = st.columns(2)
+    with c3:
+        rotulo_seguranca = st.selectbox(
+            "Rótulo de segurança", options=seguranca_opts,
+            index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
+            key="term_seg",
+        )
+    with c4:
+        rotulo_privacidade = st.selectbox(
+            "Rótulo de privacidade", options=privacidade_opts,
+            index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
+            key="term_priv",
+        )
+
+    variaveis_utilizadas = memoria_calculo = restricoes = unidade = nivel_apuracao = ""
+    dim_items: list[dict] = []
+    met_items: list[dict] = []
+    if is_indicador:
+        st.markdown("##### Indicador")
+        c5, c6 = st.columns(2)
+        with c5:
+            default_unidade = cur.get("unidade") or ""
+            unidade_opts = _UNIDADE_OPTIONS if default_unidade in _UNIDADE_OPTIONS else [default_unidade] + _UNIDADE_OPTIONS
+            unidade_sel = st.selectbox(
+                "Unidade", options=unidade_opts, index=unidade_opts.index(default_unidade), key="term_unidade",
             )
-            nome = st.text_input("Nome do termo *", value=cur["nome"] or "")
-            macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "")
-        with c2:
-            palavras_chave = st.text_input("Palavras-chave", value=cur.get("palavras_chave") or "")
+            if unidade_sel == "Outra…":
+                unidade = st.text_input(
+                    "Unidade (digite)",
+                    value="" if default_unidade in _UNIDADE_OPTIONS else default_unidade,
+                    key="term_unidade_custom",
+                )
+            else:
+                unidade = unidade_sel
+        with c6:
             nivel_apuracao = st.selectbox(
                 "Nível de apuração", options=_NIVEL_APURACAO_OPTIONS,
                 index=_NIVEL_APURACAO_OPTIONS.index(cur["nivel_apuracao"]) if cur.get("nivel_apuracao") in _NIVEL_APURACAO_OPTIONS else 0,
+                key="term_nivel",
             )
-            unidade = st.text_input("Unidade", value=cur.get("unidade") or "", help="Ex.: R$, %, un, dias")
-        objetivo = st.text_area("Objetivo", value=cur.get("objetivo") or "")
+        variaveis_utilizadas = st.text_area("Variáveis utilizadas", value=cur.get("variaveis_utilizadas") or "", key="term_vars")
+        restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "", key="term_restr")
 
-        st.markdown("##### Classificação")
-        c3, c4 = st.columns(2)
-        with c3:
-            rotulo_seguranca = st.selectbox(
-                "Rótulo de segurança", options=seguranca_opts,
-                index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
-            )
-        with c4:
-            rotulo_privacidade = st.selectbox(
-                "Rótulo de privacidade", options=privacidade_opts,
-                index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
-            )
+        record_key = str(cur.get("id")) if editing else "novo"
+        _sync_tabela_picker_state("dim", record_key, _parse_tabelas_json(cur.get("dimensao_tabelas")))
+        _sync_tabela_picker_state("met", record_key, _parse_tabelas_json(cur.get("metrica_tabelas")))
 
-        st.markdown("##### Indicador (preencha quando `Tipo = Indicador`)")
-        variaveis_utilizadas = st.text_area("Variáveis utilizadas nos dados/contexto", value=cur.get("variaveis_utilizadas") or "")
-        fonte_variavel = st.text_input("Fonte da variável", value=cur.get("fonte_variavel") or "")
-        memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "")
-        c5, c6 = st.columns(2)
-        with c5:
-            tipo_grafico = st.text_input("Tipo de gráfico", value=cur.get("tipo_grafico") or "", help="Ex.: linha, barra, pizza, tabela")
-        with c6:
-            dimensoes = st.text_input("Dimensões usadas no indicador", value=cur.get("dimensoes") or "")
-        restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "")
+        st.markdown("###### Dimensão — tabelas e colunas que compõem a dimensão")
+        dim_items = _render_tabela_picker(user, "dim")
+        st.markdown("###### Métrica — tabelas e colunas que formam a métrica")
+        met_items = _render_tabela_picker(user, "met")
 
-        observacoes = st.text_area("Observações", value=cur.get("observacoes") or "")
-        saved = st.form_submit_button("💾 Salvar", type="primary")
+        memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "", key="term_memoria")
+
+    observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key="term_obs")
+
+    st.divider()
+    saved = st.button("💾 Salvar", type="primary", key="term_save")
 
     if saved:
         nome = (nome or "").strip()
         if not nome:
             st.warning("Informe o nome do termo.")
             return
+        dom_sql = "NULL" if dom_id is None else str(int(dom_id))
         sub_sql = "NULL" if sub_id is None else str(int(sub_id))
         values = dict(
             tipo=tipo, nome=nome, objetivo=objetivo, observacoes=observacoes,
             palavras_chave=palavras_chave, macroprocesso=macroprocesso,
             data_owner=data_owner, data_steward=data_steward,
             rotulo_seguranca=rotulo_seguranca, rotulo_privacidade=rotulo_privacidade,
-            nivel_apuracao=nivel_apuracao, unidade=unidade,
-            variaveis_utilizadas=variaveis_utilizadas, fonte_variavel=fonte_variavel,
-            memoria_calculo=memoria_calculo, tipo_grafico=tipo_grafico,
-            dimensoes=dimensoes, restricoes=restricoes,
+            nivel_apuracao=(nivel_apuracao if is_indicador else ""),
+            unidade=(unidade if is_indicador else ""),
+            variaveis_utilizadas=(variaveis_utilizadas if is_indicador else ""),
+            memoria_calculo=(memoria_calculo if is_indicador else ""),
+            restricoes=(restricoes if is_indicador else ""),
+            dimensao_tabelas=(_dump_tabelas_json(dim_items) if is_indicador else "[]"),
+            metrica_tabelas=(_dump_tabelas_json(met_items) if is_indicador else "[]"),
         )
         if editing:
             set_clause = ", ".join(f"{col} = {q_str(val)}" for col, val in values.items())
             run_exec(
                 f"UPDATE {_ont('termos_negocio')} SET {set_clause}, "
-                f"dominio_id = {int(dom_id)}, subdominio_id = {sub_sql}, "
+                f"dominio_id = {dom_sql}, subdominio_id = {sub_sql}, "
                 f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                 f"WHERE id = {int(cur['id'])}"
             )
         else:
             cols = ["dominio_id", "subdominio_id", *values.keys(), "criado_em", "criado_por"]
-            vals_sql = [str(int(dom_id)), sub_sql, *[q_str(v) for v in values.values()], "current_timestamp()", q_str(user)]
+            vals_sql = [dom_sql, sub_sql, *[q_str(v) for v in values.values()], "current_timestamp()", q_str(user)]
             run_exec(
                 f"INSERT INTO {_ont('termos_negocio')} ({', '.join(cols)}) "
                 f"VALUES ({', '.join(vals_sql)})"
             )
+        # Limpa o estado do picker de tabelas pra não vazar seleção entre
+        # registros diferentes no próximo rerun (_finish_write já chama rerun).
+        for kind in ("dim", "met"):
+            st.session_state.pop(f"term_{kind}_items", None)
+            st.session_state.pop(f"term_{kind}_items_for", None)
         _finish_write("Termo de negócio salvo.")
 
     if editing:
@@ -2499,6 +2700,124 @@ def page_termos_negocio() -> None:
         if st.button(f"🗑️ Excluir termo '{cur['nome']}'"):
             run_exec(f"DELETE FROM {_ont('termos_negocio')} WHERE id = {int(cur['id'])}")
             _finish_write("Termo de negócio excluído.")
+
+
+def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
+    """Card de detalhe de um termo/indicador — somente leitura."""
+    is_indicador = cur.get("tipo") == "Indicador"
+    dom = dom_nome.get(cur.get("dominio_id"), "—") if pd.notna(cur.get("dominio_id")) else "—"
+    sub = sub_nome.get(cur.get("subdominio_id"), "—") if pd.notna(cur.get("subdominio_id")) else "—"
+
+    st.markdown(f"### {'📈' if is_indicador else '📖'} {cur['nome']}")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f"**Tipo**\n\n{cur.get('tipo') or '—'}")
+    c2.markdown(f"**Domínio**\n\n{dom}")
+    c3.markdown(f"**Sub-domínio**\n\n{sub}")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f"**Data Owner**\n\n{cur.get('data_owner') or '—'}")
+    c2.markdown(f"**Data Steward**\n\n{cur.get('data_steward') or '—'}")
+    c3.markdown(f"**Macroprocesso**\n\n{cur.get('macroprocesso') or '—'}")
+
+    if cur.get("palavras_chave"):
+        st.markdown(f"**Palavras-chave:** {cur['palavras_chave']}")
+    if cur.get("objetivo"):
+        st.markdown("**Objetivo**")
+        st.write(cur["objetivo"])
+
+    st.markdown(
+        f"**Rótulo de segurança:** {cur.get('rotulo_seguranca') or '—'}  |  "
+        f"**Rótulo de privacidade:** {cur.get('rotulo_privacidade') or '—'}"
+    )
+
+    if is_indicador:
+        st.markdown("#### Indicador")
+        c1, c2 = st.columns(2)
+        c1.markdown(f"**Unidade**\n\n{cur.get('unidade') or '—'}")
+        c2.markdown(f"**Nível de apuração**\n\n{cur.get('nivel_apuracao') or '—'}")
+        if cur.get("variaveis_utilizadas"):
+            st.markdown("**Variáveis utilizadas**")
+            st.write(cur["variaveis_utilizadas"])
+        if cur.get("memoria_calculo"):
+            st.markdown("**Memória de cálculo (fórmula)**")
+            st.write(cur["memoria_calculo"])
+        if cur.get("restricoes"):
+            st.markdown("**Restrições**")
+            st.write(cur["restricoes"])
+        for titulo, campo in (("Dimensão", "dimensao_tabelas"), ("Métrica", "metrica_tabelas")):
+            items = _parse_tabelas_json(cur.get(campo))
+            if items:
+                st.markdown(f"**{titulo} — tabelas e colunas**")
+                for it in items:
+                    cols_txt = ", ".join(it.get("colunas") or []) or "(tabela inteira)"
+                    st.caption(f'`{it["catalogo"]}.{it["schema"]}.{it["tabela"]}` — {cols_txt}')
+
+    if cur.get("observacoes"):
+        st.markdown("**Observações**")
+        st.write(cur["observacoes"])
+
+
+def page_consulta_termos() -> None:
+    st.title("📚 Glossário de Termos de Negócio")
+    st.caption(
+        "Consulta aberta ao glossário de termos de negócio e indicadores. Use a "
+        "busca e os filtros para localizar um termo; os detalhes aparecem abaixo."
+    )
+
+    termos = list_termos_negocio()
+    if termos.empty:
+        st.info("Nenhum termo de negócio cadastrado ainda.")
+        return
+
+    doms = list_dominios().to_dict("records")
+    subs = list_subdominios().to_dict("records")
+    dom_nome = {d["id"]: d["nome"] for d in doms}
+    sub_nome = {s["id"]: s["nome"] for s in subs}
+
+    df = termos.copy()
+    df["Domínio"] = df["dominio_id"].map(lambda i: dom_nome.get(i, "—") if pd.notna(i) else "—")
+    df["Sub-domínio"] = df["subdominio_id"].map(lambda i: sub_nome.get(i, "—") if pd.notna(i) else "—")
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        busca = st.text_input(
+            "Buscar", placeholder="nome, palavra-chave ou objetivo…", key="cons_busca",
+        )
+    with c2:
+        tipo_f = st.selectbox("Tipo", options=["(todos)"] + _TERMO_TIPO_OPTIONS, key="cons_tipo")
+    with c3:
+        dom_opts = ["(todos)"] + sorted({d for d in df["Domínio"] if d != "—"})
+        dom_f = st.selectbox("Domínio", options=dom_opts, key="cons_dom")
+
+    view = df
+    if busca:
+        q = busca.strip().lower()
+        view = view[
+            view["nome"].fillna("").str.lower().str.contains(q, regex=False)
+            | view["palavras_chave"].fillna("").str.lower().str.contains(q, regex=False)
+            | view["objetivo"].fillna("").str.lower().str.contains(q, regex=False)
+        ]
+    if tipo_f != "(todos)":
+        view = view[view["tipo"] == tipo_f]
+    if dom_f != "(todos)":
+        view = view[view["Domínio"] == dom_f]
+
+    st.caption(f"{len(view)} termo(s) encontrado(s).")
+    st.dataframe(
+        view.rename(columns={
+            "tipo": "Tipo", "nome": "Nome", "data_owner": "Data Owner",
+            "nivel_apuracao": "Nível de Apuração",
+        })[["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner", "Nível de Apuração"]],
+        use_container_width=True, hide_index=True,
+    )
+
+    if view.empty:
+        return
+
+    st.divider()
+    recs = view.to_dict("records")
+    opts = [f'{r["nome"]}  ·  {r["tipo"]}  (id {r["id"]})' for r in recs]
+    sel = st.selectbox("Ver detalhes do termo", options=opts, key="cons_sel")
+    _render_termo_detalhe(recs[opts.index(sel)], dom_nome, sub_nome)
 
 
 def page_permissoes() -> None:
@@ -2915,6 +3234,7 @@ def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
     if is_admin:
         return ativos
     stw = list_stewards()
+    stw = stw[stw["tipo"] == "Steward"] if not stw.empty else stw
     minhas = stw[stw["email"].str.lower() == (user or "").lower()] if not stw.empty else stw
     dom_ids = set(minhas["dominio_id"].tolist()) if not minhas.empty else set()
     sub_ids = set(minhas["subdominio_id"].tolist()) if not minhas.empty else set()
@@ -2984,15 +3304,18 @@ def main() -> None:
         cadastros = [
             st.Page(page_dominios, title="Domínios", icon="🗂️"),
             st.Page(page_subdominios, title="Sub-domínios", icon="🗃️"),
-            st.Page(page_stewards, title="Data Stewards", icon="🧑‍💼"),
+            st.Page(page_stewards, title="Data Owners & Stewards", icon="🧑‍💼"),
             st.Page(page_dashboards, title="Dashboards", icon="📊"),
             st.Page(page_padroes_dado_pessoal, title="Padrões de Dado Pessoal", icon="🧬"),
-            st.Page(page_termos_negocio, title="Termos de Negócio", icon="📖"),
+            st.Page(page_termos_negocio, title="Termos de Negócio (edição)", icon="📖"),
         ]
         if is_admin:  # gestão de usuários/permissões é sempre admin-only
             cadastros.append(st.Page(page_permissoes, title="Usuários & Permissões", icon="🔒"))
         pages["Cadastros"] = cadastros
     pages["Governança"] = governanca
+    pages["Glossário"] = [
+        st.Page(page_consulta_termos, title="Termos de Negócio", icon="📚"),
+    ]
     if is_admin or perms["aprovador_tags"]:
         pages["Aprovações"] = [
             st.Page(page_tag_backlog, title="Backlog de Aprovação de Tags", icon="✅"),
