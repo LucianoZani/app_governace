@@ -2670,6 +2670,27 @@ def _add_keyword(kp: str) -> None:
     st.session_state[f"{kp}_kw_input"] = ""
 
 
+def _sync_editor_fields(kp: str, record_key: str) -> None:
+    """Quando o registro selecionado no editor de glossário/indicador muda,
+    remove as keys dos widgets do formulário do session_state — assim eles
+    renascem com os valores do novo registro (o Streamlit prioriza o
+    session_state sobre `value`/`index` quando o widget tem key)."""
+    marker = f"{kp}_fields_for"
+    if st.session_state.get(marker) == record_key:
+        return
+    st.session_state[marker] = record_key
+    for suf in (
+        "dom", "sub", "owner_sel", "owner_txt", "steward_sel", "steward_txt",
+        "nome", "macro", "obj", "seg", "priv", "obs",
+    ):
+        st.session_state.pop(f"{kp}_{suf}", None)
+    for k in (
+        "ind_power_steward", "term_unidade", "term_unidade_custom",
+        "term_nivel", "term_vars", "term_restr", "term_memoria",
+    ):
+        st.session_state.pop(k, None)
+
+
 def _render_power_steward_select(cur_email: str) -> str:
     """Dropdown de Power Steward (tela Indicador). A lista vem dos usuários com
     a flag `power_steward` em Usuários & Permissões — mostra o nome, grava o
@@ -2795,6 +2816,13 @@ def _render_glossario_editor(
         "memoria_calculo": "", "restricoes": "", "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
     }
 
+    # Ao trocar o registro selecionado, limpa as keys dos widgets do form pra
+    # eles renascerem com os valores do novo registro (Streamlit prioriza o
+    # session_state sobre `value`/`index` quando o widget tem key).
+    record_key = str(cur.get("id")) if editing else "novo"
+    _sync_editor_fields(kp, record_key)
+    _sync_keywords_state(kp, record_key, cur.get("palavras_chave") or "")
+
     # Todos os widgets ficam fora de st.form por causa do picker de tabelas/
     # colunas do indicador, que precisa recarregar a cada escolha de
     # catalog/schema/table (igual select_object/render_editor).
@@ -2825,9 +2853,6 @@ def _render_glossario_editor(
     data_steward = _select_pessoa_cadastrada(
         "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward",
     )
-
-    record_key = str(cur.get("id")) if editing else "novo"
-    _sync_keywords_state(kp, record_key, cur.get("palavras_chave") or "")
 
     st.divider()
     c1, c2 = st.columns(2)
@@ -2955,6 +2980,7 @@ def _render_glossario_editor(
             st.session_state.pop(f"term_{kind}_items_for", None)
         st.session_state.pop(_kw_list_key(kp), None)
         st.session_state.pop(f"{kp}_kw_for", None)
+        st.session_state.pop(f"{kp}_fields_for", None)
         _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} salvo.")
 
     if editing:
