@@ -1266,7 +1266,8 @@ def ensure_cadastro_tables() -> bool:
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
         f"tipo STRING, nome STRING, objetivo STRING, observacoes STRING, "
         f"palavras_chave STRING, macroprocesso STRING, "
-        f"dominio_id BIGINT, subdominio_id BIGINT, data_owner STRING, data_steward STRING, "
+        f"dominio_id BIGINT, subdominio_id BIGINT, "
+        f"power_steward STRING, data_owner STRING, data_steward STRING, "
         f"rotulo_seguranca STRING, rotulo_privacidade STRING, "
         f"nivel_apuracao STRING, unidade STRING, variaveis_utilizadas STRING, "
         f"memoria_calculo STRING, restricoes STRING, "
@@ -1285,7 +1286,7 @@ def ensure_cadastro_tables() -> bool:
             f"AND lower(table_name) = 'permissoes'"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
-        for col in ("ver_logs", "ver_cadastros", "aprovador_tags"):
+        for col in ("ver_logs", "ver_cadastros", "aprovador_tags", "power_steward"):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS ({col} BOOLEAN)")
     except Exception:
@@ -1303,6 +1304,20 @@ def ensure_cadastro_tables() -> bool:
         if "tipo" not in existing_cols:
             run_exec(f"ALTER TABLE {_cad('data_stewards')} ADD COLUMNS (tipo STRING)")
             run_exec(f"UPDATE {_cad('data_stewards')} SET tipo = 'Steward' WHERE tipo IS NULL")
+    except Exception:
+        pass
+    # Coluna `power_steward` em `indicadores` (idempotente p/ a tabela já
+    # existente). Guarda o e-mail do Power Steward escolhido — a lista vem de
+    # `permissoes` (flag `power_steward`).
+    try:
+        cols_df = run_query(
+            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+            f"WHERE lower(table_schema) = {q_str(ONTOLOGIA_SCHEMA.lower())} "
+            f"AND lower(table_name) = 'indicadores'"
+        )
+        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
+        if "power_steward" not in existing_cols:
+            run_exec(f"ALTER TABLE {_ont('indicadores')} ADD COLUMNS (power_steward STRING)")
     except Exception:
         pass
     # Migração da antiga `termos_negocio` (registro único com seletor de tipo)
@@ -1442,7 +1457,7 @@ def list_glossario_negocio() -> pd.DataFrame:
 @st.cache_data(ttl=30, show_spinner=False)
 def list_indicadores() -> pd.DataFrame:
     return run_query(
-        f"SELECT {_GLOSSARIO_COLS_COMUNS}, nivel_apuracao, unidade, "
+        f"SELECT {_GLOSSARIO_COLS_COMUNS}, power_steward, nivel_apuracao, unidade, "
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
         f"dimensao_tabelas, metrica_tabelas FROM {_ont('indicadores')} ORDER BY nome"
     )
@@ -1454,14 +1469,14 @@ def list_termos_negocio() -> pd.DataFrame:
     leitura) e para o Assistente de IA. O lado do glossário projeta os campos
     exclusivos de indicador como vazios."""
     return run_query(
-        f"SELECT {_GLOSSARIO_COLS_COMUNS}, "
+        f"SELECT {_GLOSSARIO_COLS_COMUNS}, CAST(NULL AS STRING) AS power_steward, "
         f"CAST(NULL AS STRING) AS nivel_apuracao, CAST(NULL AS STRING) AS unidade, "
         f"CAST(NULL AS STRING) AS variaveis_utilizadas, "
         f"CAST(NULL AS STRING) AS memoria_calculo, CAST(NULL AS STRING) AS restricoes, "
         f"'[]' AS dimensao_tabelas, '[]' AS metrica_tabelas "
         f"FROM {_ont('glossario_negocio')} "
         f"UNION ALL "
-        f"SELECT {_GLOSSARIO_COLS_COMUNS}, nivel_apuracao, unidade, "
+        f"SELECT {_GLOSSARIO_COLS_COMUNS}, power_steward, nivel_apuracao, unidade, "
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
         f"dimensao_tabelas, metrica_tabelas FROM {_ont('indicadores')} "
         f"ORDER BY nome"
@@ -1472,7 +1487,8 @@ def list_termos_negocio() -> pd.DataFrame:
 def list_permissoes() -> pd.DataFrame:
     return run_query(
         f"SELECT id, email, papel, coalesce(ver_cadastros,false) AS ver_cadastros, "
-        f"coalesce(ver_logs,false) AS ver_logs, coalesce(aprovador_tags,false) AS aprovador_tags "
+        f"coalesce(ver_logs,false) AS ver_logs, coalesce(aprovador_tags,false) AS aprovador_tags, "
+        f"coalesce(power_steward,false) AS power_steward "
         f"FROM {_cad('permissoes')} ORDER BY email"
     )
 
@@ -1723,11 +1739,11 @@ TOOL_DEFINITIONS = [
             "name": "termos_de_negocio",
             "description": (
                 "Glossário de negócio e indicadores cadastrados (as duas telas "
-                "de edição juntas): tipo (Termo/Indicador), nome, objetivo, "
-                "domínio/sub-domínio, data owner/steward, rótulos de segurança/"
-                "privacidade e, para indicadores, variáveis, fórmula (memória de "
-                "cálculo), restrições e as tabelas/colunas que compõem a "
-                "dimensão e a métrica."
+                "de edição juntas): tipo (Termo/Indicador), nome, definição/"
+                "objetivo, domínio/sub-domínio, data owner/steward e, para "
+                "indicadores, o power steward, rótulos de segurança/privacidade, "
+                "variáveis, fórmula (memória de cálculo), restrições e as "
+                "tabelas/colunas que compõem a dimensão e a métrica."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -2654,6 +2670,43 @@ def _add_keyword(kp: str) -> None:
     st.session_state[f"{kp}_kw_input"] = ""
 
 
+def _render_power_steward_select(cur_email: str) -> str:
+    """Dropdown de Power Steward (tela Indicador). A lista vem dos usuários com
+    a flag `power_steward` em Usuários & Permissões — mostra o nome, grava o
+    e-mail. Opcional."""
+    try:
+        perms = list_permissoes().to_dict("records")
+    except Exception:
+        perms = []
+    ps_emails = [p["email"] for p in perms if _as_bool(p.get("power_steward"))]
+    # Mantém o valor já gravado mesmo que a flag do usuário tenha sido retirada.
+    if cur_email and cur_email not in ps_emails:
+        ps_emails = [cur_email] + ps_emails
+    try:
+        name_by_email = {u["email"].lower(): u["nome"] for u in list_users_for_search()}
+    except Exception:
+        name_by_email = {}
+
+    def _label(em: str) -> str:
+        if not em:
+            return "(nenhum)"
+        nm = name_by_email.get(em.lower())
+        return f"{nm} <{em}>" if nm else em
+
+    options = [""] + ps_emails
+    idx = options.index(cur_email) if cur_email in options else 0
+    picked = st.selectbox(
+        "Power Steward", options=options, index=idx,
+        format_func=_label, key="ind_power_steward",
+    )
+    if not ps_emails:
+        st.caption(
+            "Ninguém marcado como Power Steward — marque um usuário em "
+            "**Usuários & Permissões**."
+        )
+    return picked
+
+
 def _render_keyword_chips(kp: str) -> list[str]:
     """Mostra as palavras-chave já adicionadas como 'chips' com um ✕ pra
     remover. Devolve a lista atual (pra gravar como CSV no save)."""
@@ -2705,21 +2758,22 @@ def _render_glossario_editor(
     privacidade_opts = [""] + governed_tags.get("privacidade", [])
 
     termos = list_fn()
-    show = termos.copy()
-    if not show.empty:
+    if termos.empty:
+        st.info(f"Nenhum {'indicador' if is_indicador else 'termo'} cadastrado ainda.")
+    else:
+        show = termos.copy()
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, "—") if pd.notna(i) else "—")
         show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "—") if pd.notna(i) else "—")
-    cols_show = ["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner"]
-    if is_indicador:
-        cols_show.append("Nível de Apuração")
-    st.dataframe(
-        (show.rename(columns={
-            "tipo": "Tipo", "nome": "Nome", "data_owner": "Data Owner",
-            "nivel_apuracao": "Nível de Apuração",
-        })[cols_show]
-         if not show.empty else show),
-        use_container_width=True, hide_index=True,
-    )
+        cols_show = ["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner"]
+        if is_indicador:
+            cols_show.append("Nível de Apuração")
+        st.dataframe(
+            show.rename(columns={
+                "tipo": "Tipo", "nome": "Nome", "data_owner": "Data Owner",
+                "nivel_apuracao": "Nível de Apuração",
+            })[cols_show],
+            use_container_width=True, hide_index=True,
+        )
 
     if not can_edit(role):
         st.info("Seu perfil é **leitor** — visualização apenas.")
@@ -2735,7 +2789,8 @@ def _render_glossario_editor(
     cur = recs[opts.index(sel) - 1] if editing else {
         "id": None, "tipo": tipo, "nome": "", "objetivo": "", "observacoes": "",
         "palavras_chave": "", "macroprocesso": "", "dominio_id": None, "subdominio_id": None,
-        "data_owner": "", "data_steward": "", "rotulo_seguranca": "", "rotulo_privacidade": "",
+        "power_steward": "", "data_owner": "", "data_steward": "",
+        "rotulo_seguranca": "", "rotulo_privacidade": "",
         "nivel_apuracao": "", "unidade": "", "variaveis_utilizadas": "",
         "memoria_calculo": "", "restricoes": "", "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
     }
@@ -2743,6 +2798,10 @@ def _render_glossario_editor(
     # Todos os widgets ficam fora de st.form por causa do picker de tabelas/
     # colunas do indicador, que precisa recarregar a cada escolha de
     # catalog/schema/table (igual select_object/render_editor).
+    power_steward = ""
+    if is_indicador:
+        power_steward = _render_power_steward_select(cur.get("power_steward") or "")
+
     dom_ids = [d["id"] for d in doms]
     dom_options = [None] + dom_ids
     cur_dom = cur.get("dominio_id")
@@ -2865,6 +2924,7 @@ def _render_glossario_editor(
         )
         if is_indicador:
             values.update(
+                power_steward=power_steward,
                 observacoes=observacoes,
                 rotulo_seguranca=rotulo_seguranca, rotulo_privacidade=rotulo_privacidade,
                 nivel_apuracao=nivel_apuracao, unidade=unidade,
@@ -2947,6 +3007,13 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
             f"**Rótulo de privacidade:** {cur.get('rotulo_privacidade') or '—'}"
         )
         st.markdown("#### Indicador")
+        ps_email = cur.get("power_steward") or ""
+        if ps_email:
+            try:
+                nm = {u["email"].lower(): u["nome"] for u in list_users_for_search()}.get(ps_email.lower())
+            except Exception:
+                nm = None
+            st.markdown(f"**Power Steward:** {f'{nm} <{ps_email}>' if nm else ps_email}")
         c1, c2 = st.columns(2)
         c1.markdown(f"**Unidade**\n\n{cur.get('unidade') or '—'}")
         c2.markdown(f"**Nível de apuração**\n\n{cur.get('nivel_apuracao') or '—'}")
@@ -3043,7 +3110,8 @@ def page_permissoes() -> None:
         "**Papel** define o que edita nos cadastros (admin/editor/leitor). As "
         "**checkboxes** liberam a visualização/ação por usuário: *Ver cadastros* mostra "
         "o menu Cadastros; *Ver logs* mostra o menu Auditoria; *Aprovador de tags* libera "
-        "o backlog de aprovação de tagueamento. **Admin enxerga/faz tudo** independentemente "
+        "o backlog de aprovação de tagueamento; *Power Steward* faz o usuário aparecer no "
+        "campo Power Steward da tela Indicador. **Admin enxerga/faz tudo** independentemente "
         "das checkboxes. Só admins acessam esta tela."
     )
     _show_cad_feedback()
@@ -3054,7 +3122,7 @@ def page_permissoes() -> None:
         df.rename(columns={
             "id": "ID", "email": "E-mail", "papel": "Papel",
             "ver_cadastros": "Ver cadastros", "ver_logs": "Ver logs",
-            "aprovador_tags": "Aprovador de tags",
+            "aprovador_tags": "Aprovador de tags", "power_steward": "Power Steward",
         }),
         use_container_width=True, hide_index=True,
     )
@@ -3092,14 +3160,17 @@ def page_permissoes() -> None:
         email = st.text_input("E-mail corporativo *", key="perm_email_manual")
 
     papel_add = st.selectbox("Papel *", options=["admin", "editor", "leitor"], key="perm_papel_add")
-    ca, cb, cc = st.columns(3)
+    ca, cb, cc, cd = st.columns(4)
     with ca:
         add_ver_cad = st.checkbox("Ver cadastros", value=True, key="perm_add_ver_cad")
     with cb:
         add_ver_log = st.checkbox("Ver logs", value=False, key="perm_add_ver_log")
     with cc:
         add_aprov = st.checkbox("Aprovador de tags", value=False, key="perm_add_aprov")
-    st.caption("Admin ignora as checkboxes (vê/faz tudo).")
+    with cd:
+        add_power = st.checkbox("Power Steward", value=False, key="perm_add_power")
+    st.caption("Admin ignora as checkboxes (vê/faz tudo). *Power Steward* é só um "
+               "rótulo — não muda o que o usuário enxerga/faz.")
     if st.button("💾 Adicionar usuário", type="primary"):
         em = (email or "").strip().lower()
         if "@" not in em:
@@ -3112,9 +3183,10 @@ def page_permissoes() -> None:
             return
         run_exec(
             f"INSERT INTO {_cad('permissoes')} "
-            f"(email, papel, ver_cadastros, ver_logs, aprovador_tags, criado_em, criado_por) "
+            f"(email, papel, ver_cadastros, ver_logs, aprovador_tags, power_steward, criado_em, criado_por) "
             f"SELECT {q_str(em)}, {q_str(papel_add)}, {str(add_ver_cad).lower()}, "
-            f"{str(add_ver_log).lower()}, {str(add_aprov).lower()}, current_timestamp(), {q_str(user)} "
+            f"{str(add_ver_log).lower()}, {str(add_aprov).lower()}, {str(add_power).lower()}, "
+            f"current_timestamp(), {q_str(user)} "
             f"FROM (SELECT 1) WHERE NOT EXISTS "
             f"(SELECT 1 FROM {_cad('permissoes')} WHERE lower(email) = {q_str(em)})"
         )
@@ -3134,7 +3206,7 @@ def page_permissoes() -> None:
             if (cur.get("papel") or "leitor").lower() in papeis else 2,
             key="perm_papel_edit",
         )
-        e1, e2, e3 = st.columns(3)
+        e1, e2, e3, e4 = st.columns(4)
         with e1:
             ed_ver_cad = st.checkbox(
                 "Ver cadastros", value=_as_bool(cur.get("ver_cadastros")), key="perm_edit_ver_cad")
@@ -3144,13 +3216,16 @@ def page_permissoes() -> None:
         with e3:
             ed_aprov = st.checkbox(
                 "Aprovador de tags", value=_as_bool(cur.get("aprovador_tags")), key="perm_edit_aprov")
+        with e4:
+            ed_power = st.checkbox(
+                "Power Steward", value=_as_bool(cur.get("power_steward")), key="perm_edit_power")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("💾 Salvar"):
                 run_exec(
                     f"UPDATE {_cad('permissoes')} SET papel = {q_str(novo)}, "
                     f"ver_cadastros = {str(ed_ver_cad).lower()}, ver_logs = {str(ed_ver_log).lower()}, "
-                    f"aprovador_tags = {str(ed_aprov).lower()}, "
+                    f"aprovador_tags = {str(ed_aprov).lower()}, power_steward = {str(ed_power).lower()}, "
                     f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                     f"WHERE id = {int(cur['id'])}"
                 )

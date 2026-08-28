@@ -12,6 +12,12 @@ repositório (`git log`).
 - **Palavras-chave em "chips"** (Glossário e Indicador) — digita + Enter
   adiciona a palavra abaixo do campo e limpa o campo; `✕` remove. Gravado
   como CSV em `palavras_chave` (compatível com registros antigos).
+- **Power Steward no Indicador** — novo primeiro campo do formulário de
+  Indicador: dropdown com os usuários marcados com a nova flag `power_steward`
+  em Usuários & Permissões (nova checkbox lá; nova coluna `power_steward` em
+  `permissoes` e em `indicadores`). Mostra o nome, grava o e-mail. Opcional.
+- Tela vazia de Glossário/Indicador mostra "Nenhum termo/indicador cadastrado
+  ainda." em vez da tabela com os nomes crus das colunas.
 
 ## v1.4 — 2026-08-28
 

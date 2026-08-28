@@ -35,6 +35,14 @@ antigos).
 
 ## Campos exclusivos de Indicador
 
+- **Power Steward** (primeiro campo do formulário) — dropdown opcional com os
+  usuários marcados com a flag `power_steward` em
+  [Usuários & Permissões](./06-permissoes.md). Mostra o nome, grava o e-mail
+  na coluna `power_steward` de `indicadores`. Se ninguém estiver marcado, o
+  campo fica vazio e mostra um aviso apontando para a tela de permissões.
+- **Classificação** — Rótulo de segurança / privacidade (mesmos catálogos de
+  governed tags usados na Governança de Dados).
+- **Observações** — notas livres.
 - **Unidade** — dropdown com valores comuns (R$, %, un, …) mais "Outra…" para
   texto livre.
 - **Nível de apuração** — granularidade (diário, mensal, …).
