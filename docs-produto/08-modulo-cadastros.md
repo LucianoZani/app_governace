@@ -115,7 +115,7 @@ cadastro propriamente ditas:
 | `dashboards` | dominio_id, subdominio_id, nome, descricao, url, icone, ativo |
 | `padroes_dado_pessoal` | padrao, descricao |
 | `tag_backlog` | catalogo/schema/tabela/coluna, tag_chave, valor_anterior/novo, acao, motivo, solicitante, status, aprovador, decidido_em, motivo_decisao (append + update no `status`) |
-| `permissoes` | email, papel, ver_cadastros, ver_logs, aprovador_tags |
+| `permissoes` | nome, email, papel, ver_cadastros, ver_logs, aprovador_tags, power_steward |
 | `log_comentarios` | usuario, acao, objeto, catalogo/schema/tabela/coluna, comentario_anterior/novo, ambiente, criado_em (append-only) |
 | `log_tags` | usuario, acao, catalogo/schema/tabela/coluna, tag_chave, valor_anterior/novo, ambiente, criado_em (append-only) |
 

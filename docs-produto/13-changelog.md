@@ -12,9 +12,13 @@ repositório (`git log`).
   (lacunas), meus indicadores (Power Steward), atividade recente e atalhos.
   Tudo a partir das listas já em cache — sem varredura de catálogo. Ver
   [14. Tela — Início](./14-tela-inicio.md).
-- `get_user_perms` agora também devolve `power_steward` e `registrado` (se o
-  e-mail está em `permissoes`). Usuário não cadastrado aparece como
+- `get_user_perms` agora também devolve `power_steward`, `registrado` (se o
+  e-mail está em `permissoes`) e `nome`. Usuário não cadastrado aparece como
   **"visitante"** na tela de Início e na barra lateral.
+- **Nome de exibição** — nova coluna `nome` em `permissoes` + campo "Nome" no
+  cadastro de Usuários & Permissões (sugere o nome vindo da busca). A saudação
+  da tela de Início usa esse nome primeiro. O formulário de edição de
+  Usuários & Permissões passou a recarregar os campos ao trocar de registro.
 
 ## v1.5 — 2026-08-28
 

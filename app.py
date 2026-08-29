@@ -1290,6 +1290,8 @@ def ensure_cadastro_tables() -> bool:
         for col in ("ver_logs", "ver_cadastros", "aprovador_tags", "power_steward"):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS ({col} BOOLEAN)")
+        if "nome" not in existing_cols:  # nome de exibição do usuário
+            run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS (nome STRING)")
     except Exception:
         pass
     # Coluna `tipo` em `data_stewards` (idempotente p/ tabelas já existentes,
@@ -1389,12 +1391,13 @@ def get_user_perms(email: str) -> dict:
     """
     base = {
         "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
-        "aprovador_tags": False, "power_steward": False, "registrado": False,
+        "aprovador_tags": False, "power_steward": False, "registrado": False, "nome": "",
     }
     if not email:
         return base
     df = run_query(
-        f"SELECT papel, ver_logs, ver_cadastros, aprovador_tags, power_steward "
+        f"SELECT coalesce(nome, '') AS nome, papel, ver_logs, ver_cadastros, "
+        f"aprovador_tags, power_steward "
         f"FROM {_cad('permissoes')} WHERE lower(email) = {q_str(email.lower())} LIMIT 1"
     )
     if df.empty:
@@ -1402,10 +1405,12 @@ def get_user_perms(email: str) -> dict:
     row = df.iloc[0]
     papel = (row["papel"] or "leitor").strip().lower()
     power_steward = _as_bool(row["power_steward"])
+    nome = str(row["nome"] or "").strip()
     if papel == "admin":
         return {
             "papel": "admin", "ver_logs": True, "ver_cadastros": True,
-            "aprovador_tags": True, "power_steward": power_steward, "registrado": True,
+            "aprovador_tags": True, "power_steward": power_steward,
+            "registrado": True, "nome": nome,
         }
     return {
         "papel": papel,
@@ -1414,6 +1419,7 @@ def get_user_perms(email: str) -> dict:
         "aprovador_tags": _as_bool(row["aprovador_tags"]),
         "power_steward": power_steward,
         "registrado": True,
+        "nome": nome,
     }
 
 
@@ -1498,7 +1504,8 @@ def list_termos_negocio() -> pd.DataFrame:
 @st.cache_data(ttl=30, show_spinner=False)
 def list_permissoes() -> pd.DataFrame:
     return run_query(
-        f"SELECT id, email, papel, coalesce(ver_cadastros,false) AS ver_cadastros, "
+        f"SELECT id, coalesce(nome, '') AS nome, email, papel, "
+        f"coalesce(ver_cadastros,false) AS ver_cadastros, "
         f"coalesce(ver_logs,false) AS ver_logs, coalesce(aprovador_tags,false) AS aprovador_tags, "
         f"coalesce(power_steward,false) AS power_steward "
         f"FROM {_cad('permissoes')} ORDER BY email"
@@ -3147,7 +3154,7 @@ def page_permissoes() -> None:
     df = list_permissoes()
     st.dataframe(
         df.rename(columns={
-            "id": "ID", "email": "E-mail", "papel": "Papel",
+            "id": "ID", "nome": "Nome", "email": "E-mail", "papel": "Papel",
             "ver_cadastros": "Ver cadastros", "ver_logs": "Ver logs",
             "aprovador_tags": "Aprovador de tags", "power_steward": "Power Steward",
         }),
@@ -3160,6 +3167,7 @@ def page_permissoes() -> None:
     st.markdown("#### Adicionar")
     users = list_users_for_search()
     email = None
+    nome_sugerido = ""
     manual = st.toggle(
         "✍️ Informar manualmente (usuário não encontrado na busca)",
         value=not users, disabled=not users, key="perm_manual",
@@ -3175,6 +3183,8 @@ def page_permissoes() -> None:
                     format_func=lambda u: f'{u["nome"]} <{u["email"]}>', key="perm_pick",
                 )
                 email = pick["email"]
+                _sc = str(pick.get("nome") or "").strip()
+                nome_sugerido = _sc if _sc.lower() != email.lower() else ""
                 st.text_input("E-mail", value=email, disabled=True, key="perm_email_view")
             else:
                 st.caption(
@@ -3186,6 +3196,11 @@ def page_permissoes() -> None:
             st.caption("Não foi possível listar usuários (workspace/conta) — informe manualmente.")
         email = st.text_input("E-mail corporativo *", key="perm_email_manual")
 
+    nome_key = "perm_nome_add_" + (email if (email and users and not manual) else "manual")
+    nome_add = st.text_input(
+        "Nome (para exibição)", value=nome_sugerido, key=nome_key,
+        placeholder="ex.: Luciano Zani — usado na saudação da tela de Início",
+    )
     papel_add = st.selectbox("Papel *", options=["admin", "editor", "leitor"], key="perm_papel_add")
     ca, cb, cc, cd = st.columns(4)
     with ca:
@@ -3210,10 +3225,10 @@ def page_permissoes() -> None:
             return
         run_exec(
             f"INSERT INTO {_cad('permissoes')} "
-            f"(email, papel, ver_cadastros, ver_logs, aprovador_tags, power_steward, criado_em, criado_por) "
-            f"SELECT {q_str(em)}, {q_str(papel_add)}, {str(add_ver_cad).lower()}, "
-            f"{str(add_ver_log).lower()}, {str(add_aprov).lower()}, {str(add_power).lower()}, "
-            f"current_timestamp(), {q_str(user)} "
+            f"(nome, email, papel, ver_cadastros, ver_logs, aprovador_tags, power_steward, criado_em, criado_por) "
+            f"SELECT {q_str((nome_add or '').strip())}, {q_str(em)}, {q_str(papel_add)}, "
+            f"{str(add_ver_cad).lower()}, {str(add_ver_log).lower()}, {str(add_aprov).lower()}, "
+            f"{str(add_power).lower()}, current_timestamp(), {q_str(user)} "
             f"FROM (SELECT 1) WHERE NOT EXISTS "
             f"(SELECT 1 FROM {_cad('permissoes')} WHERE lower(email) = {q_str(em)})"
         )
@@ -3226,35 +3241,39 @@ def page_permissoes() -> None:
         opts = [f'{r["email"]} ({r["papel"]})' for r in recs]
         sel = st.selectbox("Registro", options=opts, key="perm_edit_sel")
         cur = recs[opts.index(sel)]
+        rid = int(cur["id"])
+        ed_nome = st.text_input("Nome (para exibição)", value=cur.get("nome") or "",
+                                key=f"perm_nome_edit_{rid}", placeholder="ex.: Luciano Zani")
         papeis = ["admin", "editor", "leitor"]
         novo = st.selectbox(
             "Papel", options=papeis,
             index=papeis.index((cur.get("papel") or "leitor").lower())
             if (cur.get("papel") or "leitor").lower() in papeis else 2,
-            key="perm_papel_edit",
+            key=f"perm_papel_edit_{rid}",
         )
         e1, e2, e3, e4 = st.columns(4)
         with e1:
             ed_ver_cad = st.checkbox(
-                "Ver cadastros", value=_as_bool(cur.get("ver_cadastros")), key="perm_edit_ver_cad")
+                "Ver cadastros", value=_as_bool(cur.get("ver_cadastros")), key=f"perm_edit_ver_cad_{rid}")
         with e2:
             ed_ver_log = st.checkbox(
-                "Ver logs", value=_as_bool(cur.get("ver_logs")), key="perm_edit_ver_log")
+                "Ver logs", value=_as_bool(cur.get("ver_logs")), key=f"perm_edit_ver_log_{rid}")
         with e3:
             ed_aprov = st.checkbox(
-                "Aprovador de tags", value=_as_bool(cur.get("aprovador_tags")), key="perm_edit_aprov")
+                "Aprovador de tags", value=_as_bool(cur.get("aprovador_tags")), key=f"perm_edit_aprov_{rid}")
         with e4:
             ed_power = st.checkbox(
-                "Power Steward", value=_as_bool(cur.get("power_steward")), key="perm_edit_power")
+                "Power Steward", value=_as_bool(cur.get("power_steward")), key=f"perm_edit_power_{rid}")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("💾 Salvar"):
                 run_exec(
-                    f"UPDATE {_cad('permissoes')} SET papel = {q_str(novo)}, "
+                    f"UPDATE {_cad('permissoes')} SET nome = {q_str((ed_nome or '').strip())}, "
+                    f"papel = {q_str(novo)}, "
                     f"ver_cadastros = {str(ed_ver_cad).lower()}, ver_logs = {str(ed_ver_log).lower()}, "
                     f"aprovador_tags = {str(ed_aprov).lower()}, power_steward = {str(ed_power).lower()}, "
                     f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
-                    f"WHERE id = {int(cur['id'])}"
+                    f"WHERE id = {rid}"
                 )
                 _finish_write("Usuário atualizado.")
         with c2:
@@ -3742,7 +3761,8 @@ def page_inicio() -> None:
     if not registrado:
         st.title("🧭 Olá, visitante")
     else:
-        nome = _nome_amigavel(user)
+        nome_cad = str(perms.get("nome") or "").strip()
+        nome = (nome_cad.split()[0].capitalize() if nome_cad else "") or _nome_amigavel(user)
         st.title(f"🧭 Olá, {nome}" if nome else "🧭 Olá!")
 
     if not registrado:
@@ -3913,7 +3933,7 @@ def main() -> None:
     st.session_state["user"] = user
     perms = {
         "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
-        "aprovador_tags": False, "power_steward": False, "registrado": False,
+        "aprovador_tags": False, "power_steward": False, "registrado": False, "nome": "",
     }
     try:
         ensure_cadastro_tables()
