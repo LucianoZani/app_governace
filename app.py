@@ -3743,7 +3743,7 @@ def page_inicio() -> None:
         st.title("🧭 Olá, visitante")
     else:
         nome = _nome_amigavel(user)
-        st.title(f"🧭 Olá, {nome}" if nome else "🧭 Início")
+        st.title(f"🧭 Olá, {nome}" if nome else "🧭 Olá!")
 
     if not registrado:
         chips = ["visitante"]
