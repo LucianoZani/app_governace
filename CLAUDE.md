@@ -73,6 +73,13 @@ própria UI do app (que lê como SP).
 
 ## Histórico de sessões / decisões
 
+- **2026-08-28** — `app.py` da variante **`-comgas`** sincronizado com esta
+  versão. As únicas diferenças de código do fork Comgás (reaplicadas):
+  `CAD_SCHEMA` sem sufixo `_<env>` (schema fixo via `CADASTRO_SCHEMA`);
+  `ONTOLOGIA_SCHEMA = os.environ.get("ONTOLOGIA_SCHEMA", CAD_SCHEMA)`; marca
+  "Power Steward" em `page_governanca` e `set_page_config`. `app.yaml`/
+  `databricks.yml`/`docs` do `-comgas` NÃO foram tocados. A pasta `-comgas`
+  não é repo git. Deploy do Comgás é em outro workspace (Azure), separado.
 - **2026-08-28** (fim) — Nova **tela de Início** (`page_inicio`, menu "Painel",
   `default=True` — tirado de `page_governanca`). Painel adaptado por papel:
   cabeçalho c/ resumo, `st.metric` (delta via `_novos_na_semana`), pendências
