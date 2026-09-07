@@ -30,6 +30,12 @@ Princípios de design
 - **Cadastros e logs internos do app** (schema ``apps.governanca_unity_catalog_*``)
   são gravados pelo SP — não são tabelas do catálogo de negócio, então esta
   invariante não se aplica a eles.
+- **Publicação de Metric View (indicador) = Service Principal** — outra exceção
+  documentada: ``CREATE OR REPLACE VIEW … WITH METRICS`` roda com o SP (blueprint
+  seção 5, Passo 5), porque cria um objeto novo no catálogo/schema alvo — exige
+  ``CREATE VIEW`` no schema, grant que o usuário de negócio comum não tem. A
+  fórmula (linguagem natural → SQL) passa por confirmação humana obrigatória
+  (Passo 3) antes de qualquer publicação — nunca publica direto do que a IA gera.
 - **Autenticação nativa do Databricks App**: o ``WorkspaceClient()`` usa
   automaticamente as credenciais injetadas no runtime do App.
 - **Execução de SQL** via Statement Execution API do ``databricks-sdk``,
@@ -40,9 +46,14 @@ Veja o README.md para permissões e deploy.
 
 from __future__ import annotations
 
+import base64
+import calendar
 import json
 import os
+import re
 import time
+import unicodedata
+from datetime import date, timedelta
 from dataclasses import dataclass
 
 import pandas as pd
@@ -93,9 +104,30 @@ ACCOUNT_HOST = os.environ.get(
     "DATABRICKS_ACCOUNT_HOST", "https://accounts.azuredatabricks.net"
 ).strip()
 
-# Painel "Assistente de Governança" (chat com IA). Usa o Unity AI Gateway
-# (model service registrado em UC, não o /serving-endpoints clássico) — o
-# nome em LLM_ENDPOINT é o full name catalog.schema.model do model service.
+# Nome de marca do app (título da página, sidebar, system prompt do
+# assistente). Termo de negócio "Power Steward" (usuário marcado como
+# responsável por um indicador) é outra coisa — não use esta var pra ele.
+APP_NAME = os.environ.get("APP_NAME", "Power Steward").strip() or "Power Steward"
+
+# Endpoint do LLM. Usado por (a) `gerar_expr_sql` (pipeline de publicação de
+# indicador, blueprint seção 5.1, Passo 1) e (b) o painel "Assistente de
+# Governança" (chat com IA, só metadado — ver docs-produto/15-seguranca-assistente.md).
+#
+# Dois formatos aceitos (ver `get_llm_client`), escolhidos pela presença de
+# ponto no nome:
+#   - "catalog.schema.model"  -> model service registrado em UC, via Unity AI
+#     Gateway (/ai-gateway/mlflow/v1). O SP do app precisa de EXECUTE nele.
+#   - "databricks-gpt-oss-120b" (nome simples) -> serving endpoint clássico
+#     (/serving-endpoints), incl. as Foundation Model APIs pay-per-token. O SP
+#     do app precisa de CAN QUERY no endpoint.
+#
+# ⚠️ `testar_candidato` e `obter_custo_por_dominio` rodam `prefer_user=True`
+# (OBO): com `USE_ON_BEHALF_OF_USER=false` caem pro Service Principal. Ligar
+# OBO de verdade esbarrou (2026-08-30) no token do usuário voltando sem o
+# escopo `sql` mesmo com ele habilitado no App — pendente de investigar (ver
+# `app.yaml`). O assistente de chat foi reintroduzido (2026-08-31) já com as
+# tools de metadado em OBO + fail-closed + RBAC, e sem NENHUMA tool que lê
+# linha de tabela — não é "consulta sobre dado real", é ajuda de metadado.
 LLM_ENABLED = os.environ.get("LLM_ENABLED", "false").strip().lower() == "true"
 LLM_ENDPOINT = os.environ.get("LLM_ENDPOINT", "").strip()
 
@@ -179,6 +211,29 @@ def _forwarded_user_token() -> str | None:
     return headers.get("x-forwarded-access-token")
 
 
+def _debug_token_scope(token: str) -> dict:
+    """DIAGNÓSTICO TEMPORÁRIO (remover depois de resolver o 403 de escopo do
+    FinOps) — decodifica o payload do JWT em ``x-forwarded-access-token``
+    (sem validar assinatura, só pra inspecionar claims) e devolve as claims
+    relevantes. Nunca loga o token inteiro."""
+    partes = token.split(".")
+    if len(partes) != 3:
+        return {"erro": "token não parece ser um JWT (não tem 3 partes separadas por '.')", "partes": len(partes)}
+    payload_b64 = partes[1] + "=" * (-len(partes[1]) % 4)  # padding do base64url
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception as exc:
+        return {"erro": f"falha ao decodificar payload: {exc}"}
+    return {
+        "scope": payload.get("scope") or payload.get("scp"),
+        "aud": payload.get("aud"),
+        "sub": payload.get("sub"),
+        "client_id": payload.get("client_id") or payload.get("cid"),
+        "exp": payload.get("exp"),
+        "todas_as_claims": list(payload.keys()),
+    }
+
+
 def _forwarded_user_email() -> str | None:
     """E-mail de quem abriu o app, do header injetado pelo proxy do Databricks Apps.
 
@@ -219,7 +274,12 @@ def get_client(prefer_user: bool = False) -> WorkspaceClient:
 
 
 def get_llm_client():
-    """Cliente OpenAI-compatible apontado para o Unity AI Gateway do workspace.
+    """Cliente OpenAI-compatible para o LLM do workspace.
+
+    Aponta para o Unity AI Gateway (``/ai-gateway/mlflow/v1``) quando
+    ``LLM_ENDPOINT`` é um full name de UC (``catalog.schema.model``), ou para
+    os serving endpoints clássicos (``/serving-endpoints``) quando é um nome
+    simples (ex.: ``databricks-gpt-oss-120b`` — Foundation Model APIs).
 
     NÃO cacheado: o token OAuth do service principal expira, então pegamos um
     token fresco (``config.authenticate()``) a cada chamada — mesmo espírito
@@ -232,8 +292,9 @@ def get_llm_client():
     token = (headers.get("Authorization") or "").removeprefix("Bearer ").strip()
     if not token:
         raise RuntimeError("Não foi possível obter um token do service principal para o assistente.")
-    base_url = f"{cfg.host.rstrip('/')}/ai-gateway/mlflow/v1"
-    return OpenAI(api_key=token, base_url=base_url)
+    host = cfg.host.rstrip("/")
+    suffix = "/ai-gateway/mlflow/v1" if "." in LLM_ENDPOINT else "/serving-endpoints"
+    return OpenAI(api_key=token, base_url=f"{host}{suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +409,131 @@ def list_tables(user: str, catalog: str, schema: str) -> list[str]:
     )
     df = run_query(sql, prefer_user=True)
     return df["table_name"].tolist() if not df.empty else []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def list_tables_with_comment(user: str, catalog: str, schema: str) -> list[dict]:
+    """Tabelas de um schema + comentário (metadados, OBO). Para o assistente."""
+    sql = (
+        f"SELECT table_name, comment FROM {q_ident(catalog)}.information_schema.tables "
+        f"WHERE table_schema = {q_str(schema)} ORDER BY table_name"
+    )
+    df = run_query(sql, prefer_user=True)
+    if df.empty:
+        return []
+    return [
+        {"tabela": r["table_name"], "comentario": r.get("comment") or ""}
+        for _, r in df.iterrows()
+    ]
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def search_columns(user: str, termo: str, catalog: str | None = None, limit: int = 60) -> list[dict]:
+    """Busca colunas cujo NOME ou COMENTÁRIO contém ``termo`` (case-insensitive),
+    varrendo os catálogos permitidos via information_schema. Só metadados
+    (nome/tipo/comentário/tabela) — nunca valores. Roda sob OBO."""
+    termo = (termo or "").strip().lower()
+    if not termo:
+        return []
+    if catalog:
+        cats = [catalog] if (not ALLOWED_CATALOGS or catalog.lower() in ALLOWED_CATALOGS) else []
+    else:
+        cats = sorted(ALLOWED_CATALOGS) if ALLOWED_CATALOGS else []
+    out: list[dict] = []
+    for cat in cats:
+        sql = f"""
+            SELECT table_schema, table_name, column_name, full_data_type, comment
+            FROM {q_ident(cat)}.information_schema.columns
+            WHERE contains(lower(column_name), {q_str(termo)})
+               OR contains(lower(coalesce(comment, '')), {q_str(termo)})
+            ORDER BY table_schema, table_name, ordinal_position
+            LIMIT {int(limit)}
+        """
+        try:
+            df = run_query(sql, prefer_user=True)
+        except Exception:
+            continue
+        for _, r in df.iterrows():
+            out.append({
+                "catalogo": cat,
+                "schema": r["table_schema"],
+                "tabela": r["table_name"],
+                "coluna": r["column_name"],
+                "tipo": r["full_data_type"],
+                "comentario": r.get("comment") or "",
+            })
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def search_by_tag(
+    user: str,
+    catalog: str | None = None,
+    schema: str | None = None,
+    tag_key: str | None = None,
+    tag_value: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Varre as tags governadas APLICADAS (não o catálogo de policies) num
+    catálogo/schema inteiro, via ``information_schema.column_tags`` +
+    ``.table_tags``. Uma query por catálogo — responde "quais tabelas/colunas
+    têm a tag X / o valor Y" sem inspecionar tabela por tabela.
+
+    Só metadados (schema/tabela/coluna/tag/valor) — nunca dado. Roda sob OBO.
+    """
+    if catalog:
+        cats = [catalog] if (not ALLOWED_CATALOGS or catalog.lower() in ALLOWED_CATALOGS) else []
+    else:
+        cats = sorted(ALLOWED_CATALOGS) if ALLOWED_CATALOGS else []
+
+    def _conds(schema_col: str) -> str:
+        c = []
+        if schema:
+            c.append(f"{schema_col} = {q_str(schema)}")
+        if tag_key:
+            c.append(f"lower(tag_name) = {q_str(tag_key.strip().lower())}")
+        if tag_value:
+            c.append(f"contains(lower(coalesce(tag_value, '')), {q_str(tag_value.strip().lower())})")
+        return (" WHERE " + " AND ".join(c)) if c else ""
+
+    out: list[dict] = []
+    for cat in cats:
+        col_sql = f"""
+            SELECT schema_name, table_name, column_name, tag_name, tag_value
+            FROM {q_ident(cat)}.information_schema.column_tags{_conds('schema_name')}
+            ORDER BY schema_name, table_name, column_name
+            LIMIT {int(limit)}
+        """
+        tbl_sql = f"""
+            SELECT schema_name, table_name, tag_name, tag_value
+            FROM {q_ident(cat)}.information_schema.table_tags{_conds('schema_name')}
+            ORDER BY schema_name, table_name
+            LIMIT {int(limit)}
+        """
+        try:
+            cdf = run_query(col_sql, prefer_user=True)
+            for _, r in cdf.iterrows():
+                out.append({
+                    "catalogo": cat, "schema": r["schema_name"], "tabela": r["table_name"],
+                    "coluna": r["column_name"], "tag": r["tag_name"], "valor": r.get("tag_value") or "",
+                })
+        except Exception:
+            pass
+        try:
+            tdf = run_query(tbl_sql, prefer_user=True)
+            for _, r in tdf.iterrows():
+                out.append({
+                    "catalogo": cat, "schema": r["schema_name"], "tabela": r["table_name"],
+                    "coluna": None, "tag": r["tag_name"], "valor": r.get("tag_value") or "",
+                })
+        except Exception:
+            pass
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
 
 
 @dataclass
@@ -483,6 +669,9 @@ def get_governed_tags() -> dict[str, list[str]]:
 
 def render_sidebar() -> None:
     with st.sidebar:
+        st.markdown(f"## 🏷️ {APP_NAME}")
+        st.caption("Governança de dados no Unity Catalog")
+        st.divider()
         st.markdown("### ℹ️ Sessão")
         env_badge = "🟢 PRD" if ENVIRONMENT == "prd" else "🟡 DEV"
         st.caption(f"Ambiente: **{env_badge}** (mostra apenas schemas de {ENVIRONMENT.upper()})")
@@ -1061,8 +1250,8 @@ def render_table_comment_editor(user: str, catalog: str, schema: str, table: str
 
 
 def page_governanca() -> None:
-    """Página: Governança de Dados — Unity Catalog (tags governadas + comentários)."""
-    st.title("🏷️ Governança de Dados — Unity Catalog")
+    """Página: Governança de Dados (tags governadas + comentários no Unity Catalog)."""
+    st.title(f"🏷️ {APP_NAME} — Governança de Dados")
     st.caption(
         "Aplique e altere **comentários da tabela e das colunas** e **tags "
         "governadas** no Unity Catalog. Você só edita tabelas às quais tem acesso."
@@ -1158,28 +1347,29 @@ def page_governanca() -> None:
 # ===========================================================================
 
 CAD_CATALOG = os.environ.get("CADASTRO_CATALOG", "apps").strip()
-# Isolamento por ambiente: o catálogo `apps` é único (metastore unificado), mas
-# cada ambiente usa seu PRÓPRIO schema (…_dev / …_prd). CADASTRO_SCHEMA é a base;
-# o app acrescenta o sufixo do ENVIRONMENT.
+# Schema dos cadastros internos do app. Dois modelos, escolhidos por
+# CADASTRO_SCHEMA_ENV_SUFFIX:
+#   "true"  (padrão) — CADASTRO_SCHEMA é a BASE e o app acrescenta o sufixo do
+#           ENVIRONMENT (…_dev / …_prd). Um metastore único com catálogo `apps`
+#           compartilhado entre DEV e PROD, separação por sufixo de schema.
+#   "false" — CADASTRO_SCHEMA é o nome COMPLETO do schema, sem sufixo. Para
+#           instalações com um schema pré-provisionado de nome fixo, ou com
+#           catálogos separados por ambiente (ex.: comgas_dev / comgas_prd).
 _CAD_SCHEMA_BASE = os.environ.get("CADASTRO_SCHEMA", "governanca_unity_catalog").strip()
-CAD_SCHEMA = f"{_CAD_SCHEMA_BASE}_{ENVIRONMENT}"
+_CAD_SCHEMA_ENV_SUFFIX = os.environ.get("CADASTRO_SCHEMA_ENV_SUFFIX", "true").strip().lower() == "true"
+CAD_SCHEMA = f"{_CAD_SCHEMA_BASE}_{ENVIRONMENT}" if _CAD_SCHEMA_ENV_SUFFIX else _CAD_SCHEMA_BASE
 SEED_ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "t.guilherme.massafer@ero.com").strip().lower()
-
-# Glossário de termos de negócio / indicadores — mesmo catálogo `apps`, schema
-# próprio (`ontologia_<env>`) pra não misturar com as tabelas de cadastro do
-# app. O schema em si é criado manualmente (ver docs/04-permissoes.md); aqui
-# só criamos a tabela, igual às demais.
-ONTOLOGIA_SCHEMA = f"ontologia_{ENVIRONMENT}"
 
 
 def _cad(table: str) -> str:
-    """Nome totalmente qualificado de uma tabela de cadastro."""
+    """Nome totalmente qualificado de uma tabela de cadastro.
+
+    Glossário de negócio e indicadores (`glossario_negocio`, `indicadores`)
+    também vivem aqui, junto com as demais tabelas de cadastro — schema único
+    `CAD_SCHEMA`, sem schema `ontologia_<env>` separado (consolidado em
+    2026-08-30; ver migração dos dados de `ontologia_<env>` para cá).
+    """
     return f"{q_ident(CAD_CATALOG)}.{q_ident(CAD_SCHEMA)}.{q_ident(table)}"
-
-
-def _ont(table: str) -> str:
-    """Nome totalmente qualificado de uma tabela do glossário/ontologia."""
-    return f"{q_ident(CAD_CATALOG)}.{q_ident(ONTOLOGIA_SCHEMA)}.{q_ident(table)}"
 
 
 @st.cache_resource(show_spinner=False)
@@ -1257,13 +1447,13 @@ def ensure_cadastro_tables() -> bool:
         # redundante mas mantida nas duas pra tela de consulta e card de
         # detalhe (que leem `tipo`) e a união em list_termos_negocio não
         # precisarem ramificar. Migração da antiga `termos_negocio` logo abaixo.
-        f"CREATE TABLE IF NOT EXISTS {_ont('glossario_negocio')} "
+        f"CREATE TABLE IF NOT EXISTS {_cad('glossario_negocio')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
         f"tipo STRING, nome STRING, objetivo STRING, observacoes STRING, "
         f"palavras_chave STRING, macroprocesso STRING, "
         f"dominio_id BIGINT, subdominio_id BIGINT, data_owner STRING, data_steward STRING, "
         f"rotulo_seguranca STRING, rotulo_privacidade STRING, {audit})",
-        f"CREATE TABLE IF NOT EXISTS {_ont('indicadores')} "
+        f"CREATE TABLE IF NOT EXISTS {_cad('indicadores')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, "
         f"tipo STRING, nome STRING, objetivo STRING, observacoes STRING, "
         f"palavras_chave STRING, macroprocesso STRING, "
@@ -1272,7 +1462,8 @@ def ensure_cadastro_tables() -> bool:
         f"rotulo_seguranca STRING, rotulo_privacidade STRING, "
         f"nivel_apuracao STRING, unidade STRING, variaveis_utilizadas STRING, "
         f"memoria_calculo STRING, restricoes STRING, "
-        f"dimensao_tabelas STRING, metrica_tabelas STRING, {audit})",
+        f"dimensao_tabelas STRING, metrica_tabelas STRING, "
+        f"status_publicacao STRING, expr_validada STRING, metric_view_publicada STRING, {audit})",
     ]
     for stmt in ddl:
         run_exec(stmt)  # SP
@@ -1287,7 +1478,7 @@ def ensure_cadastro_tables() -> bool:
             f"AND lower(table_name) = 'permissoes'"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
-        for col in ("ver_logs", "ver_cadastros", "aprovador_tags", "power_steward"):
+        for col in ("ver_logs", "ver_cadastros", "aprovador_tags", "power_steward", "ver_finops", "engenharia"):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS ({col} BOOLEAN)")
         if "nome" not in existing_cols:  # nome de exibição do usuário
@@ -1315,12 +1506,47 @@ def ensure_cadastro_tables() -> bool:
     try:
         cols_df = run_query(
             f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
-            f"WHERE lower(table_schema) = {q_str(ONTOLOGIA_SCHEMA.lower())} "
+            f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
             f"AND lower(table_name) = 'indicadores'"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
         if "power_steward" not in existing_cols:
-            run_exec(f"ALTER TABLE {_ont('indicadores')} ADD COLUMNS (power_steward STRING)")
+            run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (power_steward STRING)")
+        # Coluna `status_publicacao` (blueprint seção 5.1, Passo 0) — gate do
+        # pipeline de publicação: rascunho -> pronto_para_ia -> validado ->
+        # publicado. Elegível para pronto_para_ia só quando já tem lineage
+        # real (dimensao_tabelas e metrica_tabelas não vazios); do contrário
+        # fica preso em rascunho. Linhas existentes são backfilladas com a
+        # mesma regra usada em cada save daqui pra frente (ver
+        # _render_glossario_editor).
+        if "status_publicacao" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (status_publicacao STRING)")
+            run_exec(
+                f"UPDATE {_cad('indicadores')} SET status_publicacao = "
+                f"CASE WHEN coalesce(dimensao_tabelas, '[]') <> '[]' "
+                f"AND coalesce(metrica_tabelas, '[]') <> '[]' "
+                f"THEN 'pronto_para_ia' ELSE 'rascunho' END "
+                f"WHERE status_publicacao IS NULL"
+            )
+        # Colunas `expr_validada` (Passo 3 — expressão SQL confirmada pelo
+        # humano, o que de fato vira `measures[].expr` no Metric View) e
+        # `metric_view_publicada` (Passo 5 — nome totalmente qualificado da
+        # view criada, pra rastreabilidade). Sem backfill: só existem depois
+        # que o indicador passa pelo fluxo novo.
+        if "expr_validada" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (expr_validada STRING)")
+        if "metric_view_publicada" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (metric_view_publicada STRING)")
+        # Colunas de negócio adicionais: `dimensoes_negocio` (descrição em
+        # linguagem de negócio dos recortes desejados — orienta a Engenharia
+        # na escolha das colunas de Dimensão, mas não é lineage técnico) e
+        # `decisao_negocio` (que decisão esse indicador apoia). Esta última é
+        # concatenada com `objetivo` no comentário da Metric View publicada
+        # — ver `montar_yaml_metric_view`.
+        if "dimensoes_negocio" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (dimensoes_negocio STRING)")
+        if "decisao_negocio" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (decisao_negocio STRING)")
     except Exception:
         pass
     # Migração da antiga `termos_negocio` (registro único com seletor de tipo)
@@ -1330,7 +1556,7 @@ def ensure_cadastro_tables() -> bool:
     try:
         tbl_df = run_query(
             f"SELECT lower(table_name) AS t FROM {q_ident(CAD_CATALOG)}.information_schema.tables "
-            f"WHERE lower(table_schema) = {q_str(ONTOLOGIA_SCHEMA.lower())} "
+            f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
             f"AND lower(table_name) = 'termos_negocio'"
         )
         if not tbl_df.empty:
@@ -1345,23 +1571,23 @@ def ensure_cadastro_tables() -> bool:
             )
             # Cada destino é preenchido só se ainda estiver vazio — assim, se um
             # INSERT falhar, o próximo boot retoma esse sem duplicar o que já foi.
-            if _count(f"SELECT count(*) FROM {_ont('glossario_negocio')}") == 0:
+            if _count(f"SELECT count(*) FROM {_cad('glossario_negocio')}") == 0:
                 run_exec(
-                    f"INSERT INTO {_ont('glossario_negocio')} (tipo, {_comuns}) "
-                    f"SELECT 'Termo', {_comuns} FROM {_ont('termos_negocio')} "
+                    f"INSERT INTO {_cad('glossario_negocio')} (tipo, {_comuns}) "
+                    f"SELECT 'Termo', {_comuns} FROM {_cad('termos_negocio')} "
                     f"WHERE lower(coalesce(tipo, 'termo')) <> 'indicador'"
                 )
-            if _count(f"SELECT count(*) FROM {_ont('indicadores')}") == 0:
+            if _count(f"SELECT count(*) FROM {_cad('indicadores')}") == 0:
                 run_exec(
-                    f"INSERT INTO {_ont('indicadores')} "
+                    f"INSERT INTO {_cad('indicadores')} "
                     f"(tipo, {_comuns}, {_ind}, dimensao_tabelas, metrica_tabelas) "
                     f"SELECT 'Indicador', {_comuns}, {_ind}, "
                     f"coalesce(dimensao_tabelas, '[]'), coalesce(metrica_tabelas, '[]') "
-                    f"FROM {_ont('termos_negocio')} WHERE lower(tipo) = 'indicador'"
+                    f"FROM {_cad('termos_negocio')} WHERE lower(tipo) = 'indicador'"
                 )
             # Só dropa a origem depois que os dois INSERTs acima passaram sem
             # exceção (o try/except garante isso).
-            run_exec(f"DROP TABLE IF EXISTS {_ont('termos_negocio')}")
+            run_exec(f"DROP TABLE IF EXISTS {_cad('termos_negocio')}")
     except Exception:
         pass
     # Semeia o admin inicial se a tabela de permissões estiver vazia.
@@ -1386,18 +1612,19 @@ def get_user_perms(email: str) -> dict:
     automaticamente).
 
     Retorna ``{"papel", "ver_logs", "ver_cadastros", "aprovador_tags",
-    "power_steward"}``. Para não-admin, as flags vêm das colunas homônimas de
-    ``permissoes`` (default False).
+    "ver_finops", "power_steward", "engenharia"}``. Para não-admin, as flags
+    vêm das colunas homônimas de ``permissoes`` (default False).
     """
     base = {
         "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
-        "aprovador_tags": False, "power_steward": False, "registrado": False, "nome": "",
+        "aprovador_tags": False, "ver_finops": False, "power_steward": False,
+        "engenharia": False, "registrado": False, "nome": "",
     }
     if not email:
         return base
     df = run_query(
         f"SELECT coalesce(nome, '') AS nome, papel, ver_logs, ver_cadastros, "
-        f"aprovador_tags, power_steward "
+        f"aprovador_tags, ver_finops, power_steward, engenharia "
         f"FROM {_cad('permissoes')} WHERE lower(email) = {q_str(email.lower())} LIMIT 1"
     )
     if df.empty:
@@ -1409,15 +1636,17 @@ def get_user_perms(email: str) -> dict:
     if papel == "admin":
         return {
             "papel": "admin", "ver_logs": True, "ver_cadastros": True,
-            "aprovador_tags": True, "power_steward": power_steward,
-            "registrado": True, "nome": nome,
+            "aprovador_tags": True, "ver_finops": True, "power_steward": power_steward,
+            "engenharia": True, "registrado": True, "nome": nome,
         }
     return {
         "papel": papel,
         "ver_logs": _as_bool(row["ver_logs"]),
         "ver_cadastros": _as_bool(row["ver_cadastros"]),
         "aprovador_tags": _as_bool(row["aprovador_tags"]),
+        "ver_finops": _as_bool(row["ver_finops"]),
         "power_steward": power_steward,
+        "engenharia": _as_bool(row["engenharia"]),
         "registrado": True,
         "nome": nome,
     }
@@ -1468,7 +1697,7 @@ _GLOSSARIO_COLS_COMUNS = (
 @st.cache_data(ttl=30, show_spinner=False)
 def list_glossario_negocio() -> pd.DataFrame:
     return run_query(
-        f"SELECT {_GLOSSARIO_COLS_COMUNS} FROM {_ont('glossario_negocio')} ORDER BY nome"
+        f"SELECT {_GLOSSARIO_COLS_COMUNS} FROM {_cad('glossario_negocio')} ORDER BY nome"
     )
 
 
@@ -1477,7 +1706,10 @@ def list_indicadores() -> pd.DataFrame:
     return run_query(
         f"SELECT {_GLOSSARIO_COLS_COMUNS}, power_steward, nivel_apuracao, unidade, "
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
-        f"dimensao_tabelas, metrica_tabelas FROM {_ont('indicadores')} ORDER BY nome"
+        f"dimensoes_negocio, decisao_negocio, "
+        f"dimensao_tabelas, metrica_tabelas, status_publicacao, "
+        f"expr_validada, metric_view_publicada "
+        f"FROM {_cad('indicadores')} ORDER BY nome"
     )
 
 
@@ -1491,12 +1723,14 @@ def list_termos_negocio() -> pd.DataFrame:
         f"CAST(NULL AS STRING) AS nivel_apuracao, CAST(NULL AS STRING) AS unidade, "
         f"CAST(NULL AS STRING) AS variaveis_utilizadas, "
         f"CAST(NULL AS STRING) AS memoria_calculo, CAST(NULL AS STRING) AS restricoes, "
+        f"CAST(NULL AS STRING) AS dimensoes_negocio, CAST(NULL AS STRING) AS decisao_negocio, "
         f"'[]' AS dimensao_tabelas, '[]' AS metrica_tabelas "
-        f"FROM {_ont('glossario_negocio')} "
+        f"FROM {_cad('glossario_negocio')} "
         f"UNION ALL "
         f"SELECT {_GLOSSARIO_COLS_COMUNS}, power_steward, nivel_apuracao, unidade, "
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
-        f"dimensao_tabelas, metrica_tabelas FROM {_ont('indicadores')} "
+        f"dimensoes_negocio, decisao_negocio, "
+        f"dimensao_tabelas, metrica_tabelas FROM {_cad('indicadores')} "
         f"ORDER BY nome"
     )
 
@@ -1507,7 +1741,9 @@ def list_permissoes() -> pd.DataFrame:
         f"SELECT id, coalesce(nome, '') AS nome, email, papel, "
         f"coalesce(ver_cadastros,false) AS ver_cadastros, "
         f"coalesce(ver_logs,false) AS ver_logs, coalesce(aprovador_tags,false) AS aprovador_tags, "
-        f"coalesce(power_steward,false) AS power_steward "
+        f"coalesce(ver_finops,false) AS ver_finops, "
+        f"coalesce(power_steward,false) AS power_steward, "
+        f"coalesce(engenharia,false) AS engenharia "
         f"FROM {_cad('permissoes')} ORDER BY email"
     )
 
@@ -1649,14 +1885,37 @@ def _count(sql: str) -> int:
     return int(df.iloc[0, 0]) if not df.empty else 0
 
 
+def _extract_text(content) -> str:
+    """Normaliza ``message.content`` para texto puro.
+
+    A maioria dos modelos devolve uma string simples, mas alguns (ex.: GPT
+    OSS via AI Gateway) devolvem uma lista de blocos — inclusive um bloco
+    ``reasoning`` com o raciocínio interno, que NÃO deve aparecer pro
+    usuário. Aqui pegamos só os blocos ``text``.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+            if block_type != "text":
+                continue
+            text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    return str(content) if content else ""
+
+
 # ---------------------------------------------------------------------------
-# Assistente de Governança (chat com IA)
+# Assistente de Governança (chat com IA) — opcional (LLM_ENABLED)
 # ---------------------------------------------------------------------------
-# Painel de chat com function-calling sobre os dados que o próprio app já
-# expõe (tags, comentários, cadastros, backlog, auditoria). v1 é SOMENTE
-# LEITURA: o assistente explica/consulta, mas quem aplica tag ou grava
-# comentário continua sendo o usuário pela tela normal — evita dar poder de
-# escrita ao LLM antes de validar o comportamento dele em produção.
+# Painel de chat com function-calling. SOMENTE LEITURA e SOMENTE METADADO:
+# nenhuma tool roda SELECT em tabela (get_column_sample nao e exposto) e
+# nenhuma tool de escrita e exposta ao modelo. As tools de metadado do
+# Unity Catalog rodam OBO; as de dados internos do app rodam como o SP.
+# Ver docs-produto/15-seguranca-assistente.md.
 
 _DF_ROW_CAP = 200  # teto de linhas por resultado de tool, pra não estourar o contexto do modelo
 
@@ -1665,31 +1924,127 @@ def _df_records(df: pd.DataFrame, cap: int = _DF_ROW_CAP) -> list[dict]:
     return df.head(cap).to_dict("records")
 
 
-ASSISTANT_SYSTEM_PROMPT = """Você é o assistente do app de Governança de Dados — Unity Catalog.
+ASSISTANT_SYSTEM_PROMPT = f"""Você é o assistente do {APP_NAME}, o app de governança de dados no Unity Catalog.
 
-Você ajuda usuários de negócio e da governança a entender e consultar o que já
-está registrado no app: tags governadas e comentários aplicados em tabelas e
-colunas do Unity Catalog, os cadastros de domínios/sub-domínios/data stewards/
-dashboards, o glossário de termos de negócio e indicadores, os padrões que
-classificam uma coluna como dado pessoal, o backlog de aprovação de tags e os
-logs de auditoria.
+Você ajuda principalmente com DUAS coisas:""" + r"""
 
-Regras importantes:
-- Você é SOMENTE CONSULTA. Você não aplica tag, não grava comentário, não
-  cadastra/edita termo de negócio e não aprova/rejeita item de backlog — se o
-  usuário pedir uma dessas ações, explique que ele mesmo faz isso pela tela do
-  app (Governança, Glossário → Termos de Negócio para consultar, Cadastros →
-  Glossário de Negócio / Indicador para editar, ou Aprovações → Backlog) e,
-  se ajudar, oriente o caminho.
-- Use as ferramentas disponíveis para responder com dados reais em vez de
-  chutar. Se uma pergunta pedir dados de uma tabela específica, peça
-  catalog/schema/table se o usuário não tiver informado.
-- Se não tiver uma ferramenta ou dado que cubra a pergunta, diga claramente
-  que não tem essa informação em vez de inventar.
+A) Achar as TABELAS e COLUNAS que servem para calcular um indicador. Os
+   indicadores em geral já estão cadastrados no app (tool `termos_de_negocio`);
+   o que o usuário costuma precisar é descobrir, nos metadados do Unity
+   Catalog, quais colunas/tabelas usar como dimensão e como métrica e
+   rascunhar a memória de cálculo.
+   Fluxo: entenda o que ele quer medir -> `buscar_colunas` / `listar_schemas`
+   / `listar_tabelas` para achar candidatas -> confirme com
+   `tags_e_comentarios_da_tabela` -> proponha dimensão, métrica e a fórmula
+   em texto. O cadastro em si ele faz na tela Cadastros → Indicador.
+
+B) Responder QUEM é responsável por quê: o power steward de um indicador
+   (campo `power_steward` em `termos_de_negocio`), o data owner/steward de um
+   domínio ou sub-domínio (`data_stewards` + `dominios_e_subdominios`).
+
+C) Mostrar ONDE há dado governado: "quais tabelas de X têm dado pessoal,
+   dado pessoal sensível ou dado restrito", "onde a tag SOX está aplicada".
+   Use `buscar_por_tag` (uma chamada por catálogo) — NÃO saia inspecionando
+   tabela por tabela com `tags_e_comentarios_da_tabela`. Se o usuário não
+   disser o catálogo, peça um. Nomes de tag úteis: `privacidade`,
+   `seguranca`, `SOX`, `cliente`, `dominios_dados`, e as automáticas
+   `class.*` (dado pessoal detectado automaticamente pelo Databricks) e
+   `sap.PersonalData.*`.
+
+Terminologia: use sempre "dado pessoal" e "dado pessoal sensível" — nunca a
+sigla "PII".
+
+Também responde outras perguntas sobre o que está registrado no app.
+
+Limites — LEIA COM ATENÇÃO:
+- Você só enxerga METADADOS (nome, tipo e comentário de coluna, tags
+  governadas) e o que está cadastrado no app. Você NÃO tem acesso aos dados
+  das tabelas. Nunca afirme valores, contagens, distribuições, exemplos de
+  linha, min/max ou "como os dados se parecem" — se precisar disso, diga que
+  o usuário deve olhar os dados na ferramenta de análise dele.
+- Você é SOMENTE CONSULTA. Não aplica tag, não grava comentário, não cadastra
+  nem edita indicador/termo, não aprova backlog. Oriente o usuário à tela
+  certa do app.
+- Use as ferramentas em vez de chutar. Se não houver ferramenta ou dado que
+  cubra a pergunta, diga que não tem essa informação em vez de inventar.
+- Se uma ferramenta devolver {"erro": "Sem permissão..."}, o usuário não tem
+  acesso àquele dado no app — explique de forma breve e NÃO tente a mesma
+  ferramenta de novo nem contorne por outra.
 - Responda em português, de forma direta e objetiva.
 """
 
 TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_colunas",
+            "description": (
+                "Descoberta: procura colunas cujo NOME ou COMENTÁRIO contém um termo "
+                "(ex.: 'faturamento', 'cliente', 'data'), varrendo os catálogos "
+                "disponíveis. Devolve catálogo/schema/tabela/coluna/tipo/comentário — "
+                "só metadados, nunca valores. Use para achar tabelas candidatas a "
+                "dimensão/métrica de um indicador."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "termo": {"type": "string", "description": "Trecho a procurar em nome/comentário de coluna."},
+                    "catalog": {"type": "string", "description": "Opcional: restringe a um catálogo."},
+                },
+                "required": ["termo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_schemas",
+            "description": "Descoberta: schemas visíveis num catálogo.",
+            "parameters": {
+                "type": "object",
+                "properties": {"catalog": {"type": "string"}},
+                "required": ["catalog"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listar_tabelas",
+            "description": "Descoberta: tabelas de um schema, com o comentário de cada uma.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "catalog": {"type": "string"},
+                    "schema": {"type": "string"},
+                },
+                "required": ["catalog", "schema"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_por_tag",
+            "description": (
+                "Varre as tags governadas JÁ APLICADAS num catálogo (ou schema) "
+                "inteiro, de uma vez — responde 'quais tabelas/colunas têm a tag X' "
+                "ou 'onde há dado restrito/confidencial/pessoal/SOX'. Devolve "
+                "catálogo/schema/tabela/coluna/tag/valor (coluna nula = tag na "
+                "tabela). Só metadados, nunca valores de dado. Prefira esta tool a "
+                "inspecionar tabela por tabela com tags_e_comentarios_da_tabela."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "catalog": {"type": "string", "description": "Catálogo a varrer (recomendado informar)."},
+                    "schema": {"type": "string", "description": "Opcional: restringe a um schema."},
+                    "tag_key": {"type": "string", "description": "Opcional: chave exata da tag (ex.: 'privacidade', 'SOX', 'class.br_cpf')."},
+                    "tag_value": {"type": "string", "description": "Opcional: trecho do valor da tag (ex.: 'restrito', 'pessoal')."},
+                },
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -1802,11 +2157,59 @@ TOOL_DEFINITIONS = [
 ]
 
 
+# Tools que espelham telas GENUINAMENTE restritas do app: o assistente não
+# pode ser um caminho lateral para elas. Só o log de auditoria (histórico de
+# mudanças) e o backlog de aprovação (solicitações + justificativas) entram
+# aqui — o resto (domínios, stewards, dashboards, padrões, glossário, tags
+# governadas, metadados de tabela) é dado de referência/contato, útil para
+# qualquer usuário e já visível de forma equivalente na tela pública de
+# consulta ao glossário e nos contadores da tela de Início.
+_TOOL_REQUIRED_PERM = {
+    "backlog_de_aprovacao_de_tags": "aprovador_tags",
+    "log_auditoria": "ver_logs",
+}
+
+
+def _tool_allowed(name: str) -> bool:
+    """True se o papel/flags do usuário logado liberam esta tool."""
+    required = _TOOL_REQUIRED_PERM.get(name)
+    if not required:
+        return True
+    perms = st.session_state.get("perms", {}) or {}
+    if perms.get("papel") == "admin":
+        return True
+    return bool(perms.get(required))
+
+
 def _execute_tool(name: str, args: dict, user: str) -> dict:
     """Executa uma tool e devolve um dict serializável (lista de records ou erro)."""
+    if not _tool_allowed(name):
+        return {"erro": (
+            "Sem permissão: seu perfil no app não tem acesso a esses dados "
+            "(a tela correspondente também ficaria oculta). Fale com um "
+            "administrador se precisar dessa informação."
+        )}
     try:
         if name == "tags_e_comentarios_da_tabela":
             catalog, schema, table = args["catalog"], args["schema"], args["table"]
+            if ALLOWED_CATALOGS and str(catalog).lower() not in ALLOWED_CATALOGS:
+                return {"erro": f"O catálogo '{catalog}' não está disponível neste app."}
+            # Fail-closed: se o app roda em modo OBO mas o token do usuário não
+            # chegou, NÃO cair para o service principal (que enxerga mais que o
+            # usuário). Sem identidade do usuário, não respondemos metadados.
+            if USE_ON_BEHALF_OF_USER and not _forwarded_user_token():
+                return {"erro": (
+                    "Não consegui confirmar sua identidade (token de usuário "
+                    "ausente) — recarregue o app e aceite o consentimento de "
+                    "acesso antes de consultar metadados de tabela."
+                )}
+            # Mesmo portão das escritas (user_can_access_table, via OBO): só
+            # respondemos sobre tabelas que o usuário logado de fato enxerga.
+            if not user_can_access_table(user, catalog, schema, table):
+                return {"erro": (
+                    f"Você não tem acesso à tabela {catalog}.{schema}.{table} "
+                    "— não posso mostrar os metadados dela."
+                )}
             columns = get_columns(user, catalog, schema, table)
             applied_tags = get_applied_column_tags(user, catalog, schema, table)
             comment = get_table_comment(user, catalog, schema, table)
@@ -1822,6 +2225,27 @@ def _execute_tool(name: str, args: dict, user: str) -> dict:
                     for c in columns
                 ],
             }
+        if name in ("buscar_colunas", "listar_schemas", "listar_tabelas", "buscar_por_tag"):
+            # Descoberta de metadados — roda sob OBO. Mesmo fail-closed do
+            # tags_e_comentarios_da_tabela: sem token do usuário, não usamos SP.
+            if USE_ON_BEHALF_OF_USER and not _forwarded_user_token():
+                return {"erro": (
+                    "Não consegui confirmar sua identidade (token de usuário "
+                    "ausente) — recarregue o app e aceite o consentimento de acesso."
+                )}
+            cat = args.get("catalog")
+            if cat and ALLOWED_CATALOGS and str(cat).lower() not in ALLOWED_CATALOGS:
+                return {"erro": f"O catálogo '{cat}' não está disponível neste app."}
+            if name == "buscar_colunas":
+                return {"colunas": search_columns(user, args.get("termo", ""), cat)}
+            if name == "buscar_por_tag":
+                return {"tags_aplicadas": search_by_tag(
+                    user, cat, args.get("schema"), args.get("tag_key"), args.get("tag_value"),
+                )}
+            catalog = args["catalog"]
+            if name == "listar_schemas":
+                return {"schemas": list_schemas(user, catalog)}
+            return {"tabelas": list_tables_with_comment(user, catalog, args["schema"])}
         if name == "tags_governadas_disponiveis":
             return {"tags_governadas": get_governed_tags()}
         if name == "dominios_e_subdominios":
@@ -1849,29 +2273,6 @@ def _execute_tool(name: str, args: dict, user: str) -> dict:
         return {"erro": str(exc)}
 
 
-def _extract_text(content) -> str:
-    """Normaliza ``message.content`` para texto puro.
-
-    A maioria dos modelos devolve uma string simples, mas alguns (ex.: GPT
-    OSS via AI Gateway) devolvem uma lista de blocos — inclusive um bloco
-    ``reasoning`` com o raciocínio interno, que NÃO deve aparecer pro
-    usuário. Aqui pegamos só os blocos ``text``.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-            if block_type != "text":
-                continue
-            text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
-            if text:
-                parts.append(text)
-        return "\n".join(parts)
-    return str(content) if content else ""
-
-
 def run_assistant_turn(user_text: str, user: str) -> str:
     """Processa uma pergunta do usuário no painel do assistente e devolve a resposta final.
 
@@ -1879,7 +2280,9 @@ def run_assistant_turn(user_text: str, user: str) -> str:
     só a mensagem final do assistente é persistida no histórico da sessão —
     as mensagens de tool call ficam só dentro deste loop.
     """
-    MAX_ITERATIONS = 6
+    # Montar um indicador é exploratório (buscar colunas -> listar tabelas ->
+    # inspecionar algumas) e consome várias idas e vindas — 6 era pouco.
+    MAX_ITERATIONS = 10
     try:
         client = get_llm_client()
     except Exception as exc:
@@ -1898,7 +2301,7 @@ def run_assistant_turn(user_text: str, user: str) -> str:
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
-                max_tokens=1500,
+                max_tokens=2500,
             )
         except Exception as exc:
             return f"O assistente de IA falhou ao responder: {exc}"
@@ -1995,8 +2398,9 @@ _ASSISTANT_TAB_CSS = """
 
 
 def render_assistant_dock(user: str) -> None:
-    """Painel do assistente ancorado à direita, recolhível para uma aba fina."""
-    if not st.session_state.get("show_assistant", True):
+    """Painel do assistente ancorado à direita, recolhível para uma aba fina.
+    Começa recolhido (aba fina) — o usuário abre quando quiser."""
+    if not st.session_state.get("show_assistant", False):
         with st.container(key="assistant_tab"):
             if st.button("🤖  Assistente", key="assistant_open_btn"):
                 st.session_state["show_assistant"] = True
@@ -2044,19 +2448,479 @@ def render_assistant_panel(user: str) -> None:
                 st.markdown(m["content"])
 
     if not st.session_state["chat_messages"]:
+        sugestoes = [
+            "Que colunas e tabelas posso usar para calcular um indicador de margem?",
+            "Quais tabelas de um catálogo têm dado pessoal ou restrito?",
+            "Quais indicadores já estão cadastrados e quem é o power steward de cada um?",
+            "Quem são os data stewards e de qual domínio cada um cuida?",
+        ]
         with st.expander("💡 Sugestões", expanded=True):
-            for label in (
-                "Quais domínios existem?",
-                "Quais termos de negócio e indicadores estão cadastrados?",
-                "O que está pendente no backlog de aprovação de tags?",
-                "Quem são os data stewards cadastrados?",
-            ):
+            for label in sugestoes:
                 if st.button(label, use_container_width=True, key=f"assist_qp_{label}"):
                     _ask(label)
 
     prompt = st.chat_input("Pergunte ao assistente…")
     if prompt:
         _ask(prompt)
+
+
+
+# ---------------------------------------------------------------------------
+# Pipeline de publicação (blueprint seção 5.1) — Passo 1
+# ---------------------------------------------------------------------------
+
+
+def gerar_expr_sql(formula_texto: str, measures_colunas: list[str]) -> dict:
+    """Traduz a fórmula de um indicador (linguagem natural) numa expressão SQL
+    candidata, via `assistente_governanca` (Unity AI Gateway).
+
+    `measures_colunas` é a lista real de colunas de origem (vinda do lineage
+    em `metrica_tabelas[].colunas`) — o prompt instrui o modelo a usar
+    exclusivamente esses nomes, pra evitar alucinação de coluna inexistente.
+
+    Não executa a expressão nem toca em dado real — isso é o Passo 2
+    (`testar_candidato`, ainda não implementado). Retorna
+    ``{"expr_sql": str, "explicacao": str}``. Propaga exceções de conexão/
+    parsing pra quem chamar decidir como exibir o erro.
+    """
+    if not measures_colunas:
+        raise ValueError("measures_colunas não pode ser vazio — sem lineage não há o que traduzir.")
+
+    colunas_fmt = ", ".join(f"`{c}`" for c in measures_colunas)
+    prompt = (
+        "Você é um tradutor de fórmulas de indicadores de negócio para SQL "
+        "(dialeto Databricks/Spark SQL), usado num pipeline de governança de dados.\n\n"
+        f"Colunas reais disponíveis — use SOMENTE estas, exatamente como estão "
+        f"escritas, nunca invente nomes de coluna: {colunas_fmt}\n\n"
+        f'Fórmula em linguagem natural: "{formula_texto}"\n\n'
+        "Responda em JSON puro, sem markdown e sem texto fora do JSON, neste formato exato:\n"
+        '{"expr_sql": "<expressão SQL de agregação, ex: SUM(col_a) / SUM(col_b)>", '
+        '"explicacao": "<reformulação em português do que foi entendido>"}'
+    )
+    client = get_llm_client()
+    response = client.chat.completions.create(
+        model=LLM_ENDPOINT,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=400,
+    )
+    texto = _extract_text(response.choices[0].message.content).strip()
+    # Alguns modelos devolvem o JSON dentro de um bloco ```json ... ``` mesmo
+    # quando instruídos a não fazer isso — extrai só o trecho entre chaves.
+    inicio, fim = texto.find("{"), texto.rfind("}")
+    if inicio == -1 or fim == -1:
+        raise ValueError(f"Resposta do assistente não trouxe JSON reconhecível: {texto!r}")
+    dados = json.loads(texto[inicio:fim + 1])
+    expr_sql = (dados.get("expr_sql") or "").strip()
+    explicacao = (dados.get("explicacao") or "").strip()
+    if not expr_sql:
+        raise ValueError(f"Assistente não retornou 'expr_sql': {texto!r}")
+    return {"expr_sql": expr_sql, "explicacao": explicacao}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline de publicação (blueprint seção 5.1) — Passos 2, 4, 5
+# ---------------------------------------------------------------------------
+
+# Palavras/sinais que não podem aparecer numa expressão candidata gerada por
+# IA — defesa em profundidade contra injeção de SQL via prompt. A expressão
+# roda como SELECT contra dado real (com o Service Principal) em
+# `testar_candidato`, ANTES da confirmação humana do Passo 3.
+_SQL_PALAVRAS_PROIBIDAS = re.compile(
+    r";|--|/\*|\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|GRANT|REVOKE|"
+    r"MERGE|TRUNCATE|EXEC|EXECUTE|CALL)\b",
+    re.IGNORECASE,
+)
+
+
+def _validar_expr_sql_segura(expr_sql: str) -> None:
+    """Levanta ValueError se a expressão candidata tiver qualquer sinal de
+    comando fora de uma expressão de agregação simples (ponto e vírgula,
+    comentário SQL, ou palavra-chave de DDL/DML)."""
+    if _SQL_PALAVRAS_PROIBIDAS.search(expr_sql):
+        raise ValueError("Expressão candidata contém comando não permitido — revise antes de testar.")
+
+
+def testar_candidato(expr_sql: str, catalogo: str, schema: str, tabela: str) -> float | None:
+    """Executa a expressão candidata como agregação real contra a tabela de
+    origem (Passo 2) e devolve o valor numérico resultante. Não salva nada —
+    é só o "preview" que embasa a confirmação humana do Passo 3.
+
+    Roda via `run_query(prefer_user=True)` — com `USE_ON_BEHALF_OF_USER=true`
+    isso vira OBO de verdade: precisa que o usuário logado tenha `SELECT`
+    real na tabela, não só ter conseguido listá-la no picker. Hoje
+    (`USE_ON_BEHALF_OF_USER=false`, ver `app.yaml`) ainda cai pro Service
+    Principal — mesma limitação que levou à remoção do assistente de chat
+    (ver comentário em `LLM_ENABLED`), pendente de resolver o problema do
+    escopo `sql` antes de religar. O `prefer_user=True` já fica pronto pra
+    quando isso for religado, pra não esquecer de novo.
+    """
+    _validar_expr_sql_segura(expr_sql)
+    tabela_fqn = q_full(catalogo, schema, tabela)
+    df = run_query(f"SELECT {expr_sql} AS resultado FROM {tabela_fqn}", prefer_user=True)
+    if df.empty:
+        raise RuntimeError("A consulta de teste não retornou nenhuma linha.")
+    valor = df.iloc[0, 0]
+    return None if valor is None else float(valor)
+
+
+def _slugify(nome: str) -> str:
+    """Nome do indicador → identificador SQL seguro (nome de measure/view):
+    minúsculo, sem acento, espaço/pontuação vira `_`, sem `_` duplicado nem
+    nas pontas."""
+    sem_acento = unicodedata.normalize("NFKD", nome).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "_", sem_acento.lower()).strip("_")
+    return slug or "indicador"
+
+
+def _montar_comentario_metric_view(indicador: dict) -> str:
+    """Concatena Objetivo + Decisão apoiada (campos de negócio do Indicador)
+    num único comentário pra Metric View — é a "operacionalização" pedida:
+    o negócio descreve os dois campos separadamente na tela Indicador (o
+    Objetivo já existia; Decisão apoiada é o novo campo, `decisao_negocio`),
+    e aqui, na publicação, eles viram uma frase só, sem exigir nenhuma
+    decisão extra de quem cadastra. Sem aspas/quebra de linha — vai dentro
+    do `CREATE VIEW ... $$...$$` do YAML."""
+    objetivo = (indicador.get("objetivo") or "").strip()
+    decisao = (indicador.get("decisao_negocio") or "").strip()
+    partes = [objetivo] + ([f"Decisão apoiada: {decisao}"] if decisao else [])
+    return " — ".join(partes).replace('"', "'").replace("\n", " ").strip()
+
+
+def montar_yaml_metric_view(indicador: dict) -> str:
+    """Monta o YAML da Metric View (Passo 4) só transcrevendo campos já
+    estruturados do indicador — determinístico, sem IA envolvida. Exige
+    lineage de métrica e `expr_validada` já preenchidos (Passo 3 confirmado);
+    dimensão é opcional.
+    """
+    met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
+    if not met_items:
+        raise ValueError("Indicador sem lineage de métrica — cadastre a tabela/colunas antes.")
+    expr_validada = (indicador.get("expr_validada") or "").strip()
+    if not expr_validada:
+        raise ValueError("Indicador sem expressão validada — confirme o Passo 3 antes.")
+
+    fonte = met_items[0]
+    catalogo, schema, tabela = fonte["catalogo"], fonte["schema"], fonte["tabela"]
+
+    dim_items = _parse_tabelas_json(indicador.get("dimensao_tabelas"))
+    if dim_items:
+        fonte_dim = dim_items[0]
+        if (fonte_dim["catalogo"], fonte_dim["schema"], fonte_dim["tabela"]) != (catalogo, schema, tabela):
+            raise ValueError(
+                "Dimensão e métrica apontam para tabelas diferentes — "
+                "ajuste o lineage do indicador antes de publicar."
+            )
+
+    dim_cols: list[str] = []
+    for it in dim_items:
+        for col in it.get("colunas") or []:
+            if col not in dim_cols:
+                dim_cols.append(col)
+
+    nome_medida = _slugify(indicador["nome"])
+    comment = _montar_comentario_metric_view(indicador)
+    synonyms = [s.strip() for s in (indicador.get("palavras_chave") or "").split(",") if s.strip()]
+
+    linhas = ["version: 1.1", f"source: {catalogo}.{schema}.{tabela}"]
+    if dim_cols:
+        linhas.append("dimensions:")
+        for col in dim_cols:
+            # `name` precisa ser um identificador SQL válido (slugify); `expr`
+            # referencia a coluna real, com backtick (sem isso, um nome de
+            # coluna com espaço/acento — ex.: "Data da Venda" — quebra o SQL
+            # dentro do YAML: PARSE_SYNTAX_ERROR, confirmado). O valor do
+            # `expr` precisa ir entre aspas duplas no YAML — sem isso, o
+            # parser de YAML do Metric View rejeita a linha porque um valor
+            # não pode COMEÇAR com backtick fora de uma string (também
+            # confirmado: "found character '`' that cannot start any token").
+            linhas.append(f"  - name: {_slugify(col)}")
+            linhas.append(f'    expr: "`{col}`"')
+    linhas.append("measures:")
+    linhas.append(f"  - name: {nome_medida}")
+    linhas.append(f"    expr: {expr_validada}")
+    if comment:
+        linhas.append(f'    comment: "{comment}"')
+    if synonyms:
+        syn_fmt = ", ".join(f'"{s}"' for s in synonyms)
+        linhas.append(f"    synonyms: [{syn_fmt}]")
+    return "\n".join(linhas)
+
+
+def montar_ddl_metric_view(indicador: dict) -> tuple[str, str]:
+    """Monta o DDL completo (`CREATE OR REPLACE VIEW ... WITH METRICS
+    LANGUAGE YAML`) do indicador (Passo 5) — só transcreve/monta texto,
+    **não executa nada**. Decisão de arquitetura: publicar (rodar o DDL de
+    verdade) é ação de quem tem `CREATE`/`MODIFY` no schema de destino, não
+    do Service Principal do app — a Engenharia copia o SQL daqui e roda onde
+    achar melhor (SQL Editor, notebook, outro workspace…), sob a própria
+    identidade. Isso também tira do app a necessidade de `CREATE`/`MODIFY`
+    em todo schema onde um indicador possa vir a ser publicado.
+
+    Só exige ``status_publicacao == 'validado'`` — quem chama é responsável
+    por já ter checado isso (a UI do Passo 4 só mostra o DDL nesse estado).
+
+    Retorna ``(ddl_sql, view_fqn)`` — o DDL pronto pra copiar e o nome
+    totalmente qualificado (sem quoting) sugerido pra view.
+    """
+    if indicador.get("status_publicacao") != "validado":
+        raise ValueError("Indicador precisa estar com status 'validado' antes de gerar o DDL.")
+    yaml_txt = montar_yaml_metric_view(indicador)
+    if "$$" in yaml_txt:
+        # Delimitador do CREATE VIEW ... AS $$...$$ — não deveria acontecer
+        # (nome/objetivo/synonyms não deveriam conter isso), mas confere
+        # antes de montar o DDL em vez de deixar o Spark SQL falhar feio.
+        raise ValueError("YAML gerado contém '$$', incompatível com o delimitador do CREATE VIEW.")
+    met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
+    catalogo, schema = met_items[0]["catalogo"], met_items[0]["schema"]
+    nome_view = _slugify(indicador["nome"])
+    view_fqn = q_full(catalogo, schema, nome_view)
+    ddl_sql = f"CREATE OR REPLACE VIEW {view_fqn} WITH METRICS LANGUAGE YAML AS $$\n{yaml_txt}\n$$"
+    return ddl_sql, f"{catalogo}.{schema}.{nome_view}"
+
+
+# ---------------------------------------------------------------------------
+# FinOps (blueprint seção 8.2) — Passo 1
+# ---------------------------------------------------------------------------
+# Só a função de query por enquanto — cards, gráfico e tabela (Passos 2-4 da
+# seção 8.2) ainda não foram construídos. Ver finopsmockup.html pro layout
+# de referência (não implementado ainda, só pra saber onde isso está indo).
+
+
+def _q_date(d: date) -> str:
+    """Literal DATE seguro pro Spark SQL — só aceita `date`/`datetime` de
+    verdade (não string), então não tem o que injetar."""
+    if not isinstance(d, date):
+        raise TypeError(f"Esperava um date, recebi {type(d).__name__}")
+    return f"DATE'{d.isoformat()}'"
+
+
+def obter_custo_por_dominio(data_inicio: date, data_fim: date) -> pd.DataFrame:
+    """Custo (USD) e DBUs consumidos no período, por dia/domínio/tipo de
+    custo (blueprint seção 8.2, Passo 1 — query "final", com DBUs além do
+    valor em USD, pra auditoria técnica independente de preço).
+
+    O domínio vem da custom tag `domain` aplicada no warehouse/compute
+    (seção 8.1, Passo 0 — convenção manual, não código); recursos sem essa
+    tag caem em `sem_tag`. `tipo_custo` distingue:
+      - "Compute do App"  — fixo, roda enquanto o App estiver ACTIVE
+      - "SQL Warehouse"   — variável
+      - "IA (assistente + pipeline)" — variável; chamadas ao AI Gateway
+        (assistente de chat) e ao model service (tradução de fórmula no
+        pipeline de indicador). Domínio fixo "IA / governança".
+      - "Outro"
+
+    Escopo do "custo do Power Steward": `usage_metadata.app_id` deste App
+    (`DATABRICKS_CLIENT_ID`) OU `usage_metadata.warehouse_id` (`WAREHOUSE_ID`)
+    OU as linhas de IA — `billing_origin_product = 'AI_GATEWAY'` com
+    `endpoint_name = LLM_ENDPOINT`, e `billing_origin_product = 'MODEL_SERVING'`
+    com `identity_metadata.run_as = <SP do app>` (a IA não carrega `app_id`).
+    Sem esse filtro a query somaria o billing da conta inteira. Limitação
+    conhecida: o warehouse compartilhado entre Apps (Free Edition libera 1)
+    faz a fatia "SQL Warehouse" incluir uso de outros Apps — resolve com
+    warehouse dedicado (seção 4).
+
+    Lê `system.billing.usage`/`system.billing.list_prices` — tabelas de
+    sistema do Unity Catalog, não dado interno do app — por isso pede OBO
+    (`prefer_user=True`), igual à regra geral de leitura de catálogo (ver
+    docstring do módulo).
+
+    ⚠️ `system.billing` só concede `SELECT`/`USE SCHEMA` ao grupo reservado
+    `account admins` — nem um metastore admin comum consegue dar `GRANT`
+    nesse schema pro Service Principal (testado: `PERMISSION_DENIED: User
+    does not have MANAGE on Schema 'system.billing'`, mesmo sendo o dono da
+    conta Free Edition). Ou seja, com `USE_ON_BEHALF_OF_USER=false` (estado
+    atual, ver `app.yaml`) esta função **não funciona de jeito nenhum** — cai
+    pro SP, que nunca vai ter acesso a `system.billing` aqui. Só funciona com
+    OBO de verdade (usando o token do usuário, que pode ter esse acesso
+    pessoalmente). Pendência bloqueadora: religar OBO esbarra no erro de
+    escopo `sql` (ver comentário em `LLM_ENABLED`). O controle de acesso *por
+    domínio* dentro da página (seção 8.1, Passo 5) também ainda não foi
+    implementado.
+    """
+    this_app_id = os.environ.get("DATABRICKS_CLIENT_ID", "").strip()
+    escopo = []
+    if this_app_id:
+        escopo.append(f"u.usage_metadata.app_id = {q_str(this_app_id)}")
+    if WAREHOUSE_ID:
+        escopo.append(f"u.usage_metadata.warehouse_id = {q_str(WAREHOUSE_ID)}")
+    # Custo de IA do Power Steward (assistente de chat + tradução de fórmula no
+    # pipeline de publicação). NÃO carrega `usage_metadata.app_id` — a chave de
+    # atribuição é o `endpoint_name` (roteamento no AI Gateway) e o
+    # `identity_metadata.run_as` (a inferência de fato, feita com o SP do app).
+    # Ambos os caminhos usam LLM_ENDPOINT / o SP, então "IA" agrega os dois.
+    if LLM_ENDPOINT:
+        escopo.append(
+            f"(u.billing_origin_product = 'AI_GATEWAY' "
+            f"AND u.usage_metadata.endpoint_name = {q_str(LLM_ENDPOINT)})"
+        )
+    if this_app_id:
+        escopo.append(
+            f"(u.billing_origin_product = 'MODEL_SERVING' "
+            f"AND u.identity_metadata.run_as = {q_str(this_app_id)})"
+        )
+    # Sem nenhum critério de escopo (ex.: rodando fora do runtime do App) não dá
+    # pra escopar — melhor devolver tudo (comportamento antigo) do que uma
+    # cláusula `WHERE ... AND ()` inválida.
+    filtro_escopo = f"AND ({' OR '.join(escopo)})" if escopo else ""
+    sql = f"""
+        SELECT
+          DATE(u.usage_date) AS dia,
+          CASE
+            WHEN u.billing_origin_product IN ('AI_GATEWAY', 'MODEL_SERVING') THEN 'IA / governança'
+            ELSE COALESCE(u.custom_tags['domain'], 'sem_tag')
+          END AS dominio,
+          CASE
+            WHEN u.billing_origin_product IN ('AI_GATEWAY', 'MODEL_SERVING') THEN 'IA (assistente + pipeline)'
+            WHEN u.usage_metadata.app_id IS NOT NULL THEN 'Compute do App'
+            WHEN u.usage_metadata.warehouse_id IS NOT NULL THEN 'SQL Warehouse'
+            ELSE 'Outro'
+          END AS tipo_custo,
+          SUM(u.usage_quantity) AS dbus,
+          SUM(u.usage_quantity * p.pricing.default) AS custo_usd
+        FROM system.billing.usage u
+        JOIN system.billing.list_prices p
+          ON u.sku_name = p.sku_name
+          AND u.usage_date BETWEEN p.price_start_time AND COALESCE(p.price_end_time, current_date())
+        WHERE u.usage_date BETWEEN {_q_date(data_inicio)} AND {_q_date(data_fim)}
+        {filtro_escopo}
+        GROUP BY dia, dominio, tipo_custo
+        ORDER BY dia
+    """
+    return run_query(sql, prefer_user=True)
+
+
+# Rótulo do "tipo_custo" que representa custo fixo (compute do app, sempre
+# ligado enquanto o App estiver ACTIVE). Todo o resto (SQL Warehouse + Outro)
+# entra como variável na composição — ver `page_finops`.
+_FINOPS_TIPO_FIXO = "Compute do App"
+
+_FINOPS_PERIODOS = {"Últimos 7 dias": 7, "Últimos 30 dias": 30, "Últimos 90 dias": 90}
+
+# Fallback estático pra quando o OBO não estiver disponível (ver comentário
+# em LLM_ENABLED — o token do usuário vem sem o escopo `sql` no Free Edition
+# desta POC, e o Service Principal não tem — e não pode ter — acesso a
+# `system.billing`). Dado REAL, gerado rodando a mesma query do Passo 1 com
+# credencial pessoal (que tem acesso), fora do app — não é número inventado,
+# só não está "ao vivo". Arquivo versionado junto do app.py.
+_FINOPS_EXCEL_FALLBACK = "finops_dados_demo.xlsx"
+
+
+def _carregar_finops_excel() -> pd.DataFrame | None:
+    """Lê o snapshot estático (aba `custo_por_dominio`). None se o arquivo
+    não existir no deploy (não é erro — só significa que não há fallback)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), _FINOPS_EXCEL_FALLBACK)
+    if not os.path.exists(path):
+        return None
+    df = pd.read_excel(path, sheet_name="custo_por_dominio")
+    df["dia"] = pd.to_datetime(df["dia"]).dt.date
+    return df
+
+
+def _render_finops_dashboard(df: pd.DataFrame) -> None:
+    """Cards + gráfico + tabela (blueprint seção 8.2, Passos 2-4) — só
+    renderiza a partir de um DataFrame já no formato de
+    `obter_custo_por_dominio` (dia, dominio, tipo_custo, dbus, custo_usd).
+    Usado tanto pro dado ao vivo quanto pelo fallback estático."""
+    df = df.copy()
+    # Normaliza tipos: o caminho ao vivo (Statement Execution API) devolve
+    # tudo como string; o fallback do Excel já vem com tipos nativos. A
+    # partir daqui o resto do código pode assumir date/float de verdade.
+    df["dia"] = pd.to_datetime(df["dia"]).dt.date
+    df["custo_usd"] = df["custo_usd"].astype(float)
+    df["dbus"] = df["dbus"].astype(float)
+    hoje = date.today()
+
+    custo_total = float(df["custo_usd"].sum())
+    dbus_total = float(df["dbus"].sum())
+    custo_fixo = float(df.loc[df["tipo_custo"] == _FINOPS_TIPO_FIXO, "custo_usd"].sum())
+    pct_fixo = (custo_fixo / custo_total * 100) if custo_total else 0.0
+    dias_com_dado = df["dia"].nunique() or 1
+    media_diaria = custo_total / dias_com_dado
+    # Projeção pelo dias-do-mês-corrente (não um "× 30" fixo) — mais
+    # defensável se questionado, por não superestimar/subestimar em meses
+    # curtos/longos (blueprint seção 8.2, item 3).
+    dias_no_mes = calendar.monthrange(hoje.year, hoje.month)[1]
+    projecao_mes = media_diaria * dias_no_mes
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Custo total no período", f"US$ {custo_total:,.2f}")
+    c2.metric("Fixo vs. variável", f"{pct_fixo:.0f}% / {100 - pct_fixo:.0f}%")
+    c3.metric("Custo médio / dia", f"US$ {media_diaria:,.2f}")
+    c4.metric("Projeção do mês corrente", f"≈ US$ {projecao_mes:,.2f}")
+    c5.metric("DBUs no período", f"{dbus_total:,.2f}")
+    st.caption(f"Fixo = {_FINOPS_TIPO_FIXO} · Variável = SQL Warehouse + IA + Outro")
+
+    st.markdown("#### Evolução diária — por tipo de custo")
+    pivot = df.pivot_table(
+        index="dia", columns="tipo_custo", values="custo_usd", aggfunc="sum", fill_value=0.0,
+    )
+    # Índice vira rótulo "DD/MM" (string) em vez de `date` — o eixo do
+    # gráfico passa a ser categórico (uma coluna por dia, coladas, sem tick
+    # de hora) em vez de escala temporal contínua. Ordenação por `date` já
+    # aconteceu no pivot acima (sort=True padrão), antes da troca pra string
+    # — então continua cronológico mesmo virando texto.
+    pivot.index = [d.strftime("%d/%m") for d in pivot.index]
+    st.bar_chart(pivot, stack=True)
+
+    st.markdown("#### Custo por domínio")
+    por_dominio = (
+        df.groupby("dominio", as_index=False)
+        .agg(dbus=("dbus", "sum"), custo_usd=("custo_usd", "sum"))
+        .sort_values("custo_usd", ascending=False)
+    )
+    por_dominio["pct"] = (por_dominio["custo_usd"] / custo_total * 100) if custo_total else 0.0
+    st.dataframe(
+        por_dominio.rename(columns={
+            "dominio": "Domínio", "dbus": "DBUs no período",
+            "custo_usd": "Custo (USD)", "pct": "% do total",
+        }).style.format({"DBUs no período": "{:.2f}", "Custo (USD)": "US$ {:.2f}", "% do total": "{:.1f}%"}),
+        use_container_width=True, hide_index=True,
+    )
+    if por_dominio["dominio"].eq("sem_tag").any():
+        st.caption("`sem_tag` = recursos ainda sem tag de domínio aplicada.")
+
+    dia_min, dia_max = df["dia"].min(), df["dia"].max()
+    st.caption(
+        f"Dados de billing de {dia_min.strftime('%d/%m/%Y')} a {dia_max.strftime('%d/%m/%Y')} — "
+        "o Databricks atualiza `system.billing.usage` com atraso de algumas horas; "
+        "este painel não é em tempo real."
+    )
+
+
+def page_finops() -> None:
+    """Página de FinOps. Tenta a consulta ao vivo em `system.billing`; se não
+    estiver acessível neste ambiente, usa silenciosamente o snapshot salvo em
+    `_FINOPS_EXCEL_FALLBACK` (dado real, só não é live) — sem expor o motivo
+    técnico na tela; fica registrado nos comentários do código pra quem for
+    mexer aqui depois (ver `LLM_ENABLED` e `testar_candidato`)."""
+    st.title("💰 FinOps — Custo da Governança")
+    st.caption(
+        f"Custo do {APP_NAME}: Compute do App + SQL Warehouse + IA "
+        "(assistente e tradução de fórmula de indicador)."
+    )
+
+    periodo_label = st.selectbox("Período", options=list(_FINOPS_PERIODOS.keys()), index=1)
+    dias = _FINOPS_PERIODOS[periodo_label]
+    hoje = date.today()
+    data_inicio = hoje - timedelta(days=dias - 1)
+
+    df: pd.DataFrame | None = None
+    try:
+        df_vivo = obter_custo_por_dominio(data_inicio, hoje)
+        if not df_vivo.empty:
+            df = df_vivo
+    except Exception:
+        pass
+
+    if df is None:
+        df_fallback = _carregar_finops_excel()
+        if df_fallback is None or df_fallback.empty:
+            st.info("Nenhum dado de custo disponível no momento.")
+            return
+        df_periodo = df_fallback[(df_fallback["dia"] >= data_inicio) & (df_fallback["dia"] <= hoje)]
+        df = df_periodo if not df_periodo.empty else df_fallback
+
+    _render_finops_dashboard(df)
 
 
 # ---------------------------------------------------------------------------
@@ -2721,7 +3585,7 @@ def _render_power_steward_select(cur_email: str, wkey: str) -> str:
     if not ps_emails:
         st.caption(
             "Ninguém marcado como Power Steward — marque um usuário em "
-            "**Usuários & Permissões**."
+            "**Usuários**."
         )
     return picked
 
@@ -2744,6 +3608,212 @@ def _render_keyword_chips(kp: str) -> list[str]:
     return lst
 
 
+# Rótulos amigáveis de `status_publicacao`, usados tanto na tela de negócio
+# (Indicador) quanto na de engenharia (Indicadores — Engenharia).
+_STATUS_PUBLICACAO_LABELS = {
+    "rascunho": "Rascunho (com o negócio)",
+    "aguardando_engenharia": "Aguardando engenharia",
+    "pronto_para_ia": "Com a engenharia — pronto para traduzir",
+    "validado": "Com a engenharia — validado",
+    "publicado": "Publicado",
+}
+
+
+def _render_handoff_engenharia(cur: dict, rk: str, user: str) -> None:
+    """Ponte de responsabilidade entre negócio e engenharia, na tela
+    Indicador (negócio): depois que o cadastro está completo, o negócio
+    clica aqui pra colocar o indicador na fila da tela Indicadores —
+    Engenharia, que escolhe as tabelas/colunas e conduz a publicação como
+    Metric View (`_render_pipeline_publicacao`). Só é chamada para
+    indicadores já salvos (precisa de `cur['id']`)."""
+    st.divider()
+    st.markdown("#### 🚀 Envio para a Engenharia")
+    status = cur.get("status_publicacao") or "rascunho"
+    if status == "rascunho":
+        st.caption(
+            "Quando o cadastro acima estiver completo, envie para a "
+            "Engenharia — ela escolhe as tabelas/colunas que formam o "
+            "indicador e publica como Metric View."
+        )
+        if st.button("📤 Enviar para engenharia", key=f"ind_enviar_eng_{rk}", type="primary"):
+            run_exec(
+                f"UPDATE {_cad('indicadores')} SET status_publicacao = 'aguardando_engenharia', "
+                f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                f"WHERE id = {int(cur['id'])}"
+            )
+            _finish_write("Indicador enviado para a Engenharia.")
+    else:
+        st.success(f"Status: **{_STATUS_PUBLICACAO_LABELS.get(status, status)}**")
+        if status == "publicado" and cur.get("metric_view_publicada"):
+            st.caption(f"Metric View: `{cur['metric_view_publicada']}`")
+
+
+def _status_publicacao_pos_lineage(status_atual: str | None, tem_lineage: bool) -> str:
+    """Recalcula `status_publicacao` quando a Engenharia salva a lineage de
+    Dimensão/Métrica, sem nunca retroceder um indicador já `validado`/
+    `publicado` só por reeditar a lineage — a única exceção é lineage vazia,
+    que sempre volta pra `aguardando_engenharia` (o gate é incondicional).
+    Nunca retrocede a `rascunho`: só o negócio controla esse estágio (botão
+    "Enviar para engenharia" em `_render_handoff_engenharia`). Ver
+    `_render_pipeline_publicacao` pro botão explícito de "Refazer tradução",
+    que é o único jeito deliberado de voltar atrás depois de validado."""
+    if not tem_lineage:
+        return "aguardando_engenharia"
+    if status_atual in ("validado", "publicado"):
+        return status_atual
+    return "pronto_para_ia"
+
+
+def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
+    """UI do pipeline de publicação do indicador (blueprint seção 5.1,
+    Passos 2 a 5): traduzir a fórmula com IA, testar contra dado real,
+    confirmação humana obrigatória, e só então publicar como Metric View.
+    Roda na tela Indicadores — Engenharia; só é chamada para indicadores já
+    salvos (precisa de `cur['id']`)."""
+    st.divider()
+    st.markdown("#### 🚀 Pipeline de publicação (Metric View)")
+    status = cur.get("status_publicacao") or "rascunho"
+    st.caption(f"Status: **{_STATUS_PUBLICACAO_LABELS.get(status, status)}**")
+
+    if status in ("rascunho", "aguardando_engenharia"):
+        st.info(
+            "Escolha as tabelas/colunas de Dimensão e Métrica (acima) e salve "
+            "— só então o indicador fica elegível pra tradução por IA."
+        )
+        return
+
+    met_items = _parse_tabelas_json(cur.get("metrica_tabelas"))
+    met_cols = [c for it in met_items for c in (it.get("colunas") or [])]
+    candidato_key = f"ind_candidato_{rk}"
+
+    if status == "pronto_para_ia":
+        c1, c2 = st.columns(2)
+        with c1:
+            if not LLM_ENABLED:
+                st.info("Tradução por IA desabilitada (`LLM_ENABLED=false`).")
+            elif st.button("🤖 Traduzir fórmula com IA", key=f"ind_traduzir_{rk}"):
+                with st.spinner("Traduzindo a fórmula e testando contra o dado real…"):
+                    try:
+                        resultado = gerar_expr_sql(cur.get("memoria_calculo") or "", met_cols)
+                        fonte = met_items[0]
+                        valor = testar_candidato(
+                            resultado["expr_sql"], fonte["catalogo"], fonte["schema"], fonte["tabela"],
+                        )
+                        st.session_state[candidato_key] = {**resultado, "valor_teste": valor, "testado": True}
+                    except Exception as exc:
+                        st.error(f"Falha ao traduzir/testar a fórmula: {exc}")
+        with c2:
+            # Caminho sem IA: a Engenharia já sabe a expressão (ou prefere
+            # escrever à mão) — abre o mesmo editor/teste/confirmação abaixo,
+            # só que partindo de um candidato vazio em vez de uma tradução.
+            if st.button("✍️ Criar query sem IA", key=f"ind_manual_{rk}"):
+                st.session_state[candidato_key] = {
+                    "expr_sql": "", "explicacao": "", "valor_teste": None, "testado": False,
+                }
+
+        candidato = st.session_state.get(candidato_key)
+        if candidato:
+            st.markdown("###### Confirmação humana (obrigatória — a expressão só é salva depois de testada e confirmada aqui)")
+            st.write(f"**Fórmula original:** {cur.get('memoria_calculo') or '(vazia)'}")
+            if candidato.get("explicacao"):
+                st.caption(f"Como a IA entendeu: {candidato['explicacao']}")
+            expr_edit = st.text_area(
+                "Expressão SQL de agregação (edite a sugestão da IA, ou escreva a "
+                "sua — ex.: SUM(`Qtd Vendida`), com o nome da coluna entre crases)",
+                value=candidato["expr_sql"], key=f"ind_expr_edit_{rk}",
+            )
+            valor_fmt = "—" if candidato["valor_teste"] is None else f"{candidato['valor_teste']:,.4f}"
+            st.metric("Valor de teste (contra o dado real, agora)", valor_fmt)
+
+            # "Confirmar e validar" só libera se o texto atual da caixa é
+            # exatamente o que passou no último teste bem-sucedido — editar
+            # depois de testar exige testar de novo. Além de garantir que o
+            # valor mostrado corresponde ao que será salvo, isso fecha uma
+            # brecha de segurança: `_validar_expr_sql_segura` (bloqueia
+            # DROP/DELETE/`;`/comentário SQL etc.) só roda dentro de
+            # `testar_candidato` — sem essa trava, dava pra digitar algo e
+            # confirmar sem nunca passar pelo filtro.
+            pronto_pra_confirmar = candidato.get("testado", False) and candidato["expr_sql"] == expr_edit
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🔁 Testar expressão", key=f"ind_retest_{rk}"):
+                    if not (expr_edit or "").strip():
+                        st.warning("Escreva uma expressão antes de testar.")
+                    else:
+                        try:
+                            fonte = met_items[0]
+                            valor = testar_candidato(expr_edit, fonte["catalogo"], fonte["schema"], fonte["tabela"])
+                            st.session_state[candidato_key] = {
+                                "expr_sql": expr_edit, "explicacao": candidato["explicacao"],
+                                "valor_teste": valor, "testado": True,
+                            }
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Expressão inválida: {exc}")
+            with c2:
+                if not pronto_pra_confirmar:
+                    st.caption("Teste a expressão acima (como está agora) antes de confirmar.")
+                if st.button(
+                    "✅ Confirmar e validar", key=f"ind_confirmar_{rk}", type="primary",
+                    disabled=not pronto_pra_confirmar,
+                ):
+                    run_exec(
+                        f"UPDATE {_cad('indicadores')} SET expr_validada = {q_str(expr_edit)}, "
+                        f"status_publicacao = 'validado', atualizado_em = current_timestamp(), "
+                        f"atualizado_por = {q_str(user)} WHERE id = {int(cur['id'])}"
+                    )
+                    st.session_state.pop(candidato_key, None)
+                    _finish_write("Expressão validada — indicador pronto pra publicar.")
+
+    elif status == "validado":
+        st.success(f"Expressão validada: `{cur.get('expr_validada')}`")
+        try:
+            ddl_sql, view_fqn_sugerido = montar_ddl_metric_view(cur)
+        except Exception as exc:
+            st.error(f"Não foi possível montar o DDL: {exc}")
+            ddl_sql = view_fqn_sugerido = None
+
+        if ddl_sql:
+            st.markdown("###### 📋 Query final — copie e crie a Metric View onde preferir")
+            st.caption(
+                "O app não cria a Metric View — só monta o SQL a partir do "
+                "que foi validado acima. Rode num SQL Editor/notebook com "
+                "`CREATE` no schema de destino (não precisa ser o Service "
+                "Principal do app, nem este workspace)."
+            )
+            st.code(ddl_sql, language="sql")
+            fqn_final = st.text_input(
+                "Nome final da view (ajuste se rodou em outro catálogo/schema)",
+                value=view_fqn_sugerido, key=f"ind_fqn_{rk}",
+            )
+            if st.button("✅ Marcar como publicado", key=f"ind_marcar_pub_{rk}", type="primary"):
+                run_exec(
+                    f"UPDATE {_cad('indicadores')} SET status_publicacao = 'publicado', "
+                    f"metric_view_publicada = {q_str(fqn_final)}, "
+                    f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                    f"WHERE id = {int(cur['id'])}"
+                )
+                _finish_write(f"Indicador marcado como publicado: `{fqn_final}`.")
+
+        if st.button("↩️ Refazer tradução", key=f"ind_refazer_{rk}"):
+            run_exec(
+                f"UPDATE {_cad('indicadores')} SET status_publicacao = 'pronto_para_ia', "
+                f"expr_validada = NULL WHERE id = {int(cur['id'])}"
+            )
+            _finish_write("Voltou pra pronto_para_ia — pode traduzir de novo.")
+
+    elif status == "publicado":
+        st.success(f"✅ Marcado como publicado: `{cur.get('metric_view_publicada')}`")
+        st.caption("Autoinformado pela Engenharia — o app não verifica se a view existe de fato.")
+        if st.button("↩️ Refazer tradução (marca de novo no fim)", key=f"ind_refazer_pub_{rk}"):
+            run_exec(
+                f"UPDATE {_cad('indicadores')} SET status_publicacao = 'pronto_para_ia', "
+                f"expr_validada = NULL WHERE id = {int(cur['id'])}"
+            )
+            _finish_write("Voltou pra pronto_para_ia — pode traduzir de novo.")
+
+
 def _render_glossario_editor(
     *, is_indicador: bool, ont_table: str, list_fn, titulo: str, icone: str,
 ) -> None:
@@ -2753,9 +3823,11 @@ def _render_glossario_editor(
     kp = "ind" if is_indicador else "glo"  # prefixo de key dos widgets (por tela)
     st.title(f"{icone} {titulo}")
     st.caption(
-        "Cadastro de indicadores (KPIs): objetivo, dono, unidade, nível de "
-        "apuração, memória de cálculo e as tabelas/colunas que compõem a "
-        "dimensão e a métrica."
+        "Cadastro de indicadores (KPIs) pelo negócio: objetivo, responsáveis, "
+        "unidade, nível de apuração e a fórmula de cálculo em linguagem de "
+        "negócio. Quando o cadastro estiver completo, envie para a "
+        "Engenharia — ela escolhe as tabelas/colunas e publica o indicador "
+        "como Metric View (tela **Indicadores — Engenharia**)."
         if is_indicador else
         "Glossário de termos de negócio: nome, definição, palavras-chave, "
         "domínio e responsáveis (Data Owner / Steward)."
@@ -2785,7 +3857,10 @@ def _render_glossario_editor(
         show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "—") if pd.notna(i) else "—")
         cols_show = ["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner"]
         if is_indicador:
-            cols_show.append("Nível de Apuração")
+            cols_show += ["Nível de Apuração", "Status"]
+            show["Status"] = show["status_publicacao"].fillna("rascunho").map(
+                lambda s: _STATUS_PUBLICACAO_LABELS.get(s, s)
+            )
         st.dataframe(
             show.rename(columns={
                 "tipo": "Tipo", "nome": "Nome", "data_owner": "Data Owner",
@@ -2811,7 +3886,9 @@ def _render_glossario_editor(
         "power_steward": "", "data_owner": "", "data_steward": "",
         "rotulo_seguranca": "", "rotulo_privacidade": "",
         "nivel_apuracao": "", "unidade": "", "variaveis_utilizadas": "",
-        "memoria_calculo": "", "restricoes": "", "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
+        "memoria_calculo": "", "restricoes": "", "dimensoes_negocio": "", "decisao_negocio": "",
+        "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
+        "status_publicacao": "rascunho",
     }
 
     # As keys dos widgets abaixo levam o id do registro (`_{rk}`): quando o
@@ -2847,12 +3924,17 @@ def _render_glossario_editor(
         format_func=lambda i: "(nenhum)" if i is None else sub_nome.get(i, i),
     )
 
-    data_owner = _select_pessoa_cadastrada(
-        "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", f"{kp}_owner_{rk}",
-    )
-    data_steward = _select_pessoa_cadastrada(
-        "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward_{rk}",
-    )
+    if is_indicador:
+        # Indicador não tem Data Owner/Steward próprios — o dono é sempre o
+        # Power Steward selecionado acima.
+        data_owner = data_steward = power_steward
+    else:
+        data_owner = _select_pessoa_cadastrada(
+            "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", f"{kp}_owner_{rk}",
+        )
+        data_steward = _select_pessoa_cadastrada(
+            "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward_{rk}",
+        )
 
     st.divider()
     c1, c2 = st.columns(2)
@@ -2861,7 +3943,8 @@ def _render_glossario_editor(
             "Nome do indicador *" if is_indicador else "Nome do termo *",
             value=cur["nome"] or "", key=f"{kp}_nome_{rk}",
         )
-        macroprocesso = st.text_input("Macroprocesso", value=cur.get("macroprocesso") or "", key=f"{kp}_macro_{rk}")
+        # `macroprocesso` é o nome da coluna; na UI Comgás o campo é rotulado "Franquia".
+        macroprocesso = st.text_input("Franquia", value=cur.get("macroprocesso") or "", key=f"{kp}_macro_{rk}")
     with c2:
         st.text_input(
             "Palavras-chave", key=f"{kp}_kw_input",
@@ -2876,9 +3959,15 @@ def _render_glossario_editor(
 
     rotulo_seguranca = rotulo_privacidade = observacoes = ""
     variaveis_utilizadas = memoria_calculo = restricoes = unidade = nivel_apuracao = ""
-    dim_items: list[dict] = []
-    met_items: list[dict] = []
+    dimensoes_negocio = decisao_negocio = ""
     if is_indicador:
+        decisao_negocio = st.text_area(
+            "Decisão apoiada", value=cur.get("decisao_negocio") or "", key=f"term_decisao_{rk}",
+            help='Que decisão esse indicador ajuda a tomar? Ex.: "decidir se '
+                 'abrimos uma nova frente comercial na região X". Junto com o '
+                 "Objetivo, vira a descrição da Metric View publicada.",
+        )
+
         st.markdown("##### Classificação")
         c3, c4 = st.columns(2)
         with c3:
@@ -2917,17 +4006,21 @@ def _render_glossario_editor(
                 key=f"term_nivel_{rk}",
             )
         variaveis_utilizadas = st.text_area("Variáveis utilizadas", value=cur.get("variaveis_utilizadas") or "", key=f"term_vars_{rk}")
+        dimensoes_negocio = st.text_area(
+            "Dimensões", value=cur.get("dimensoes_negocio") or "", key=f"term_dimneg_{rk}",
+            help='Por quais recortes esse indicador deve poder ser analisado? '
+                 'Ex.: "por região, por mês, por tipo de cliente". A '
+                 "Engenharia usa esse texto pra escolher as colunas de "
+                 "Dimensão.",
+        )
+        memoria_calculo = st.text_area(
+            "Memória de cálculo (fórmula)",
+            value=cur.get("memoria_calculo") or "", key=f"term_memoria_{rk}",
+            help="Descreva a conta como você explicaria pra alguém do time — "
+                 "ex.: \"Receita total dividida pela quantidade de clientes ativos\". "
+                 "A Engenharia usa esse texto pra montar a fórmula técnica.",
+        )
         restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "", key=f"term_restr_{rk}")
-
-        _sync_tabela_picker_state("dim", record_key, _parse_tabelas_json(cur.get("dimensao_tabelas")))
-        _sync_tabela_picker_state("met", record_key, _parse_tabelas_json(cur.get("metrica_tabelas")))
-
-        st.markdown("###### Dimensão — tabelas e colunas que compõem a dimensão")
-        dim_items = _render_tabela_picker(user, "dim")
-        st.markdown("###### Métrica — tabelas e colunas que formam a métrica")
-        met_items = _render_tabela_picker(user, "met")
-
-        memoria_calculo = st.text_area("Memória de cálculo (fórmula)", value=cur.get("memoria_calculo") or "", key=f"term_memoria_{rk}")
         observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key=f"{kp}_obs_{rk}")
 
     rotulo_item = "indicador" if is_indicador else "termo"
@@ -2955,13 +4048,21 @@ def _render_glossario_editor(
                 nivel_apuracao=nivel_apuracao, unidade=unidade,
                 variaveis_utilizadas=variaveis_utilizadas, memoria_calculo=memoria_calculo,
                 restricoes=restricoes,
-                dimensao_tabelas=_dump_tabelas_json(dim_items),
-                metrica_tabelas=_dump_tabelas_json(met_items),
+                dimensoes_negocio=dimensoes_negocio, decisao_negocio=decisao_negocio,
             )
+            # `status_publicacao` só é tocado aqui na criação (sempre nasce
+            # 'rascunho'). Em edição, a tela de negócio nunca escreve nessa
+            # coluna — quem avança o status daqui pra frente é o botão
+            # "Enviar para engenharia" (_render_handoff_engenharia) e, depois,
+            # a tela Indicadores — Engenharia (lineage/pipeline). Isso evita
+            # que reeditar um campo de negócio (ex.: objetivo) retroceda um
+            # indicador que já está com a Engenharia.
+            if not editing:
+                values["status_publicacao"] = "rascunho"
         if editing:
             set_clause = ", ".join(f"{col} = {q_str(val)}" for col, val in values.items())
             run_exec(
-                f"UPDATE {_ont(ont_table)} SET {set_clause}, "
+                f"UPDATE {_cad(ont_table)} SET {set_clause}, "
                 f"dominio_id = {dom_sql}, subdominio_id = {sub_sql}, "
                 f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                 f"WHERE id = {int(cur['id'])}"
@@ -2970,14 +4071,9 @@ def _render_glossario_editor(
             cols = ["dominio_id", "subdominio_id", *values.keys(), "criado_em", "criado_por"]
             vals_sql = [dom_sql, sub_sql, *[q_str(v) for v in values.values()], "current_timestamp()", q_str(user)]
             run_exec(
-                f"INSERT INTO {_ont(ont_table)} ({', '.join(cols)}) "
+                f"INSERT INTO {_cad(ont_table)} ({', '.join(cols)}) "
                 f"VALUES ({', '.join(vals_sql)})"
             )
-        # Limpa o estado do picker de tabelas pra não vazar seleção entre
-        # registros diferentes no próximo rerun (_finish_write já chama rerun).
-        for kind in ("dim", "met"):
-            st.session_state.pop(f"term_{kind}_items", None)
-            st.session_state.pop(f"term_{kind}_items_for", None)
         st.session_state.pop(_kw_list_key(kp), None)
         st.session_state.pop(f"{kp}_kw_for", None)
         # Se foi um "novo", zera os campos (keys sufixadas com `_novo`).
@@ -2986,15 +4082,19 @@ def _render_glossario_editor(
                         "steward_txt", "nome", "macro", "obj", "seg", "priv", "obs"):
                 st.session_state.pop(f"{kp}_{suf}_novo", None)
             for base in ("ind_ps", "term_unidade", "term_unidade_custom",
-                         "term_nivel", "term_vars", "term_restr", "term_memoria"):
+                         "term_nivel", "term_vars", "term_restr", "term_memoria",
+                         "term_dimneg", "term_decisao"):
                 st.session_state.pop(f"{base}_novo", None)
         _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} salvo.")
+
+    if is_indicador and editing:
+        _render_handoff_engenharia(cur, rk, user)
 
     if editing:
         st.divider()
         st.markdown("#### Excluir")
         if st.button(f"🗑️ Excluir {rotulo_item} '{cur['nome']}'", key=f"{kp}_del"):
-            run_exec(f"DELETE FROM {_ont(ont_table)} WHERE id = {int(cur['id'])}")
+            run_exec(f"DELETE FROM {_cad(ont_table)} WHERE id = {int(cur['id'])}")
             _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} excluído.")
 
 
@@ -3012,6 +4112,84 @@ def page_indicadores() -> None:
     )
 
 
+def page_indicadores_engenharia() -> None:
+    """Fila de indicadores enviados pelo negócio (tela Indicador): escolha
+    das tabelas/colunas que formam Dimensão e Métrica, seguida do pipeline
+    de tradução/validação/publicação como Metric View
+    (`_render_pipeline_publicacao`). Acesso gated pela flag `engenharia` (ou
+    admin) — ver `main()`."""
+    st.title("🛠️ Indicadores — Engenharia")
+    st.caption(
+        "Fila de indicadores cadastrados pelo negócio (tela **Indicador**). "
+        "Escolha as tabelas/colunas que formam a Dimensão e a Métrica, "
+        "depois conduza o pipeline de tradução da fórmula e publicação como "
+        "Metric View."
+    )
+    _show_cad_feedback()
+    user = st.session_state.get("user", "")
+
+    termos = list_indicadores()
+    fila = termos[termos["status_publicacao"].fillna("rascunho") != "rascunho"]
+    if fila.empty:
+        st.info("Nenhum indicador enviado pelo negócio no momento.")
+        return
+
+    dom_nome = {d["id"]: d["nome"] for d in list_dominios().to_dict("records")}
+    recs = fila.to_dict("records")
+    opts = [
+        f'{r["nome"]} — {_STATUS_PUBLICACAO_LABELS.get(r["status_publicacao"], r["status_publicacao"])} (id {r["id"]})'
+        for r in recs
+    ]
+    sel = st.selectbox("Indicador", options=opts, key="eng_sel")
+    cur = recs[opts.index(sel)]
+    rk = str(cur["id"])
+
+    st.divider()
+    st.markdown(f"### 📈 {cur['nome']}")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f"**Domínio**\n\n{dom_nome.get(cur.get('dominio_id'), '—') if pd.notna(cur.get('dominio_id')) else '—'}")
+    c2.markdown(f"**Data Owner**\n\n{cur.get('data_owner') or '—'}")
+    c3.markdown(f"**Nível de apuração**\n\n{cur.get('nivel_apuracao') or '—'}")
+    if cur.get("objetivo"):
+        st.markdown(f"**Objetivo:** {cur['objetivo']}")
+    if cur.get("decisao_negocio"):
+        st.markdown(f"**Decisão apoiada:** {cur['decisao_negocio']}")
+    st.markdown(f"**Memória de cálculo (fórmula do negócio):** {cur.get('memoria_calculo') or '—'}")
+    if cur.get("dimensoes_negocio"):
+        st.caption(f"Dimensões desejadas (descrição do negócio): {cur['dimensoes_negocio']}")
+    if cur.get("variaveis_utilizadas"):
+        st.caption(f"Variáveis utilizadas: {cur['variaveis_utilizadas']}")
+    if cur.get("restricoes"):
+        st.caption(f"Restrições: {cur['restricoes']}")
+
+    st.divider()
+    _sync_tabela_picker_state("dim", rk, _parse_tabelas_json(cur.get("dimensao_tabelas")))
+    _sync_tabela_picker_state("met", rk, _parse_tabelas_json(cur.get("metrica_tabelas")))
+    st.markdown("###### Dimensão — tabelas e colunas que compõem a dimensão")
+    dim_items = _render_tabela_picker(user, "dim")
+    st.markdown("###### Métrica — tabelas e colunas que formam a métrica")
+    met_items = _render_tabela_picker(user, "met")
+
+    if st.button("💾 Salvar construção do indicador", type="primary", key=f"eng_save_{rk}"):
+        novo_status = _status_publicacao_pos_lineage(
+            cur.get("status_publicacao"), bool(dim_items and met_items),
+        )
+        run_exec(
+            f"UPDATE {_cad('indicadores')} SET "
+            f"dimensao_tabelas = {q_str(_dump_tabelas_json(dim_items))}, "
+            f"metrica_tabelas = {q_str(_dump_tabelas_json(met_items))}, "
+            f"status_publicacao = {q_str(novo_status)}, "
+            f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+            f"WHERE id = {int(cur['id'])}"
+        )
+        for kind in ("dim", "met"):
+            st.session_state.pop(f"term_{kind}_items", None)
+            st.session_state.pop(f"term_{kind}_items_for", None)
+        _finish_write("Lineage do indicador salvo.")
+
+    _render_pipeline_publicacao(cur, rk, user)
+
+
 def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
     """Card de detalhe de um termo/indicador — somente leitura."""
     is_indicador = cur.get("tipo") == "Indicador"
@@ -3026,13 +4204,16 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
     c1, c2, c3 = st.columns(3)
     c1.markdown(f"**Data Owner**\n\n{cur.get('data_owner') or '—'}")
     c2.markdown(f"**Data Steward**\n\n{cur.get('data_steward') or '—'}")
-    c3.markdown(f"**Macroprocesso**\n\n{cur.get('macroprocesso') or '—'}")
+    c3.markdown(f"**Franquia**\n\n{cur.get('macroprocesso') or '—'}")
 
     if cur.get("palavras_chave"):
         st.markdown(f"**Palavras-chave:** {cur['palavras_chave']}")
     if cur.get("objetivo"):
         st.markdown("**Objetivo**" if is_indicador else "**Definição**")
         st.write(cur["objetivo"])
+    if is_indicador and cur.get("decisao_negocio"):
+        st.markdown("**Decisão apoiada**")
+        st.write(cur["decisao_negocio"])
 
     if is_indicador:
         st.markdown(
@@ -3054,6 +4235,9 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
         if cur.get("variaveis_utilizadas"):
             st.markdown("**Variáveis utilizadas**")
             st.write(cur["variaveis_utilizadas"])
+        if cur.get("dimensoes_negocio"):
+            st.markdown("**Dimensões**")
+            st.write(cur["dimensoes_negocio"])
         if cur.get("memoria_calculo"):
             st.markdown("**Memória de cálculo (fórmula)**")
             st.write(cur["memoria_calculo"])
@@ -3138,15 +4322,22 @@ def page_consulta_termos() -> None:
 
 
 def page_permissoes() -> None:
-    st.title("🔒 Usuários & Permissões")
+    st.title("🔒 Usuários")
     st.caption(
         "Cadastro de usuários (espelho do workspace) e seu permissionamento. "
         "**Papel** define o que edita nos cadastros (admin/editor/leitor). As "
-        "**checkboxes** liberam a visualização/ação por usuário: *Ver cadastros* mostra "
-        "o menu Cadastros; *Ver logs* mostra o menu Auditoria; *Aprovador de tags* libera "
-        "o backlog de aprovação de tagueamento; *Power Steward* faz o usuário aparecer no "
-        "campo Power Steward da tela Indicador. **Admin enxerga/faz tudo** independentemente "
-        "das checkboxes. Só admins acessam esta tela."
+        "**checkboxes** liberam menus por usuário: *Cadastro* libera Domínios, "
+        "Sub-domínios e Glossário de Negócio; *Governança* libera Governança de "
+        "Dados, Auditoria, FinOps e a visualização (sem decidir) do Backlog de "
+        "Aprovação de Tags; *Aprovador de tags* libera tudo de Governança **mais** "
+        "aprovar/rejeitar no Backlog; *Ver FinOps* libera só a tela FinOps; "
+        "*Power Steward* além de aparecer no campo Power Steward da tela Indicador, "
+        "libera o menu Cadastros **completo** (Domínios, Sub-domínios, Data Owners "
+        "& Stewards, Dashboards, Padrões de Dado Pessoal, Glossário de Negócio e "
+        "Indicador — tudo, menos esta tela); *Engenharia* libera a tela Indicadores "
+        "— Engenharia (escolha de tabelas/colunas e publicação como Metric View). "
+        "**Admin enxerga/faz tudo** independentemente das checkboxes. Só admins "
+        "acessam esta tela."
     )
     _show_cad_feedback()
     user = st.session_state.get("user", "")
@@ -3155,8 +4346,9 @@ def page_permissoes() -> None:
     st.dataframe(
         df.rename(columns={
             "id": "ID", "nome": "Nome", "email": "E-mail", "papel": "Papel",
-            "ver_cadastros": "Ver cadastros", "ver_logs": "Ver logs",
-            "aprovador_tags": "Aprovador de tags", "power_steward": "Power Steward",
+            "ver_cadastros": "Cadastro", "ver_logs": "Governança",
+            "aprovador_tags": "Aprovador de tags", "ver_finops": "Ver FinOps",
+            "power_steward": "Power Steward", "engenharia": "Engenharia",
         }),
         use_container_width=True, hide_index=True,
     )
@@ -3202,17 +4394,22 @@ def page_permissoes() -> None:
         placeholder="ex.: Luciano Zani — usado na saudação da tela de Início",
     )
     papel_add = st.selectbox("Papel *", options=["admin", "editor", "leitor"], key="perm_papel_add")
-    ca, cb, cc, cd = st.columns(4)
+    ca, cb, cc, cd, ce, cf = st.columns(6)
     with ca:
-        add_ver_cad = st.checkbox("Ver cadastros", value=True, key="perm_add_ver_cad")
+        add_ver_cad = st.checkbox("Cadastro", value=True, key="perm_add_ver_cad")
     with cb:
-        add_ver_log = st.checkbox("Ver logs", value=False, key="perm_add_ver_log")
+        add_ver_log = st.checkbox("Governança", value=False, key="perm_add_ver_log")
     with cc:
         add_aprov = st.checkbox("Aprovador de tags", value=False, key="perm_add_aprov")
     with cd:
+        add_finops = st.checkbox("Ver FinOps", value=False, key="perm_add_finops")
+    with ce:
         add_power = st.checkbox("Power Steward", value=False, key="perm_add_power")
-    st.caption("Admin ignora as checkboxes (vê/faz tudo). *Power Steward* é só um "
-               "rótulo — não muda o que o usuário enxerga/faz.")
+    with cf:
+        add_eng = st.checkbox("Engenharia", value=False, key="perm_add_eng")
+    st.caption("Admin ignora as checkboxes (vê/faz tudo). *Power Steward* também "
+               "libera o menu Cadastros completo, além de ser o rótulo que aparece "
+               "no campo Power Steward do Indicador.")
     if st.button("💾 Adicionar usuário", type="primary"):
         em = (email or "").strip().lower()
         if "@" not in em:
@@ -3225,10 +4422,10 @@ def page_permissoes() -> None:
             return
         run_exec(
             f"INSERT INTO {_cad('permissoes')} "
-            f"(nome, email, papel, ver_cadastros, ver_logs, aprovador_tags, power_steward, criado_em, criado_por) "
+            f"(nome, email, papel, ver_cadastros, ver_logs, aprovador_tags, ver_finops, power_steward, engenharia, criado_em, criado_por) "
             f"SELECT {q_str((nome_add or '').strip())}, {q_str(em)}, {q_str(papel_add)}, "
             f"{str(add_ver_cad).lower()}, {str(add_ver_log).lower()}, {str(add_aprov).lower()}, "
-            f"{str(add_power).lower()}, current_timestamp(), {q_str(user)} "
+            f"{str(add_finops).lower()}, {str(add_power).lower()}, {str(add_eng).lower()}, current_timestamp(), {q_str(user)} "
             f"FROM (SELECT 1) WHERE NOT EXISTS "
             f"(SELECT 1 FROM {_cad('permissoes')} WHERE lower(email) = {q_str(em)})"
         )
@@ -3251,19 +4448,25 @@ def page_permissoes() -> None:
             if (cur.get("papel") or "leitor").lower() in papeis else 2,
             key=f"perm_papel_edit_{rid}",
         )
-        e1, e2, e3, e4 = st.columns(4)
+        e1, e2, e3, e4, e5, e6 = st.columns(6)
         with e1:
             ed_ver_cad = st.checkbox(
-                "Ver cadastros", value=_as_bool(cur.get("ver_cadastros")), key=f"perm_edit_ver_cad_{rid}")
+                "Cadastro", value=_as_bool(cur.get("ver_cadastros")), key=f"perm_edit_ver_cad_{rid}")
         with e2:
             ed_ver_log = st.checkbox(
-                "Ver logs", value=_as_bool(cur.get("ver_logs")), key=f"perm_edit_ver_log_{rid}")
+                "Governança", value=_as_bool(cur.get("ver_logs")), key=f"perm_edit_ver_log_{rid}")
         with e3:
             ed_aprov = st.checkbox(
                 "Aprovador de tags", value=_as_bool(cur.get("aprovador_tags")), key=f"perm_edit_aprov_{rid}")
         with e4:
+            ed_finops = st.checkbox(
+                "Ver FinOps", value=_as_bool(cur.get("ver_finops")), key=f"perm_edit_finops_{rid}")
+        with e5:
             ed_power = st.checkbox(
                 "Power Steward", value=_as_bool(cur.get("power_steward")), key=f"perm_edit_power_{rid}")
+        with e6:
+            ed_eng = st.checkbox(
+                "Engenharia", value=_as_bool(cur.get("engenharia")), key=f"perm_edit_eng_{rid}")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("💾 Salvar"):
@@ -3271,7 +4474,8 @@ def page_permissoes() -> None:
                     f"UPDATE {_cad('permissoes')} SET nome = {q_str((ed_nome or '').strip())}, "
                     f"papel = {q_str(novo)}, "
                     f"ver_cadastros = {str(ed_ver_cad).lower()}, ver_logs = {str(ed_ver_log).lower()}, "
-                    f"aprovador_tags = {str(ed_aprov).lower()}, power_steward = {str(ed_power).lower()}, "
+                    f"aprovador_tags = {str(ed_aprov).lower()}, ver_finops = {str(ed_finops).lower()}, "
+                    f"power_steward = {str(ed_power).lower()}, engenharia = {str(ed_eng).lower()}, "
                     f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                     f"WHERE id = {rid}"
                 )
@@ -3477,6 +4681,9 @@ def page_tag_backlog() -> None:
     )
     _show_cad_feedback()
     user = st.session_state.get("user", "")
+    role = st.session_state.get("role", "leitor")
+    perms = st.session_state.get("perms", {}) or {}
+    pode_decidir = role == "admin" or bool(perms.get("aprovador_tags"))
 
     try:
         pend = list_tag_backlog("pendente")
@@ -3498,6 +4705,13 @@ def page_tag_backlog() -> None:
             use_container_width=True, hide_index=True,
         )
 
+        if not pode_decidir:
+            st.info(
+                "Seu acesso aqui é só de visualização — decidir itens exige "
+                "a flag **Aprovador de tags** (tela Usuários)."
+            )
+
+    if not pend.empty and pode_decidir:
         st.divider()
         st.markdown("#### Decidir item")
         recs = pend.to_dict("records")
@@ -3614,8 +4828,8 @@ def _novos_na_semana() -> dict:
             "dominios": _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE {wk}"),
             "subdominios": _count(f"SELECT count(*) FROM {_cad('subdominios')} WHERE {wk}"),
             "stewards": _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE {wk}"),
-            "termos": _count(f"SELECT count(*) FROM {_ont('glossario_negocio')} WHERE {wk}"),
-            "indicadores": _count(f"SELECT count(*) FROM {_ont('indicadores')} WHERE {wk}"),
+            "termos": _count(f"SELECT count(*) FROM {_cad('glossario_negocio')} WHERE {wk}"),
+            "indicadores": _count(f"SELECT count(*) FROM {_cad('indicadores')} WHERE {wk}"),
         }
     except Exception:
         return {}
@@ -3745,9 +4959,14 @@ def page_inicio() -> None:
     perms = st.session_state.get("perms", {}) or {}
     is_admin = role == "admin"
     can_aprov = is_admin or bool(perms.get("aprovador_tags"))
-    can_cad = is_admin or bool(perms.get("ver_cadastros"))
-    can_logs = is_admin or bool(perms.get("ver_logs"))
     is_power = bool(perms.get("power_steward"))
+    # Power Steward libera o menu Cadastros completo E a página Governança de
+    # Dados (ver `main()`) — mas NÃO Auditoria (isso segue exigindo
+    # `ver_logs`/`aprovador_tags`). `can_cad` conta Power Steward pro bloco
+    # "Saúde dos cadastros"; `can_logs` (bloco "Atividade recente") não conta.
+    can_cad = is_admin or bool(perms.get("ver_cadastros")) or is_power
+    can_logs = is_admin or bool(perms.get("ver_logs")) or can_aprov
+    can_eng = is_admin or bool(perms.get("engenharia"))
 
     try:
         doms, subs, stew = list_dominios(), list_subdominios(), list_stewards()
@@ -3774,8 +4993,10 @@ def page_inicio() -> None:
             lbl for flag, lbl in (
                 ("power_steward", "Power Steward"),
                 ("aprovador_tags", "Aprovador de tags"),
-                ("ver_cadastros", "Ver cadastros"),
-                ("ver_logs", "Ver logs"),
+                ("ver_cadastros", "Cadastro"),
+                ("ver_logs", "Governança"),
+                ("ver_finops", "Ver FinOps"),
+                ("engenharia", "Engenharia"),
             ) if perms.get(flag)
         ]
     cls = "inicio-chip leitor" if role == "leitor" else "inicio-chip"
@@ -3785,6 +5006,7 @@ def page_inicio() -> None:
     lacunas = _lacunas_cadastro(doms, subs, stew, glo, ind) if can_cad else []
     n_lac = sum(x[0] for x in lacunas)
     meus_ind = _meus_indicadores(ind, user) if (is_power or is_admin) else []
+    fila_eng = ind[ind["status_publicacao"].fillna("rascunho") != "rascunho"] if can_eng else ind.iloc[0:0]
 
     if is_admin:
         partes = []
@@ -3800,7 +5022,7 @@ def page_inicio() -> None:
         st.caption(f"Você é Power Steward de **{len(meus_ind)}** indicador(es).")
     elif not registrado:
         st.caption("Você ainda não tem acesso cadastrado — pode consultar o glossário e o "
-                   "Assistente. Peça a um admin para incluir seu e-mail em **Usuários & Permissões**.")
+                   "Assistente. Peça a um admin para incluir seu e-mail em **Usuários**.")
     else:
         st.caption("Acesso de leitura — use o glossário e o Assistente para explorar o que já existe.")
 
@@ -3842,6 +5064,18 @@ def page_inicio() -> None:
                         unsafe_allow_html=True,
                     )
             _atalho("backlog", "Abrir backlog de aprovação", "✅")
+
+    # ---- Fila de Engenharia ----
+    if can_eng:
+        with esq.container(border=True, key="inicio_fila_eng"):
+            st.markdown(f"##### 🛠️ Fila de Engenharia  ·  {len(fila_eng)}")
+            if fila_eng.empty:
+                st.caption("Nenhum indicador aguardando a Engenharia. 🎉")
+            else:
+                for r in fila_eng.head(5).to_dict("records"):
+                    status = _STATUS_PUBLICACAO_LABELS.get(r.get("status_publicacao"), r.get("status_publicacao"))
+                    st.markdown(f"**{r['nome']}** — {status}")
+            _atalho("indicadores_engenharia", "Abrir Indicadores — Engenharia", "🛠️")
 
     # ---- Saúde dos cadastros ----
     if can_cad:
@@ -3916,9 +5150,10 @@ def page_inicio() -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Governança & Cadastros — Unity Catalog",
+        page_title=APP_NAME,
         page_icon="🏷️",
         layout="wide",
+        initial_sidebar_state="collapsed",
     )
 
     if not WAREHOUSE_ID:
@@ -3933,7 +5168,8 @@ def main() -> None:
     st.session_state["user"] = user
     perms = {
         "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
-        "aprovador_tags": False, "power_steward": False, "registrado": False, "nome": "",
+        "aprovador_tags": False, "ver_finops": False, "power_steward": False,
+        "engenharia": False, "registrado": False, "nome": "",
     }
     try:
         ensure_cadastro_tables()
@@ -3953,48 +5189,74 @@ def main() -> None:
     # (só entram no dict se o papel permite, então os atalhos já respeitam o RBAC).
     nav_pages: dict = {}
     pg_inicio = st.Page(page_inicio, title="Início", icon="🧭", default=True)
-    pg_governanca = st.Page(page_governanca, title="Governança de Dados — Unity Catalog", icon="🏷️")
     pg_consulta = st.Page(page_consulta_termos, title="Termos de Negócio", icon="📚")
-    nav_pages["governanca"] = pg_governanca
     nav_pages["consulta"] = pg_consulta
 
-    # Governança sempre visível. Cadastros/Auditoria conforme flags (admin vê tudo).
-    governanca = [pg_governanca]
-    try:
-        for row in user_visible_dashboards(user, is_admin):
-            governanca.append(
-                st.Page(
-                    make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
-                    url_path=f"dashboard-{int(row['id'])}",
-                )
-            )
-    except Exception as exc:
-        st.session_state.setdefault("cad_bootstrap_error", str(exc))
     pages: dict = {"Painel": [pg_inicio]}
-    if is_admin or perms["ver_cadastros"]:
-        pg_stewards = st.Page(page_stewards, title="Data Owners & Stewards", icon="🧑‍💼")
+
+    # Cadastro: a flag `ver_cadastros` (rótulo "Cadastro") libera só Domínios/
+    # Sub-domínios/Glossário de Negócio. `power_steward` libera o conjunto
+    # COMPLETO (as mesmas páginas de admin, exceto Usuários) — quem cuida de
+    # indicador de ponta a ponta também precisa de Data Owners/Dashboards/
+    # Padrões de Dado Pessoal, não só do glossário.
+    cadastro_completo = is_admin or perms["power_steward"]
+    cadastro_algum = cadastro_completo or perms["ver_cadastros"]
+    if cadastro_algum:
         pg_glossario_edit = st.Page(page_glossario_negocio, title="Glossário de Negócio", icon="📖")
-        pg_indicadores = st.Page(page_indicadores, title="Indicador", icon="📈")
-        nav_pages.update(stewards=pg_stewards, glossario_edit=pg_glossario_edit, indicadores=pg_indicadores)
+        nav_pages["glossario_edit"] = pg_glossario_edit
         cadastros = [
             st.Page(page_dominios, title="Domínios", icon="🗂️"),
             st.Page(page_subdominios, title="Sub-domínios", icon="🗃️"),
-            pg_stewards,
-            st.Page(page_dashboards, title="Dashboards", icon="📊"),
-            st.Page(page_padroes_dado_pessoal, title="Padrões de Dado Pessoal", icon="🧬"),
-            pg_glossario_edit,
-            pg_indicadores,
         ]
-        if is_admin:  # gestão de usuários/permissões é sempre admin-only
-            cadastros.append(st.Page(page_permissoes, title="Usuários & Permissões", icon="🔒"))
+        if cadastro_completo:
+            pg_stewards = st.Page(page_stewards, title="Data Owners & Stewards", icon="🧑‍💼")
+            nav_pages["stewards"] = pg_stewards
+            cadastros += [
+                pg_stewards,
+                st.Page(page_dashboards, title="Dashboards", icon="📊"),
+                st.Page(page_padroes_dado_pessoal, title="Padrões de Dado Pessoal", icon="🧬"),
+            ]
+        cadastros.append(pg_glossario_edit)
+        if cadastro_completo:
+            pg_indicadores = st.Page(page_indicadores, title="Indicador", icon="📈")
+            nav_pages["indicadores"] = pg_indicadores
+            cadastros.append(pg_indicadores)
         pages["Cadastros"] = cadastros
-    pages["Governança"] = governanca
-    pages["Glossário"] = [pg_consulta]
-    if is_admin or perms["aprovador_tags"]:
-        pg_backlog = st.Page(page_tag_backlog, title="Backlog de Aprovação de Tags", icon="✅")
-        nav_pages["backlog"] = pg_backlog
-        pages["Aprovações"] = [pg_backlog]
-    if is_admin or perms["ver_logs"]:
+
+    # Usuários (antiga "Usuários & Permissões") — sempre admin-only, agora num
+    # menu próprio em vez de dentro de Cadastros (nem `ver_cadastros` nem
+    # `power_steward` dão acesso a ela).
+    if is_admin:
+        pages["Admin"] = [st.Page(page_permissoes, title="Usuários", icon="🔒")]
+
+    # Menu Governança (só a página Governança de Dados + dashboards):
+    # liberado por `ver_logs` (rótulo "Governança"), `aprovador_tags` ou
+    # `power_steward`. Auditoria, Aprovações (Backlog) e FinOps são menus
+    # PRÓPRIOS, à parte — `power_steward` não dá acesso a eles (quando essa
+    # flag está marcada, ela só libera Cadastros completo + Governança +
+    # Glossário, nada mais); só `ver_logs`/`aprovador_tags`/`ver_finops`
+    # abrem esses três.
+    pode_governanca = is_admin or perms["ver_logs"] or perms["aprovador_tags"] or perms["power_steward"]
+    if pode_governanca:
+        pg_governanca = st.Page(page_governanca, title="Governança de Dados", icon="🏷️")
+        nav_pages["governanca"] = pg_governanca
+        governanca = [pg_governanca]
+        try:
+            for row in user_visible_dashboards(user, is_admin):
+                governanca.append(
+                    st.Page(
+                        make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
+                        url_path=f"dashboard-{int(row['id'])}",
+                    )
+                )
+        except Exception as exc:
+            st.session_state.setdefault("cad_bootstrap_error", str(exc))
+        pages["Governança"] = governanca
+    # Auditoria e Aprovações (Backlog) exigem `ver_logs`/`aprovador_tags` — ao
+    # contrário da página Governança de Dados, `power_steward` sozinho NÃO
+    # dá acesso aqui.
+    pode_auditoria = is_admin or perms["ver_logs"] or perms["aprovador_tags"]
+    if pode_auditoria:
         pg_relatorio = st.Page(page_relatorio_auditoria, title="Relatório de Auditoria", icon="📋")
         nav_pages["auditoria"] = pg_relatorio
         pages["Auditoria"] = [
@@ -4002,6 +5264,33 @@ def main() -> None:
             st.Page(page_log_comentarios, title="Log de comentários", icon="📜"),
             st.Page(page_log_tags, title="Log de tags", icon="🏷️"),
         ]
+        pg_backlog = st.Page(page_tag_backlog, title="Backlog de Aprovação de Tags", icon="✅")
+        nav_pages["backlog"] = pg_backlog
+        pages["Aprovações"] = [pg_backlog]
+    pages["Glossário"] = [pg_consulta]
+    # O controle de acesso *por domínio* ao FinOps (blueprint seção 8.1,
+    # Passo 5: um steward de um Spoke só veria o custo do seu domínio) ainda
+    # não existe no modelo de permissões do app (`permissoes` é papel global
+    # + flags de página, sem escopo por domínio) e não foi criado aqui pra
+    # não inventar um mecanismo de ACL inteiro fora do pedido.
+    # `obter_custo_por_dominio` já devolve os dados com a coluna `dominio`
+    # pronta pra filtrar quando esse controle existir. `power_steward` NÃO
+    # entra aqui — FinOps é dado financeiro, fora do escopo do que Power
+    # Steward enxerga por padrão.
+    pode_finops = is_admin or perms["ver_logs"] or perms["aprovador_tags"] or perms["ver_finops"]
+    if pode_finops:
+        pg_finops = st.Page(page_finops, title="FinOps", icon="💰")
+        nav_pages["finops"] = pg_finops
+        pages["FinOps"] = [pg_finops]
+    # Engenharia: fila de indicadores enviados pelo negócio (escolha de
+    # tabelas/colunas + pipeline de publicação como Metric View). Flag
+    # própria (`engenharia`) — separada de `ver_cadastros` porque é um papel
+    # de trabalho diferente (quem mexe em lineage técnico), não quem cadastra
+    # domínios/glossário.
+    if is_admin or perms["engenharia"]:
+        pg_indicadores_eng = st.Page(page_indicadores_engenharia, title="Indicadores — Engenharia", icon="🛠️")
+        nav_pages["indicadores_engenharia"] = pg_indicadores_eng
+        pages["Engenharia"] = [pg_indicadores_eng]
     st.session_state["_nav_pages"] = nav_pages
     nav = st.navigation(pages)
 
@@ -4009,7 +5298,8 @@ def main() -> None:
 
     # Assistente de IA: painel ancorado à direita (segunda "sidebar"), que
     # recolhe para uma aba fina no canto direito. Streamlit só tem uma sidebar
-    # nativa (esquerda), então o painel é um container fixo via CSS.
+    # nativa (esquerda), então o painel é um container fixo via CSS. Opcional
+    # (LLM_ENABLED) — sem isso, nada é renderizado.
     if LLM_ENABLED:
         render_assistant_dock(user)
 

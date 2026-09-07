@@ -18,6 +18,12 @@ starlette>=0.46,<1.4.0
 # por padrão, mas mantemos a dependência disponível para extensões.
 databricks-sql-connector>=3.0
 
-# Cliente OpenAI-compatible usado pelo painel "Assistente de Governança" para
-# falar com o Unity AI Gateway (system.ai / model services em UC).
+# Cliente OpenAI-compatible usado por gerar_expr_sql (pipeline de publicação
+# de indicador, blueprint seção 5.1, Passo 1) para falar com o Unity AI
+# Gateway (system.ai / model services em UC).
 openai>=1.0
+
+# Leitura do snapshot estático de FinOps (finops_dados_demo.xlsx) via
+# pandas.read_excel — fallback quando system.billing não está acessível
+# (ver page_finops).
+openpyxl>=3.0
