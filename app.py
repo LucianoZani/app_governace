@@ -137,6 +137,22 @@ SAMPLE_ROWS = 5
 # Tempo máximo (segundos) aguardando a conclusão de um statement.
 STATEMENT_TIMEOUT_S = 120
 
+# Tabela de PROPOSTAS de descrição de coluna geradas por IA — habilita a
+# worklist "Revisar catalogação feita com IA" no topo da página Governança de
+# Dados. Formato: "catalog.schema.tabela". Vazio = a worklist não aparece.
+#
+# Colunas esperadas: catalogo, esquema, tabela, coluna, descricao_proposta,
+# descricao_final, status ('pendente' = a revisar; 'aprovado'/'ajustado' =
+# tratada; 'rejeitado'/'coluna_removida' = ignorar), modelo, proposto_em,
+# revisado_por, revisado_em, aplicado_em.
+#
+# Quando um steward salva o comentário de uma coluna que tem proposta
+# 'pendente', o app fecha a linha (status -> aprovado/ajustado, revisado_por,
+# revisado_em, aplicado_em) — a worklist encolhe sozinha. Essa escrita é
+# best-effort e roda OBO: o SP do app só precisa de MODIFY nessa tabela se o
+# OBO cair pro service principal (USE_ON_BEHALF_OF_USER=false).
+PROPOSTAS_IA_TABLE = os.environ.get("PROPOSTAS_IA_TABLE", "").strip()
+
 
 def schema_belongs_to_env(schema: str) -> bool:
     """True se o schema pertence ao ambiente lógico deste app (ENVIRONMENT).
@@ -310,6 +326,11 @@ def q_ident(name: str) -> str:
 def q_full(catalog: str, schema: str, table: str) -> str:
     """Nome totalmente qualificado e quotado da tabela."""
     return f"{q_ident(catalog)}.{q_ident(schema)}.{q_ident(table)}"
+
+
+def q_fqn(dotted: str) -> str:
+    """Quota um nome pontuado ("catalog.schema.tabela") parte por parte."""
+    return ".".join(q_ident(p.strip()) for p in dotted.split(".") if p.strip())
 
 
 def q_str(value: str) -> str:
@@ -697,31 +718,59 @@ def render_sidebar() -> None:
 
 
 def select_object(user: str) -> tuple[str | None, str | None, str | None]:
-    """Seletores encadeados de Catalog → Schema → Table (visíveis ao usuário)."""
+    """Seletores encadeados de Catalog → Schema → Table (visíveis ao usuário).
+
+    Aceita um "preset" one-shot vindo da worklist "Revisar catalogação feita com
+    IA": ``st.session_state["_gov_preset"] = (catalog, schema, table)``. Ele é
+    consumido (``pop``) e gravado no state das keys dos selectboxes; depois disso
+    o usuário navega livremente e a seleção persiste entre reruns (ex.: após
+    salvar um comentário) pelo state das próprias keys.
+    """
     c1, c2, c3 = st.columns(3)
+
+    preset = st.session_state.pop("_gov_preset", None)
 
     with c1:
         catalogs = list_catalogs(user)
-        catalog = st.selectbox("Catalog", options=catalogs, index=None, placeholder="Selecione…")
+        if preset and preset[0] in catalogs:
+            st.session_state["gov_sel_cat"] = preset[0]
+        if st.session_state.get("gov_sel_cat") not in catalogs:
+            st.session_state.pop("gov_sel_cat", None)  # limpa state órfão
+        catalog = st.selectbox(
+            "Catalog", options=catalogs, index=None,
+            placeholder="Selecione…", key="gov_sel_cat",
+        )
 
     schema = None
     with c2:
         if catalog:
             # Filtra pelos schemas do ambiente lógico deste app (dev/prd).
             schemas = [s for s in list_schemas(user, catalog) if schema_belongs_to_env(s)]
+            if preset and preset[0] == catalog and preset[1] in schemas:
+                st.session_state["gov_sel_sch"] = preset[1]
+            if st.session_state.get("gov_sel_sch") not in schemas:
+                st.session_state.pop("gov_sel_sch", None)
             schema = st.selectbox(
                 "Schema",
                 options=schemas,
                 index=None,
                 placeholder="Selecione…",
                 help=f"Exibindo apenas schemas de **{ENVIRONMENT.upper()}**.",
+                key="gov_sel_sch",
             )
 
     table = None
     with c3:
         if catalog and schema:
             tables = list_tables(user, catalog, schema)
-            table = st.selectbox("Table", options=tables, index=None, placeholder="Selecione…")
+            if preset and preset[0] == catalog and preset[1] == schema and preset[2] in tables:
+                st.session_state["gov_sel_tbl"] = preset[2]
+            if st.session_state.get("gov_sel_tbl") not in tables:
+                st.session_state.pop("gov_sel_tbl", None)
+            table = st.selectbox(
+                "Table", options=tables, index=None,
+                placeholder="Selecione…", key="gov_sel_tbl",
+            )
 
     return catalog, schema, table
 
@@ -1150,6 +1199,12 @@ def apply_changes(
             ok += 1
             if log_cb is not None:
                 log_cb()  # auditoria (best-effort dentro do próprio helper)
+            # via_obo=False identifica unicamente o statement de comentário:
+            # fecha a linha de proposta de IA correspondente (se houver).
+            if not via_obo:
+                _marcar_proposta_ia_revisada(
+                    user, catalog, schema, table, column, new_comment
+                )
         except Exception as exc:
             feedback.append(("error", f"❌ {desc} — {exc}"))
             fail += 1
@@ -1249,6 +1304,151 @@ def render_table_comment_editor(user: str, catalog: str, schema: str, table: str
         apply_table_comment(user, catalog, schema, table, current, new_comment)
 
 
+# ---------------------------------------------------------------------------
+# Worklist "Revisar catalogação feita com IA" (PROPOSTAS_IA_TABLE)
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def list_tabelas_com_proposta_ia(user: str) -> pd.DataFrame:
+    """Tabelas com descrições sugeridas por IA ainda **pendentes** de revisão.
+
+    Lê ``PROPOSTAS_IA_TABLE`` via OBO (o parâmetro ``user`` chaveia o cache).
+    Uma linha por (catálogo, schema, tabela). Vazio se a env var não estiver
+    definida ou não houver pendências. NÃO filtra por ``ALLOWED_CATALOGS`` aqui
+    — a página separa o que está dentro/fora do allowlist.
+    """
+    if not PROPOSTAS_IA_TABLE:
+        return pd.DataFrame()
+    sql = (
+        "SELECT catalogo, esquema, tabela, "
+        "count(*) AS colunas_pendentes, "
+        "max(modelo) AS modelo, max(proposto_em) AS proposto_em "
+        f"FROM {q_fqn(PROPOSTAS_IA_TABLE)} "
+        "WHERE lower(status) = 'pendente' "
+        "GROUP BY catalogo, esquema, tabela "
+        "ORDER BY proposto_em DESC"
+    )
+    return run_query(sql, prefer_user=True)
+
+
+def _marcar_proposta_ia_revisada(
+    user: str, catalog: str, schema: str, table: str, column: str, texto_final: str,
+) -> None:
+    """Fecha a linha de proposta de IA quando o steward salva o comentário.
+
+    Best-effort: falha aqui NUNCA bloqueia a governança (o comentário já foi
+    aplicado no Unity Catalog neste ponto). ``status`` vira ``aprovado`` se o
+    texto salvo é igual à sugestão da IA, ou ``ajustado`` se foi editado.
+    """
+    if not PROPOSTAS_IA_TABLE:
+        return
+    try:
+        run_exec(
+            f"MERGE INTO {q_fqn(PROPOSTAS_IA_TABLE)} AS d USING (SELECT "
+            f"{q_str(catalog)} AS c, {q_str(schema)} AS e, {q_str(table)} AS t, "
+            f"{q_str(column)} AS col, {q_str(texto_final)} AS txt) AS s "
+            "ON lower(d.catalogo) = lower(s.c) AND lower(d.esquema) = lower(s.e) "
+            "AND lower(d.tabela) = lower(s.t) AND lower(d.coluna) = lower(s.col) "
+            "WHEN MATCHED AND lower(d.status) = 'pendente' THEN UPDATE SET "
+            "d.descricao_final = s.txt, "
+            "d.status = CASE WHEN trim(coalesce(d.descricao_proposta, '')) = trim(s.txt) "
+            "THEN 'aprovado' ELSE 'ajustado' END, "
+            f"d.revisado_por = {q_str(user)}, d.revisado_em = current_timestamp(), "
+            "d.aplicado_em = current_timestamp()",
+            prefer_user=True,
+        )
+        try:
+            list_tabelas_com_proposta_ia.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _render_worklist_ia(user: str) -> None:
+    """Bloco no topo da página: liga/desliga a worklist de catalogação por IA.
+
+    Ao escolher uma tabela e clicar em "Abrir", grava o preset em
+    ``st.session_state["_gov_preset"]`` e faz rerun — o ``select_object`` abaixo
+    consome esse preset e já abre a tabela.
+    """
+    if not PROPOSTAS_IA_TABLE:
+        return
+
+    ligado = st.toggle(
+        "🤖 Revisar catalogação feita com IA",
+        key="_ia_modo",
+        help=(
+            "Lista as tabelas com descrições de coluna sugeridas por IA que "
+            "ainda não foram revisadas. Escolha uma para revisar/ajustar os "
+            "comentários — ao salvar, a linha sai da lista."
+        ),
+    )
+    if not ligado:
+        return
+
+    try:
+        df = list_tabelas_com_proposta_ia(user)
+    except Exception as exc:
+        st.warning(
+            f"Não foi possível ler as propostas de IA em `{PROPOSTAS_IA_TABLE}`: {exc}"
+        )
+        return
+
+    if df.empty:
+        st.success("Nenhuma tabela com catalogação de IA pendente. 🎉")
+        return
+
+    if ALLOWED_CATALOGS:
+        _cat = df["catalogo"].astype(str).str.lower()
+        dentro = df[_cat.isin(ALLOWED_CATALOGS)].reset_index(drop=True)
+        fora = len(df) - len(dentro)
+    else:
+        dentro, fora = df, 0
+
+    if fora:
+        st.caption(
+            f"{fora} tabela(s) com pendências em catálogos fora do allowlist "
+            "deste app — não listadas."
+        )
+    if len(dentro) == 0:
+        st.info(
+            "As pendências de catalogação por IA estão todas em catálogos fora "
+            "do allowlist deste app."
+        )
+        return
+
+    st.dataframe(
+        dentro.rename(columns={
+            "catalogo": "Catálogo", "esquema": "Schema", "tabela": "Tabela",
+            "colunas_pendentes": "Colunas a revisar", "modelo": "Modelo IA",
+            "proposto_em": "Gerado em",
+        }),
+        use_container_width=True, hide_index=True,
+    )
+
+    recs = dentro.to_dict("records")
+    opts = [
+        f'{r["catalogo"]}.{r["esquema"]}.{r["tabela"]}  '
+        f'({int(r["colunas_pendentes"])} coluna(s))'
+        for r in recs
+    ]
+    c_sel, c_btn = st.columns([4, 1])
+    with c_sel:
+        sel = st.selectbox(
+            "Abrir tabela para revisar", options=["—"] + opts,
+            key="_ia_sel", label_visibility="collapsed",
+        )
+    with c_btn:
+        if st.button("Abrir ▸", use_container_width=True, disabled=(sel == "—")):
+            r = recs[opts.index(sel)]
+            st.session_state["_gov_preset"] = (r["catalogo"], r["esquema"], r["tabela"])
+            st.rerun()
+
+    st.divider()
+
+
 def page_governanca() -> None:
     """Página: Governança de Dados (tags governadas + comentários no Unity Catalog)."""
     st.title(f"🏷️ {APP_NAME} — Governança de Dados")
@@ -1265,6 +1465,9 @@ def page_governanca() -> None:
         _kind_fn = {"success": st.success, "warning": st.warning, "error": st.error}
         for _kind, _msg in _feedback:
             _kind_fn.get(_kind, st.error)(_msg)
+
+    # Worklist opcional de catalogação por IA — antes da escolha de objeto.
+    _render_worklist_ia(user)
 
     catalog, schema, table = select_object(user)
     if not (catalog and schema and table):

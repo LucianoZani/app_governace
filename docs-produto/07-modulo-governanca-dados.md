@@ -24,10 +24,40 @@ Unity Catalog sem precisar de acesso de escrita aos dados.
 8. **Portão de acesso** — só é possível documentar tabelas que o usuário
    logado enxerga (validado via OBO antes de cada escrita de comentário).
 
+## Revisar catalogação feita com IA
+
+Opcional — só aparece quando `PROPOSTAS_IA_TABLE` está definida
+(ver [05. Configuração](./05-configuracao.md)).
+
+Um processo à parte (fora deste app) pode usar um LLM para **sugerir a
+descrição de cada coluna** de um conjunto de tabelas e gravar as sugestões
+numa tabela de propostas, com `status = 'pendente'`. Este módulo dá o
+**fluxo de revisão**:
+
+1. No topo da página, o toggle **"🤖 Revisar catalogação feita com IA"**
+   liga a *worklist*: uma linha por tabela que ainda tem coluna com proposta
+   `pendente` (catálogo, schema, tabela, nº de colunas a revisar, modelo,
+   data). Tabelas em catálogos fora do `ALLOWED_CATALOGS` entram só num
+   contador ("N não listadas").
+2. Escolher uma tabela e clicar **"Abrir ▸"** já abre ela nos seletores
+   abaixo — o steward revisa/ajusta os comentários das colunas no editor
+   normal (com amostra de dados, filtro "Sem comentário", etc.).
+3. Ao **salvar o comentário** de uma coluna que tinha proposta, o app fecha a
+   linha na tabela de propostas: `status` vira `aprovado` (texto igual ao da
+   IA) ou `ajustado` (editado), com `revisado_por`, `revisado_em` e
+   `aplicado_em`. A worklist encolhe sozinha.
+
+Formato esperado da tabela de propostas: colunas `catalogo, esquema, tabela,
+coluna, descricao_proposta, descricao_final, status, modelo, proposto_em,
+revisado_por, revisado_em, aplicado_em`. A escrita de fechamento é
+**best-effort** (roda OBO) e nunca bloqueia a aplicação do comentário — se o
+OBO cair para o service principal, ele precisa de `MODIFY` nessa tabela.
+
 ## Modelo de autenticação (resumo — detalhes em [02. Arquitetura](./02-arquitetura.md))
 
 - **Leituras e tags → identidade do usuário (OBO).**
 - **Comentário → service principal**, atrás do portão de acesso.
+- **Fechamento da proposta de IA → OBO** (best-effort).
 
 ## Regra de compliance de tagueamento de dado pessoal
 

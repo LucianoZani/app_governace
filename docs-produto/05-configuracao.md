@@ -15,6 +15,7 @@
 | `DATABRICKS_ACCOUNT_HOST` | Não | `https://accounts.azuredatabricks.net` | Host do console de contas. Só altere fora do Azure. |
 | `LLM_ENABLED` | Não | `false` | `true` habilita o painel do **Assistente de Governança (IA)**. Ver [09. Módulo — Assistente de IA](./09-modulo-assistente-ia.md). |
 | `LLM_ENDPOINT` | Só se `LLM_ENABLED=true` | vazio | Nome completo (`catalogo.schema.nome_do_modelo`) do model service no Unity Catalog, servido pelo Unity AI Gateway do workspace. Sem isso, o painel do assistente mostra "não configurado" em vez de dar erro. |
+| `PROPOSTAS_IA_TABLE` | Não | vazio (worklist escondida) | Nome (`catalogo.schema.tabela`) de uma tabela com descrições de coluna **sugeridas por IA** para revisão. Habilita a worklist **"Revisar catalogação feita com IA"** no topo da página Governança de Dados. Ver [07. Módulo — Governança de Dados](./07-modulo-governanca-dados.md#revisar-catalogação-feita-com-ia). |
 
 > ⚠️ **O schema do glossário de termos de negócio não tem variável própria.**
 > Ele é montado no código como `"ontologia_" + ENVIRONMENT` (sempre dentro do

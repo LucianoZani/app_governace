@@ -3,6 +3,22 @@
 Histórico de versões do produto, com base no histórico de commits do
 repositório (`git log`).
 
+> ⚠️ **Lacuna**: os módulos **FinOps** e **Indicadores — Engenharia** e a
+> reorganização de RBAC por menu foram publicados sem entrada aqui (código
+> trazido de volta ao repo pelo commit "sync: versao deployada"). A reconstituir.
+
+## Não lançado
+
+- **Worklist "Revisar catalogação feita com IA"** na página Governança de
+  Dados — nova env var `PROPOSTAS_IA_TABLE` aponta para uma tabela de
+  descrições de coluna sugeridas por IA (`status='pendente'`). Toggle no topo
+  da página lista as tabelas a revisar; "Abrir ▸" pré-seleciona a tabela no
+  editor. Ao salvar o comentário de uma coluna com proposta, o app fecha a
+  linha (`status` → `aprovado`/`ajustado`, `revisado_por`, `aplicado_em`).
+  `select_object` ganhou suporte a preset via `st.session_state["_gov_preset"]`.
+  Vazio = worklist escondida (feature opt-in). Ver
+  [07. Módulo — Governança de Dados](./07-modulo-governanca-dados.md#revisar-catalogação-feita-com-ia).
+
 ## v1.6 — 2026-08-28
 
 - **Tela de Início (painel)** — nova primeira tela do app (menu Painel →
