@@ -1449,6 +1449,143 @@ def _render_worklist_ia(user: str) -> None:
     st.divider()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _propostas_pendentes_da_tabela(
+    user: str, catalog: str, schema: str, table: str
+) -> pd.DataFrame:
+    """Colunas da tabela aberta que têm descrição de IA com status='pendente'."""
+    if not PROPOSTAS_IA_TABLE:
+        return pd.DataFrame()
+    sql = (
+        "SELECT coluna, tipo_dado, coalesce(descricao_proposta, '') AS descricao_proposta "
+        f"FROM {q_fqn(PROPOSTAS_IA_TABLE)} "
+        "WHERE lower(status) = 'pendente' "
+        f"AND lower(catalogo) = lower({q_str(catalog)}) "
+        f"AND lower(esquema) = lower({q_str(schema)}) "
+        f"AND lower(tabela) = lower({q_str(table)}) "
+        "ORDER BY coluna"
+    )
+    return run_query(sql, prefer_user=True)
+
+
+def _aplicar_revisao_ia(
+    user: str, catalog: str, schema: str, table: str,
+    itens: list[tuple[str, str]],
+) -> None:
+    """Aplica as descrições revisadas como COMMENT ON COLUMN (via SP) e fecha as
+    linhas da tabela de propostas. Best-effort por coluna: uma falha não derruba
+    as outras."""
+    if not user_can_access_table(user, catalog, schema, table):
+        st.session_state["save_feedback"] = [(
+            "error",
+            "Você não tem acesso a esta tabela — nenhuma descrição foi aplicada.",
+        )]
+        st.rerun()
+        return
+
+    full = q_full(catalog, schema, table)
+    atual = {c.name: (c.comment or "") for c in get_columns(user, catalog, schema, table)}
+
+    ok, falhas = 0, []
+    for col, txt in itens:
+        txt = (txt or "").strip()
+        if not txt:
+            continue
+        try:
+            run_exec(f"COMMENT ON COLUMN {full}.{q_ident(col)} IS {q_str(txt)}")  # SP
+            _log_comment_change(
+                user, "coluna", catalog, schema, table, col, atual.get(col, ""), txt
+            )
+            _marcar_proposta_ia_revisada(user, catalog, schema, table, col, txt)
+            ok += 1
+        except Exception as exc:
+            falhas.append(f"{col} — {exc}")
+
+    fb: list[tuple[str, str]] = []
+    if ok:
+        fb.append(("success", f"✅ {ok} descrição(ões) de IA revisada(s) e aplicada(s)."))
+    for f in falhas:
+        fb.append(("error", f"❌ {f}"))
+    if not fb:
+        fb.append(("warning", "Nada a aplicar."))
+    st.session_state["save_feedback"] = fb
+    if ok:
+        get_columns.clear()
+        _propostas_pendentes_da_tabela.clear()
+        try:
+            list_tabelas_com_proposta_ia.clear()
+        except Exception:
+            pass
+    st.rerun()
+
+
+def _render_revisao_ia_tabela(
+    user: str, catalog: str, schema: str, table: str, columns: list["ColumnMeta"],
+) -> None:
+    """Painel de revisão das descrições sugeridas por IA para a tabela aberta.
+
+    Aparece sempre que a tabela tem coluna com proposta `pendente` — não depende
+    do toggle da worklist. A ação principal é "aplicar tudo" (o texto da IA vira
+    o comentário); o expander permite ajustar antes.
+    """
+    if not PROPOSTAS_IA_TABLE:
+        return
+    try:
+        props = _propostas_pendentes_da_tabela(user, catalog, schema, table)
+    except Exception as exc:
+        st.warning(
+            f"Não foi possível ler as propostas de IA em `{PROPOSTAS_IA_TABLE}`: {exc}"
+        )
+        return
+    if props.empty:
+        return
+
+    comentario_atual = {c.name: (c.comment or "") for c in columns}
+    props = props.copy()
+    props["comentario_atual"] = props["coluna"].map(lambda c: comentario_atual.get(c, ""))
+
+    st.divider()
+    st.markdown("### 🤖 Catalogação sugerida por IA")
+    st.caption(
+        f"**{len(props)} coluna(s)** desta tabela têm descrição sugerida por IA "
+        "ainda **não revisada**. Confira e aplique — o texto vira o comentário "
+        "da coluna e a pendência é fechada (marcada como revisada). Não precisa "
+        "editar; ajuste só se alguma descrição estiver errada."
+    )
+
+    vis = props[["coluna", "tipo_dado", "comentario_atual", "descricao_proposta"]].rename(
+        columns={
+            "coluna": "Coluna", "tipo_dado": "Tipo",
+            "comentario_atual": "Comentário atual", "descricao_proposta": "Descrição sugerida",
+        }
+    )
+    st.dataframe(vis, use_container_width=True, hide_index=True)
+
+    key_base = f"{catalog}.{schema}.{table}"
+    if st.button(
+        f"✅ Revisado — aplicar as {len(props)} descrições",
+        type="primary", key=f"ia_rev_ok_{key_base}",
+    ):
+        _aplicar_revisao_ia(
+            user, catalog, schema, table,
+            [(r["coluna"], r["descricao_proposta"]) for _, r in props.iterrows()],
+        )
+
+    with st.expander("✏️ Ajustar alguma descrição antes de aplicar"):
+        edit = props[["coluna", "descricao_proposta"]].rename(
+            columns={"coluna": "Coluna", "descricao_proposta": "Descrição"}
+        )
+        edited = st.data_editor(
+            edit, hide_index=True, use_container_width=True,
+            disabled=["Coluna"], key=f"ia_rev_ed_{key_base}",
+        )
+        if st.button("Aplicar com meus ajustes", key=f"ia_rev_ed_ok_{key_base}"):
+            _aplicar_revisao_ia(
+                user, catalog, schema, table,
+                [(r["Coluna"], r["Descrição"]) for _, r in edited.iterrows()],
+            )
+
+
 def page_governanca() -> None:
     """Página: Governança de Dados (tags governadas + comentários no Unity Catalog)."""
     st.title(f"🏷️ {APP_NAME} — Governança de Dados")
@@ -1495,6 +1632,10 @@ def page_governanca() -> None:
     except Exception as exc:
         st.error(f"Falha ao carregar metadados da tabela: {exc}")
         return
+
+    # Descrições sugeridas por IA para esta tabela ainda não revisadas
+    # (aparece só se houver pendências — não depende do toggle da worklist).
+    _render_revisao_ia_tabela(user, catalog, schema, table, columns)
 
     st.divider()
     render_table_comment_editor(user, catalog, schema, table)

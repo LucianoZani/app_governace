@@ -39,13 +39,21 @@ numa tabela de propostas, com `status = 'pendente'`. Este módulo dá o
    `pendente` (catálogo, schema, tabela, nº de colunas a revisar, modelo,
    data). Tabelas em catálogos fora do `ALLOWED_CATALOGS` entram só num
    contador ("N não listadas").
-2. Escolher uma tabela e clicar **"Abrir ▸"** já abre ela nos seletores
-   abaixo — o steward revisa/ajusta os comentários das colunas no editor
-   normal (com amostra de dados, filtro "Sem comentário", etc.).
-3. Ao **salvar o comentário** de uma coluna que tinha proposta, o app fecha a
-   linha na tabela de propostas: `status` vira `aprovado` (texto igual ao da
-   IA) ou `ajustado` (editado), com `revisado_por`, `revisado_em` e
-   `aplicado_em`. A worklist encolhe sozinha.
+2. Escolher uma tabela e clicar **"Abrir ▸"** abre ela nos seletores abaixo.
+3. Com a tabela aberta, aparece o painel **"🤖 Catalogação sugerida por IA"**
+   (sempre que a tabela tem coluna pendente — independe do toggle): a lista
+   das colunas com `Descrição sugerida`. O steward:
+   - **"✅ Revisado — aplicar as N descrições"** — o texto da IA vira o
+     comentário de cada coluna, sem precisar editar nada. É o caminho normal:
+     *revisar e marcar*.
+   - **"✏️ Ajustar…"** (expander) — edita a descrição de alguma coluna e
+     aplica com os ajustes.
+   - Ou usa o **editor por coluna** logo abaixo (comentário + tags), como
+     sempre — salvar lá também fecha a proposta.
+4. Ao aplicar, cada linha da tabela de propostas é fechada: `status` vira
+   `aprovado` (texto igual ao da IA) ou `ajustado` (editado), com
+   `revisado_por`, `revisado_em` e `aplicado_em`. A worklist e o painel
+   encolhem sozinhos.
 
 Formato esperado da tabela de propostas: colunas `catalogo, esquema, tabela,
 coluna, descricao_proposta, descricao_final, status, modelo, proposto_em,

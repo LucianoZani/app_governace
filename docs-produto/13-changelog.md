@@ -9,15 +9,21 @@ repositório (`git log`).
 
 ## Não lançado
 
-- **Worklist "Revisar catalogação feita com IA"** na página Governança de
-  Dados — nova env var `PROPOSTAS_IA_TABLE` aponta para uma tabela de
-  descrições de coluna sugeridas por IA (`status='pendente'`). Toggle no topo
-  da página lista as tabelas a revisar; "Abrir ▸" pré-seleciona a tabela no
-  editor. Ao salvar o comentário de uma coluna com proposta, o app fecha a
-  linha (`status` → `aprovado`/`ajustado`, `revisado_por`, `aplicado_em`).
-  `select_object` ganhou suporte a preset via `st.session_state["_gov_preset"]`.
-  Vazio = worklist escondida (feature opt-in). Ver
-  [07. Módulo — Governança de Dados](./07-modulo-governanca-dados.md#revisar-catalogação-feita-com-ia).
+- **Revisar catalogação feita com IA** na página Governança de Dados — nova
+  env var `PROPOSTAS_IA_TABLE` aponta para uma tabela de descrições de coluna
+  sugeridas por IA (`status='pendente'`).
+  - **Worklist** (toggle no topo): uma linha por tabela com pendências;
+    "Abrir ▸" pré-seleciona a tabela (`select_object` ganhou preset via
+    `st.session_state["_gov_preset"]`).
+  - **Painel "Catalogação sugerida por IA"** com a tabela aberta: lista as
+    colunas com a descrição sugerida e um botão **"✅ Revisado — aplicar as N
+    descrições"** (aplica o texto da IA como comentário sem precisar editar) +
+    expander para ajustar antes. Aparece sempre que a tabela tem pendência.
+  - Ao aplicar (ou ao salvar no editor por coluna), a linha da proposta é
+    fechada: `status` → `aprovado`/`ajustado`, `revisado_por`, `revisado_em`,
+    `aplicado_em`.
+  - Vazio = tudo escondido (feature opt-in). Ver
+    [07. Módulo — Governança de Dados](./07-modulo-governanca-dados.md#revisar-catalogação-feita-com-ia).
 
 ## v1.6 — 2026-08-28
 
