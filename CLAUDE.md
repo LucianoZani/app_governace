@@ -160,6 +160,8 @@ própria UI do app (que lê como SP).
     implantação · modelo canônico" → "Runbook de implantação"; removida a
     menção a "escrita para qualquer workspace" e o chip "Multi-workspace". O
     corpo já era neutro (placeholders `<...>`, sem citar cliente / ambiente de
-    teste / fork). ⚠️ O PDF na raiz é a exportação **antiga** — reexportar do
-    artefato antes de enviar; viewers do link veem uma versão fixada anterior
-    (re-fixar pelo menu de compartilhamento).
+    teste / fork). O `16-runbook-implantacao.pdf` na raiz foi reexportado
+    (Chrome headless `--print-to-pdf` do HTML do artefato — `pdftoppm`/`pypdf`
+    não instalados nesta máquina, então sem conferência visual). ⚠️ Viewers do
+    link do artefato veem uma versão fixada anterior — re-fixar pelo menu de
+    compartilhamento.
