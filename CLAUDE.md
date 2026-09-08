@@ -149,3 +149,17 @@ própria UI do app (que lê como SP).
     tabela tem pendência (independe do toggle). Helpers:
     `_propostas_pendentes_da_tabela`, `_aplicar_revisao_ia`,
     `_render_revisao_ia_tabela`. Docs: `docs-produto/07`, `13`.
+- **2026-09-08** — Só documentação:
+  - Histórico deste `CLAUDE.md` posto em dia (entradas 08-28→09-07). Commit
+    `c67fabe`.
+  - **Runbook de implantação** (artefato **"Runbook Governança UC"**,
+    `https://claude.ai/code/artifact/11a23162-3362-44d0-a8d0-559a447fd5de`;
+    exportação em `16-runbook-implantacao.pdf` na raiz do repo, **não
+    versionada**) — limpo para ser entregue a um cliente como o runbook **do**
+    app, sem sugerir que existem outras versões: eyebrow "Runbook de
+    implantação · modelo canônico" → "Runbook de implantação"; removida a
+    menção a "escrita para qualquer workspace" e o chip "Multi-workspace". O
+    corpo já era neutro (placeholders `<...>`, sem citar cliente / ambiente de
+    teste / fork). ⚠️ O PDF na raiz é a exportação **antiga** — reexportar do
+    artefato antes de enviar; viewers do link veem uma versão fixada anterior
+    (re-fixar pelo menu de compartilhamento).
