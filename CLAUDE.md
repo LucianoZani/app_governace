@@ -110,3 +110,42 @@ própria UI do app (que lê como SP).
   Commit `9b3cdb5`. Publicado em PROD (deploy anterior tinha revertido o app
   pra versão antiga de 1815 linhas — restaurado). Indicador "Giro de Estoque"
   migrado OK. Docs: `docs-produto/10`, `08`, `13`.
+- **2026-08-28 → 2026-09-07** — ⚠️ Entre essas datas o app foi iterado
+  **direto no workspace via `databricks sync`, sem commit**. O repo ficou
+  ~1290 linhas atrás do que estava no ar.
+- **2026-09-07** — Pasta do repo reorganizada para
+  `Documents/Projetos/Comgas/poc-metric-view-freeedition/`. Três commits,
+  todos pushados para `origin/main`:
+  - `dd11be6` **sync: traz de volta ao git a versão publicada** (fonte da
+    verdade confirmada). Novidades que estavam só no ar:
+    - **Módulo FinOps** — `page_finops`, `_render_finops_dashboard`,
+      `obter_custo_por_dominio` (lê `system.billing`),
+      `_carregar_finops_excel` (fallback `finops_dados_demo.xlsx`);
+      `openpyxl` no `requirements.txt`; flag de permissão `ver_finops`.
+    - **Módulo Indicadores-Engenharia** — `page_indicadores_engenharia`:
+      pipeline Indicador → **Metric View** (`gerar_expr_sql` = IA traduz a
+      fórmula p/ SQL, `montar_ddl`/`yaml_metric_view`,
+      `_validar_expr_sql_segura`, `_status_publicacao_pos_lineage`,
+      handoff negócio→engenharia).
+    - Helpers de busca: `search_by_tag`, `search_columns`,
+      `list_tables_with_comment`.
+    - Não tocou `README.md`/`app.yaml`/`databricks.yml`. Docs de FinOps e
+      Engenharia ainda por escrever.
+  - `62c9bfd` **worklist "Revisar catalogação feita com IA"** — env var
+    **`PROPOSTAS_IA_TABLE`** (`catalog.schema.tabela`, opt-in). Toggle na
+    página Governança de Dados que lista tabelas com descrição de coluna
+    sugerida por IA e `status='pendente'` (respeita `ALLOWED_CATALOGS`).
+    "Abrir" pré-seleciona a tabela no editor (`_gov_preset` one-shot;
+    selectboxes agora com key `gov_sel_cat/sch/tbl`). Ao salvar o comentário
+    de uma coluna com proposta, `apply_changes` → `_marcar_proposta_ia_revisada`
+    (MERGE `status` → `aprovado`/`ajustado` + `revisado_por`/`revisado_em`/
+    `aplicado_em`; best-effort, OBO, nunca bloqueia). Helper `q_fqn()`.
+    Docs: `docs-produto/05`, `07`, `13`.
+  - `0588046` **painel "Catalogação sugerida por IA" (aplicar em bloco)** —
+    com a tabela aberta, lista as colunas com proposta pendente; botão
+    **"Revisado — aplicar as N descrições"** grava o texto da IA como
+    `COMMENT ON COLUMN` de todas de uma vez e fecha as linhas; expander
+    "Ajustar…" (`st.data_editor`) pra corrigir antes. Aparece sempre que a
+    tabela tem pendência (independe do toggle). Helpers:
+    `_propostas_pendentes_da_tabela`, `_aplicar_revisao_ia`,
+    `_render_revisao_ia_tabela`. Docs: `docs-produto/07`, `13`.
