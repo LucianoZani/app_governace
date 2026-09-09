@@ -3924,21 +3924,27 @@ def page_stewards() -> None:
 def page_dashboards() -> None:
     st.title("📊 Dashboards")
     st.caption(
-        "Cadastro de dashboards AI/BI (Lakeview) publicados. Cada um pertence a um "
-        "Domínio (e opcionalmente a um Sub-domínio) — quem enxerga o link no menu "
-        "Governança é quem for **admin** ou **Data Steward** daquele domínio/sub-domínio."
+        "Cadastro de dashboards AI/BI (Lakeview) publicados. Cada um pertence à "
+        "árvore **Franquia › Domínio** (sub-domínio opcional) — quem enxerga o link "
+        "no menu Governança é quem for **admin** ou **Data Steward/Owner** daquele "
+        "domínio/sub-domínio."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
     user = st.session_state.get("user", "")
 
+    frs = list_franquias().to_dict("records")
+    fr_nome = {int(f["id"]): f["nome"] for f in frs}
     doms = list_dominios().to_dict("records")
     subs = list_subdominios().to_dict("records")
     dom_nome = {d["id"]: d["nome"] for d in doms}
+    dom_fr = {d["id"]: _hier_franquia_id(d) for d in doms}
     sub_nome = {s["id"]: s["nome"] for s in subs}
+    _fr_de_dom = lambda i: fr_nome.get(dom_fr.get(i) or -1, "—")
     dash = list_dashboards()
     show = dash.copy()
     if not show.empty:
+        show["Franquia"] = show["dominio_id"].map(_fr_de_dom)
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
         show["Sub-domínio"] = show["subdominio_id"].map(
             lambda i: sub_nome.get(i, "(todos)") if pd.notna(i) else "(todos)"
@@ -3947,7 +3953,7 @@ def page_dashboards() -> None:
         (show.rename(columns={
             "nome": "Nome", "descricao": "Descrição", "url": "URL",
             "icone": "Ícone", "ativo": "Ativo",
-        })[["Nome", "Domínio", "Sub-domínio", "URL", "Ícone", "Ativo", "Descrição"]]
+        })[["Nome", "Franquia", "Domínio", "Sub-domínio", "URL", "Ícone", "Ativo", "Descrição"]]
          if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
@@ -3979,7 +3985,8 @@ def page_dashboards() -> None:
         nome = st.text_input("Nome *", value=cur["nome"] or "")
         url = st.text_input("URL do dashboard publicado *", value=cur.get("url") or "")
         dom_id = st.selectbox(
-            "Domínio *", options=dom_ids, index=dom_idx, format_func=lambda i: dom_nome.get(i, i),
+            "Domínio *", options=dom_ids, index=dom_idx,
+            format_func=lambda i: f'{_fr_de_dom(i)} › {dom_nome.get(i, i)}',
         )
         sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id]
         sub_options = [None] + sub_ids_all
