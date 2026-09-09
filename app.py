@@ -3456,251 +3456,277 @@ def page_finops() -> None:
 # ---------------------------------------------------------------------------
 
 
+_HIER_NOVA_FR = "➕ nova franquia…"
+_HIER_NOVO_DOM = "➕ novo domínio…"
+_HIER_NOVO_SUB = "➕ novo sub-domínio…"
+_HIER_NENHUM = "— (nenhum)"
+
+
 def page_dominios() -> None:
     st.title("🗂️ Domínios")
     st.caption(
         "Hierarquia de negócio em **três níveis: Franquia › Domínio › Sub-domínio**. "
-        "Sub-domínios, Data Owners, Data Stewards, dashboards e indicadores se "
-        "vinculam a um domínio."
+        "Domínios, Data Owners/Stewards, dashboards e indicadores se vinculam a essa "
+        "árvore. Um formulário só monta e edita a árvore inteira."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
     user = st.session_state.get("user", "")
     somente_leitura = not can_edit(role)
+
+    frs = list_franquias().to_dict("records")
+    doms = list_dominios().to_dict("records")
+    subs = list_subdominios().to_dict("records")
+
+    _render_arvore_hierarquia(frs, doms, subs)
+
     if somente_leitura:
         st.info("Seu perfil é **leitor** — visualização apenas.")
-
-    aba_fr, aba_dom, aba_sub = st.tabs(["🏙️ Franquias", "🗂️ Domínios", "🗃️ Sub-domínios"])
-    with aba_fr:
-        _cad_franquias(user, somente_leitura)
-    with aba_dom:
-        _cad_dominios(user, somente_leitura)
-    with aba_sub:
-        _cad_subdominios(user, somente_leitura)
-
-
-def _cad_franquias(user: str, somente_leitura: bool) -> None:
-    df = list_franquias()
-    st.dataframe(
-        df.rename(columns={"id": "ID", "nome": "Nome", "descricao": "Descrição"}),
-        use_container_width=True, hide_index=True,
-    )
-    if somente_leitura:
         return
 
-    recs = df.to_dict("records")
-    opts = ["(nova)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
     st.divider()
-    st.markdown("#### Adicionar / editar franquia")
-    sel = st.selectbox("Registro", options=opts, key="fr_sel")
-    editing = sel != "(nova)"
-    cur = recs[opts.index(sel) - 1] if editing else {"id": None, "nome": "", "descricao": ""}
+    st.markdown("#### Adicionar / editar")
+    _form_hierarquia(frs, doms, subs, user)
 
-    with st.form("form_fr"):
-        nome = st.text_input("Nome *", value=cur["nome"] or "")
-        desc = st.text_area("Descrição", value=cur.get("descricao") or "")
-        saved = st.form_submit_button("💾 Salvar", type="primary")
 
-    if saved:
-        nome = (nome or "").strip()
-        if not nome:
-            st.warning("Informe o nome da franquia.")
-            return
-        extra = f" AND id <> {int(cur['id'])}" if editing else ""
-        if _count(f"SELECT count(*) FROM {_cad('franquias')} WHERE lower(nome) = {q_str(nome.lower())}{extra}"):
-            st.error("Já existe uma franquia com esse nome.")
-            return
-        if editing:
-            run_exec(
-                f"UPDATE {_cad('franquias')} SET nome = {q_str(nome)}, descricao = {q_str(desc)}, "
-                f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
-                f"WHERE id = {int(cur['id'])}"
-            )
+def _hier_franquia_id(d: dict):
+    """``franquia_id`` de um registro de domínio como int, ou ``None``."""
+    v = d.get("franquia_id")
+    return int(v) if v is not None and pd.notna(v) else None
+
+
+def _render_arvore_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict]) -> None:
+    """Árvore Franquia › Domínio › Sub-domínio (somente leitura)."""
+    if not frs and not doms:
+        st.info("Nada cadastrado ainda. Use o formulário abaixo para criar a primeira franquia.")
+        return
+
+    subs_por_dom: dict = {}
+    for s in subs:
+        subs_por_dom.setdefault(int(s["dominio_id"]), []).append(s)
+    doms_por_fr: dict = {}
+    orfaos: list[dict] = []
+    for d in doms:
+        fid = _hier_franquia_id(d)
+        if fid is None:
+            orfaos.append(d)
         else:
+            doms_por_fr.setdefault(fid, []).append(d)
+
+    def _rot(icone: str, nome: str, desc) -> str:
+        txt = f" — _{desc}_" if desc else ""
+        return f"{icone} **{nome}**{txt}" if icone == "🏙️" else f"{icone} {nome}{txt}"
+
+    _chave = lambda x: (x.get("nome") or "").lower()
+    linhas: list[str] = []
+    for f in sorted(frs, key=_chave):
+        linhas.append("- " + _rot("🏙️", f["nome"], f.get("descricao")))
+        f_doms = sorted(doms_por_fr.get(int(f["id"]), []), key=_chave)
+        if not f_doms:
+            linhas.append("    - _(sem domínios)_")
+        for d in f_doms:
+            linhas.append("    - " + _rot("🗂️", d["nome"], d.get("descricao")))
+            for s in sorted(subs_por_dom.get(int(d["id"]), []), key=_chave):
+                linhas.append("        - " + _rot("🗃️", s["nome"], s.get("descricao")))
+    if linhas:
+        st.markdown("\n".join(linhas))
+
+    if orfaos:
+        st.warning("**Domínios sem franquia** — edite cada um no formulário para vincular:")
+        ol: list[str] = []
+        for d in sorted(orfaos, key=_chave):
+            ol.append("- " + _rot("🗂️", d["nome"], d.get("descricao")))
+            for s in sorted(subs_por_dom.get(int(d["id"]), []), key=_chave):
+                ol.append("    - " + _rot("🗃️", s["nome"], s.get("descricao")))
+        st.markdown("\n".join(ol))
+
+
+def _form_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict], user: str) -> None:
+    """Formulário único em cascata: cria/edita qualquer nível da árvore."""
+    fr_por_nome = {f["nome"]: f for f in frs}
+    sel_fr = st.selectbox("Franquia *", options=sorted(fr_por_nome) + [_HIER_NOVA_FR], key="hier_fr")
+    criando_fr = sel_fr == _HIER_NOVA_FR
+    fr_atual = None if criando_fr else fr_por_nome[sel_fr]
+    fr_id = None if criando_fr else int(fr_atual["id"])
+    novo_fr_nome = st.text_input("Nome da nova franquia *", key="hier_fr_novo") if criando_fr else ""
+
+    dom_da_fr = [] if criando_fr else sorted(
+        [d for d in doms if _hier_franquia_id(d) == fr_id],
+        key=lambda x: (x.get("nome") or "").lower(),
+    )
+    dom_por_nome = {d["nome"]: d for d in dom_da_fr}
+    sel_dom = st.selectbox(
+        "Domínio", options=[_HIER_NENHUM] + list(dom_por_nome) + [_HIER_NOVO_DOM],
+        key=f"hier_dom::{sel_fr}",
+        help="Deixe em “(nenhum)” para criar ou editar apenas a franquia.",
+    )
+    criando_dom = sel_dom == _HIER_NOVO_DOM
+    dom_atual = dom_por_nome.get(sel_dom) if sel_dom not in (_HIER_NENHUM, _HIER_NOVO_DOM) else None
+    dom_id = int(dom_atual["id"]) if dom_atual else None
+    novo_dom_nome = st.text_input("Nome do novo domínio *", key=f"hier_dom_novo::{sel_fr}") if criando_dom else ""
+
+    sub_atual = None
+    novo_sub_nome = ""
+    criando_sub = False
+    if dom_atual:
+        sub_do_dom = sorted(
+            [s for s in subs if int(s["dominio_id"]) == dom_id],
+            key=lambda x: (x.get("nome") or "").lower(),
+        )
+        sub_por_nome = {s["nome"]: s for s in sub_do_dom}
+        sel_sub = st.selectbox(
+            "Sub-domínio", options=[_HIER_NENHUM] + list(sub_por_nome) + [_HIER_NOVO_SUB],
+            key=f"hier_sub::{sel_fr}::{sel_dom}",
+        )
+        criando_sub = sel_sub == _HIER_NOVO_SUB
+        sub_atual = sub_por_nome.get(sel_sub) if sel_sub not in (_HIER_NENHUM, _HIER_NOVO_SUB) else None
+        if criando_sub:
+            novo_sub_nome = st.text_input(
+                "Nome do novo sub-domínio *", key=f"hier_sub_novo::{sel_fr}::{sel_dom}"
+            )
+    elif criando_dom:
+        st.caption("Salve o domínio primeiro; depois selecione-o aqui para adicionar sub-domínios.")
+
+    # Nível-alvo + modo
+    if criando_sub:
+        nivel, modo, alvo = "sub", "criar", None
+    elif sub_atual:
+        nivel, modo, alvo = "sub", "editar", sub_atual
+    elif criando_dom:
+        nivel, modo, alvo = "dominio", "criar", None
+    elif dom_atual:
+        nivel, modo, alvo = "dominio", "editar", dom_atual
+    elif criando_fr:
+        nivel, modo, alvo = "franquia", "criar", None
+    else:
+        nivel, modo, alvo = "franquia", "editar", fr_atual
+
+    rotulo = {"franquia": "franquia", "dominio": "domínio", "sub": "sub-domínio"}[nivel]
+    rk = f"{nivel}_{alvo['id'] if alvo else 'novo'}"
+
+    nome_edit = None
+    if modo == "editar":
+        nome_edit = st.text_input(f"Nome do {rotulo} *", value=alvo.get("nome") or "", key=f"hier_nome::{rk}")
+    desc_in = st.text_input(
+        "Descrição", value=(alvo.get("descricao") or "") if alvo else "", key=f"hier_desc::{rk}",
+    )
+
+    contexto = {
+        "franquia": "nível de topo.",
+        "dominio": f"dentro da franquia **{novo_fr_nome or sel_fr}**.",
+        "sub": f"dentro do domínio **{sel_dom}**.",
+    }[nivel]
+    st.caption(f"→ vai **{modo} {rotulo}** — {contexto}")
+
+    c1, c2 = st.columns([1, 1])
+    salvar = c1.button("💾 Salvar", type="primary", key=f"hier_save::{rk}")
+    excluir = modo == "editar" and c2.button(f"🗑️ Excluir {rotulo}", key=f"hier_del::{rk}")
+
+    desc = desc_in or ""
+    if salvar and nivel == "franquia" and modo == "criar":
+        nome = (novo_fr_nome or "").strip()
+        if not nome:
+            st.warning("Informe o nome da nova franquia."); return
+        if _count(f"SELECT count(*) FROM {_cad('franquias')} WHERE lower(nome) = {q_str(nome.lower())}"):
+            st.error("Já existe uma franquia com esse nome."); return
+        run_exec(
+            f"INSERT INTO {_cad('franquias')} (nome, descricao, criado_em, criado_por) "
+            f"SELECT {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
+            f"FROM (SELECT 1) WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {_cad('franquias')} WHERE lower(nome) = {q_str(nome.lower())})"
+        )
+        _finish_write(f"Franquia “{nome}” criada.")
+
+    elif salvar and nivel == "dominio" and modo == "criar":
+        destino_fr = fr_id
+        if criando_fr:
+            fnome = (novo_fr_nome or "").strip()
+            if not fnome:
+                st.warning("Informe o nome da nova franquia."); return
             run_exec(
                 f"INSERT INTO {_cad('franquias')} (nome, descricao, criado_em, criado_por) "
-                f"SELECT {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
+                f"SELECT {q_str(fnome)}, '', current_timestamp(), {q_str(user)} "
                 f"FROM (SELECT 1) WHERE NOT EXISTS "
-                f"(SELECT 1 FROM {_cad('franquias')} WHERE lower(nome) = {q_str(nome.lower())})"
+                f"(SELECT 1 FROM {_cad('franquias')} WHERE lower(nome) = {q_str(fnome.lower())})"
             )
-        _finish_write("Franquia salva.")
-
-    if editing:
-        st.divider()
-        st.markdown("#### Excluir")
-        st.caption("A exclusão é bloqueada se houver domínios vinculados.")
-        if st.button(f"🗑️ Excluir franquia '{cur['nome']}'", key="fr_del"):
-            if _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE franquia_id = {int(cur['id'])}"):
-                st.error("Não é possível excluir: há domínios vinculados. Remova-os primeiro.")
-            else:
-                run_exec(f"DELETE FROM {_cad('franquias')} WHERE id = {int(cur['id'])}")
-                _finish_write("Franquia excluída.")
-
-
-def _cad_dominios(user: str, somente_leitura: bool) -> None:
-    frs = list_franquias().to_dict("records")
-    fr_nome = {f["id"]: f["nome"] for f in frs}
-    df = list_dominios()
-    show = df.copy()
-    if not show.empty:
-        show["Franquia"] = show["franquia_id"].map(
-            lambda i: fr_nome.get(i, "—") if pd.notna(i) else "—"
-        )
-    st.dataframe(
-        (show.rename(columns={"id": "ID", "nome": "Nome", "descricao": "Descrição"})
-             [["ID", "Franquia", "Nome", "Descrição"]] if not show.empty else show),
-        use_container_width=True, hide_index=True,
-    )
-    if somente_leitura:
-        return
-    if not frs:
-        st.warning("Cadastre uma **Franquia** primeiro (aba anterior).")
-        return
-
-    recs = df.to_dict("records")
-    opts = ["(novo)"] + [
-        f'{fr_nome.get(r.get("franquia_id"), "—")} › {r["nome"]} (id {r["id"]})' for r in recs
-    ]
-    st.divider()
-    st.markdown("#### Adicionar / editar domínio")
-    sel = st.selectbox("Registro", options=opts, key="dom_sel")
-    editing = sel != "(novo)"
-    cur = recs[opts.index(sel) - 1] if editing else {
-        "id": None, "franquia_id": None, "nome": "", "descricao": ""
-    }
-
-    fr_ids = [f["id"] for f in frs]
-    fr_idx = fr_ids.index(cur["franquia_id"]) if editing and cur.get("franquia_id") in fr_ids else 0
-    with st.form("form_dom"):
-        fr_id = st.selectbox(
-            "Franquia *", options=fr_ids, index=fr_idx,
-            format_func=lambda i: fr_nome.get(i, i),
-        )
-        nome = st.text_input("Nome *", value=cur["nome"] or "")
-        desc = st.text_area("Descrição", value=cur.get("descricao") or "")
-        saved = st.form_submit_button("💾 Salvar", type="primary")
-
-    if saved:
-        nome = (nome or "").strip()
+            destino_fr = _count(
+                f"SELECT id FROM {_cad('franquias')} WHERE lower(nome) = {q_str(fnome.lower())} ORDER BY id LIMIT 1"
+            )
+        if not destino_fr:
+            st.error("Não foi possível resolver a franquia."); return
+        nome = (novo_dom_nome or "").strip()
         if not nome:
-            st.warning("Informe o nome do domínio.")
-            return
-        extra = f" AND id <> {int(cur['id'])}" if editing else ""
-        if _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE lower(nome) = {q_str(nome.lower())}{extra}"):
-            st.error("Já existe um domínio com esse nome.")
-            return
-        if editing:
-            run_exec(
-                f"UPDATE {_cad('dominios')} SET franquia_id = {int(fr_id)}, nome = {q_str(nome)}, "
-                f"descricao = {q_str(desc)}, atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
-                f"WHERE id = {int(cur['id'])}"
-            )
-        else:
-            # INSERT atômico: o WHERE NOT EXISTS impede duplicata mesmo sob
-            # concorrência/cache defasado (a checagem acima é só p/ a mensagem).
-            run_exec(
-                f"INSERT INTO {_cad('dominios')} (franquia_id, nome, descricao, criado_em, criado_por) "
-                f"SELECT {int(fr_id)}, {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
-                f"FROM (SELECT 1) WHERE NOT EXISTS "
-                f"(SELECT 1 FROM {_cad('dominios')} WHERE lower(nome) = {q_str(nome.lower())})"
-            )
-        _finish_write("Domínio salvo.")
-
-    if editing:
-        st.divider()
-        st.markdown("#### Excluir")
-        st.caption("A exclusão é bloqueada se houver sub-domínios ou data stewards vinculados.")
-        if st.button(f"🗑️ Excluir domínio '{cur['nome']}'", key="dom_del"):
-            dep = (
-                _count(f"SELECT count(*) FROM {_cad('subdominios')} WHERE dominio_id = {int(cur['id'])}")
-                + _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE dominio_id = {int(cur['id'])}")
-            )
-            if dep:
-                st.error("Não é possível excluir: há registros vinculados. Remova-os primeiro.")
-            else:
-                run_exec(f"DELETE FROM {_cad('dominios')} WHERE id = {int(cur['id'])}")
-                _finish_write("Domínio excluído.")
-
-
-def _cad_subdominios(user: str, somente_leitura: bool) -> None:
-    frs = list_franquias().to_dict("records")
-    fr_nome = {f["id"]: f["nome"] for f in frs}
-    doms = list_dominios().to_dict("records")
-    dom_nome = {d["id"]: d["nome"] for d in doms}
-    dom_fr = {d["id"]: d.get("franquia_id") for d in doms}
-    subs = list_subdominios()
-    show = subs.copy()
-    if not show.empty:
-        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
-        show["Franquia"] = show["dominio_id"].map(lambda i: fr_nome.get(dom_fr.get(i), "—"))
-    st.dataframe(
-        (show.rename(columns={"id": "ID", "nome": "Nome", "descricao": "Descrição"})
-             [["ID", "Franquia", "Domínio", "Nome", "Descrição"]] if not show.empty else show),
-        use_container_width=True, hide_index=True,
-    )
-    if somente_leitura:
-        return
-    if not doms:
-        st.warning("Cadastre um **Domínio** primeiro (aba anterior).")
-        return
-
-    recs = subs.to_dict("records")
-    opts = ["(novo)"] + [f'{dom_nome.get(r["dominio_id"], r["dominio_id"])} › {r["nome"]} (id {r["id"]})' for r in recs]
-    st.divider()
-    st.markdown("#### Adicionar / editar sub-domínio")
-    sel = st.selectbox("Registro", options=opts, key="sub_sel")
-    editing = sel != "(novo)"
-    cur = recs[opts.index(sel) - 1] if editing else {"id": None, "dominio_id": None, "nome": "", "descricao": ""}
-
-    dom_ids = [d["id"] for d in doms]
-    idx = dom_ids.index(cur["dominio_id"]) if editing and cur["dominio_id"] in dom_ids else 0
-    with st.form("form_sub"):
-        dom_id = st.selectbox(
-            "Domínio *", options=dom_ids, index=idx,
-            format_func=lambda i: f'{fr_nome.get(dom_fr.get(i), "—")} › {dom_nome.get(i, i)}',
+            st.warning("Informe o nome do novo domínio."); return
+        if _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE lower(nome) = {q_str(nome.lower())}"):
+            st.error("Já existe um domínio com esse nome."); return
+        run_exec(
+            f"INSERT INTO {_cad('dominios')} (franquia_id, nome, descricao, criado_em, criado_por) "
+            f"SELECT {int(destino_fr)}, {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
+            f"FROM (SELECT 1) WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {_cad('dominios')} WHERE lower(nome) = {q_str(nome.lower())})"
         )
-        nome = st.text_input("Nome *", value=cur["nome"] or "")
-        desc = st.text_area("Descrição", value=cur.get("descricao") or "")
-        saved = st.form_submit_button("💾 Salvar", type="primary")
+        _finish_write(f"Domínio “{nome}” criado.")
 
-    if saved:
-        nome = (nome or "").strip()
+    elif salvar and nivel == "sub" and modo == "criar":
+        nome = (novo_sub_nome or "").strip()
         if not nome:
-            st.warning("Informe o nome do sub-domínio.")
-            return
-        extra = f" AND id <> {int(cur['id'])}" if editing else ""
+            st.warning("Informe o nome do novo sub-domínio."); return
         if _count(
             f"SELECT count(*) FROM {_cad('subdominios')} WHERE dominio_id = {int(dom_id)} "
-            f"AND lower(nome) = {q_str(nome.lower())}{extra}"
+            f"AND lower(nome) = {q_str(nome.lower())}"
         ):
-            st.error("Já existe um sub-domínio com esse nome neste domínio.")
-            return
-        if editing:
-            run_exec(
-                f"UPDATE {_cad('subdominios')} SET dominio_id = {int(dom_id)}, nome = {q_str(nome)}, "
-                f"descricao = {q_str(desc)}, atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
-                f"WHERE id = {int(cur['id'])}"
+            st.error("Já existe um sub-domínio com esse nome neste domínio."); return
+        run_exec(
+            f"INSERT INTO {_cad('subdominios')} (dominio_id, nome, descricao, criado_em, criado_por) "
+            f"SELECT {int(dom_id)}, {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
+            f"FROM (SELECT 1) WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {_cad('subdominios')} WHERE dominio_id = {int(dom_id)} "
+            f"AND lower(nome) = {q_str(nome.lower())})"
+        )
+        _finish_write(f"Sub-domínio “{nome}” criado.")
+
+    elif salvar and modo == "editar":
+        nome = (nome_edit or "").strip()
+        if not nome:
+            st.warning(f"Informe o nome do {rotulo}."); return
+        tabela = {"franquia": "franquias", "dominio": "dominios", "sub": "subdominios"}[nivel]
+        if nivel == "sub":
+            dupe = _count(
+                f"SELECT count(*) FROM {_cad('subdominios')} WHERE dominio_id = {int(alvo['dominio_id'])} "
+                f"AND lower(nome) = {q_str(nome.lower())} AND id <> {int(alvo['id'])}"
             )
         else:
-            # INSERT atômico: bloqueia sub-domínio de mesmo nome no mesmo domínio.
-            run_exec(
-                f"INSERT INTO {_cad('subdominios')} (dominio_id, nome, descricao, criado_em, criado_por) "
-                f"SELECT {int(dom_id)}, {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
-                f"FROM (SELECT 1) WHERE NOT EXISTS "
-                f"(SELECT 1 FROM {_cad('subdominios')} WHERE dominio_id = {int(dom_id)} "
-                f"AND lower(nome) = {q_str(nome.lower())})"
+            dupe = _count(
+                f"SELECT count(*) FROM {_cad(tabela)} WHERE lower(nome) = {q_str(nome.lower())} "
+                f"AND id <> {int(alvo['id'])}"
             )
-        _finish_write("Sub-domínio salvo.")
+        if dupe:
+            st.error(f"Já existe outr{'a' if nivel == 'franquia' else 'o'} {rotulo} com esse nome."); return
+        run_exec(
+            f"UPDATE {_cad(tabela)} SET nome = {q_str(nome)}, descricao = {q_str(desc)}, "
+            f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+            f"WHERE id = {int(alvo['id'])}"
+        )
+        _finish_write(f"{rotulo.capitalize()} atualizado.")
 
-    if editing:
-        st.divider()
-        st.markdown("#### Excluir")
-        if st.button(f"🗑️ Excluir sub-domínio '{cur['nome']}'", key="sub_del"):
-            if _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE subdominio_id = {int(cur['id'])}"):
-                st.error("Não é possível excluir: há data stewards vinculados. Remova-os primeiro.")
-            else:
-                run_exec(f"DELETE FROM {_cad('subdominios')} WHERE id = {int(cur['id'])}")
-                _finish_write("Sub-domínio excluído.")
+    elif excluir:
+        if nivel == "franquia":
+            if _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE franquia_id = {int(alvo['id'])}"):
+                st.error("Não dá para excluir: há domínios nessa franquia."); return
+            run_exec(f"DELETE FROM {_cad('franquias')} WHERE id = {int(alvo['id'])}")
+        elif nivel == "dominio":
+            dep = (
+                _count(f"SELECT count(*) FROM {_cad('subdominios')} WHERE dominio_id = {int(alvo['id'])}")
+                + _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE dominio_id = {int(alvo['id'])}")
+            )
+            if dep:
+                st.error("Não dá para excluir: há sub-domínios ou data stewards vinculados."); return
+            run_exec(f"DELETE FROM {_cad('dominios')} WHERE id = {int(alvo['id'])}")
+        else:
+            if _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE subdominio_id = {int(alvo['id'])}"):
+                st.error("Não dá para excluir: há data stewards vinculados."); return
+            run_exec(f"DELETE FROM {_cad('subdominios')} WHERE id = {int(alvo['id'])}")
+        _finish_write(f"{rotulo.capitalize()} excluído.")
 
 
 def page_stewards() -> None:
