@@ -283,6 +283,8 @@ própria UI do app (que lê como SP).
      `app.yaml`, migração no 1º acesso). NFR row "Esteira" chip → "processo
      Comgás".
   3. **IA = qual modelo**, não interno-vs-externo. Comgás tem **Llama, GPT e
-     Claude** disponíveis; escolha via `LLM_ENDPOINT`. Sem citar versão.
-     Removidas as menções a "provedor externo faz a pergunta sair" / privacidade
-     como framing. NFR row "Egress & privacidade" → "Modelo de IA".
+     Claude** disponíveis; escolha feita **ao configurar o endpoint no AI
+     Gateway pela interface do Databricks** — o doc não cita mais `LLM_ENDPOINT`
+     (a pedido do usuário: o modelo já vem do endpoint configurado). Sem citar
+     versão. Removidas as menções a "provedor externo faz a pergunta sair" /
+     privacidade como framing. NFR row "Egress & privacidade" → "Modelo de IA".
