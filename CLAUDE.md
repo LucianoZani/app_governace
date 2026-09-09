@@ -263,3 +263,24 @@ própria UI do app (que lê como SP).
     `Arquitetura para Aprovacao … (Comgas).pdf` (raiz Comgás). Artefato
     `914849ee` **republicado** (neutro). Fontes em `docs-entrega-comgas/`
     (agora com os HTML neutros + os cg-* + brand.py).
+- **2026-09-09 (6ª parte)** — Feedback do usuário sobre o 17, três correções:
+  1. **Não é doc "de aprovação"** — é "o que o app precisa do ambiente para
+     funcionar". Reenquadrado: eyebrow/h1 → "arquitetura e requisitos de
+     ambiente"; "decisões que a aprovação endossa" → "fundamentos do desenho";
+     "o que o documento não decide" → "o que a instalação precisa prover";
+     "pontos abertos que a aprovação assume" → "o que a instalação precisa
+     definir"; NFR h2 → "o que o produto resolve, o que o ambiente precisa
+     prover". Renomeado: repo `17-arquitetura-requisitos.pdf`, raiz Comgás
+     `Arquitetura e Requisitos de Ambiente - Governanca UC (Comgas).pdf`
+     (o PDF de nome antigo na raiz ficou travado/aberto num viewer — apagar
+     manualmente).
+  2. **Esteira = fluxo real Comgás**: Azure DevOps Repos, fluxo por PR. Dev
+     sobe arquivos → PR (revisão = gate) → merge `main` → job/pipeline leva
+     pro Databricks (**mecanismo a confirmar** — pipeline c/ CLI? Git folder +
+     job de pull? só sync ou já deploya?) → instalação a partir do Databricks
+     (runbook). Diagrama refeito (fluxo único, não mais before/after CI
+     genérico). Tabela "a confirmar com o time de DevOps".
+  3. **IA = qual modelo**, não interno-vs-externo. Comgás tem **Llama, GPT e
+     Claude** disponíveis; escolha via `LLM_ENDPOINT`. Sem citar versão.
+     Removidas as menções a "provedor externo faz a pergunta sair" / privacidade
+     como framing. NFR row "Egress & privacidade" → "Modelo de IA".

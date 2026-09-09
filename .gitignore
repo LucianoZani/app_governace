@@ -15,3 +15,11 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# Documentos exportados e material de cliente — nunca versionar
+# (PDFs dos runbooks/guias, decks, planilhas)
+*.pdf
+*.pptx
+*.ppt
+*.xlsx
+!finops_dados_demo.xlsx
