@@ -369,3 +369,30 @@ própria UI do app (que lê como SP).
       campo *Franquia* = o cadastro de **Domínio** do app, campo *Domínio* = o
       cadastro de **Sub-domínio**. Só rótulo (colunas do banco intactas:
       `dominio_id`/`subdominio_id`).
+- **2026-09-09 (10ª parte)** — Hierarquia de negócio passou a ter **3 níveis
+  de verdade: Franquia › Domínio › Sub-domínio** (antes eram 2: domínio →
+  subdomínio; "franquia" só existia como rótulo). Escopo: **PoC/teste** (a
+  modelagem definitiva fica pra discutir com a Comgás). `app.py` (não commitado
+  ainda no momento desta linha — ver commit):
+  - Nova tabela `{cad}.franquias` + coluna `dominios.franquia_id BIGINT`
+    (nullable; migração idempotente em `ensure_cadastro_tables` no padrão
+    `information_schema` + `ALTER TABLE ADD COLUMNS`). Base pré-existente fica
+    com domínios sem franquia até editar cada um.
+  - `list_franquias()` novo; `list_dominios()` agora traz `franquia_id`;
+    `_clear_cad_caches` inclui `list_franquias`.
+  - As **duas telas** `page_dominios`/`page_subdominios` viraram **uma só**
+    (`page_dominios`, título "🗂️ Domínios") com **3 abas** (`st.tabs`):
+    Franquias / Domínios / Sub-domínios. Helpers `_cad_franquias`,
+    `_cad_dominios`, `_cad_subdominios` (CRUD com guarda de exclusão em
+    cascata). Menu Cadastros perdeu o item "Sub-domínios".
+  - `page_mapa_dominio_acesso` ("Acesso por Franquia") **realinhada** ao modelo
+    real: a concessão continua em `dominio_id` (+ `subdominio_id` opcional), mas
+    o seletor agora é **Franquia real → Domínio (filtrado) → Sub-domínio
+    opcional**; Franquia é **derivada** de `dominio.franquia_id` (sem mexer no
+    schema de `mapa_dominio_acesso`). Removido o texto "Rótulos deste teste:
+    Franquia = cadastro de Domínio…".
+  - Deployado no Free (deploy SUCCEEDED). ⚠️ Migração (`franquias` +
+    `franquia_id`) roda quando **alguém abrir o app logado**.
+  - ⚠️ Pendente: seed de uma franquia + religar os subdomínios de teste
+    (Vendas/Marketing/Pos-venda hoje pendem de "Comercial" como *domínio*;
+    no modelo novo "Comercial" é *franquia*). Click-test do usuário.

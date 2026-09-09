@@ -1738,8 +1738,14 @@ def ensure_cadastro_tables() -> bool:
         "atualizado_em TIMESTAMP, atualizado_por STRING"
     )
     ddl = [
-        f"CREATE TABLE IF NOT EXISTS {_cad('dominios')} "
+        # Hierarquia de negócio de 3 níveis: Franquia › Domínio › Sub-domínio.
+        # `franquias` é o nível de topo (PoC — cliente decide se vira entidade
+        # definitiva); `dominios.franquia_id` liga cada domínio a uma franquia
+        # (nullable p/ compat com base pré-existente — ver ALTER TABLE abaixo).
+        f"CREATE TABLE IF NOT EXISTS {_cad('franquias')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, nome STRING, descricao STRING, {audit})",
+        f"CREATE TABLE IF NOT EXISTS {_cad('dominios')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, franquia_id BIGINT, nome STRING, descricao STRING, {audit})",
         f"CREATE TABLE IF NOT EXISTS {_cad('subdominios')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, dominio_id BIGINT, nome STRING, descricao STRING, {audit})",
         # Cadastro de responsáveis por domínio/sub-domínio. `tipo` distingue
@@ -1880,6 +1886,20 @@ def ensure_cadastro_tables() -> bool:
         if "tipo" not in existing_cols:
             run_exec(f"ALTER TABLE {_cad('data_stewards')} ADD COLUMNS (tipo STRING)")
             run_exec(f"UPDATE {_cad('data_stewards')} SET tipo = 'Steward' WHERE tipo IS NULL")
+    except Exception:
+        pass
+    # Coluna `franquia_id` em `dominios` (idempotente) — nível "Franquia"
+    # acrescentado acima do domínio. Nullable: base pré-existente fica sem
+    # franquia até alguém editar cada domínio na tela.
+    try:
+        cols_df = run_query(
+            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+            f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
+            f"AND lower(table_name) = 'dominios'"
+        )
+        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
+        if "franquia_id" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('dominios')} ADD COLUMNS (franquia_id BIGINT)")
     except Exception:
         pass
     # Coluna `power_steward` em `indicadores` (idempotente p/ a tabela já
@@ -2041,8 +2061,15 @@ def can_edit(role: str) -> bool:
 
 # ---- Leituras (SP; cache curto + refresh manual na sidebar) ----
 @st.cache_data(ttl=30, show_spinner=False)
+def list_franquias() -> pd.DataFrame:
+    return run_query(f"SELECT id, nome, descricao FROM {_cad('franquias')} ORDER BY nome")
+
+
+@st.cache_data(ttl=30, show_spinner=False)
 def list_dominios() -> pd.DataFrame:
-    return run_query(f"SELECT id, nome, descricao FROM {_cad('dominios')} ORDER BY nome")
+    return run_query(
+        f"SELECT id, franquia_id, nome, descricao FROM {_cad('dominios')} ORDER BY nome"
+    )
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -2330,7 +2357,7 @@ _NIVEIS_CONFIDENCIALIDADE = ["publico", "interno", "confidencial", "restrito"]
 
 def _clear_cad_caches() -> None:
     for f in (
-        list_dominios, list_subdominios, list_stewards, list_permissoes,
+        list_franquias, list_dominios, list_subdominios, list_stewards, list_permissoes,
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
         list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
         list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso, list_grupos,
@@ -3431,30 +3458,124 @@ def page_finops() -> None:
 
 def page_dominios() -> None:
     st.title("🗂️ Domínios")
-    st.caption("Cadastro principal. Sub-domínios, Data Owners e Data Stewards se vinculam a um domínio.")
+    st.caption(
+        "Hierarquia de negócio em **três níveis: Franquia › Domínio › Sub-domínio**. "
+        "Sub-domínios, Data Owners, Data Stewards, dashboards e indicadores se "
+        "vinculam a um domínio."
+    )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
     user = st.session_state.get("user", "")
+    somente_leitura = not can_edit(role)
+    if somente_leitura:
+        st.info("Seu perfil é **leitor** — visualização apenas.")
 
-    df = list_dominios()
+    aba_fr, aba_dom, aba_sub = st.tabs(["🏙️ Franquias", "🗂️ Domínios", "🗃️ Sub-domínios"])
+    with aba_fr:
+        _cad_franquias(user, somente_leitura)
+    with aba_dom:
+        _cad_dominios(user, somente_leitura)
+    with aba_sub:
+        _cad_subdominios(user, somente_leitura)
+
+
+def _cad_franquias(user: str, somente_leitura: bool) -> None:
+    df = list_franquias()
     st.dataframe(
         df.rename(columns={"id": "ID", "nome": "Nome", "descricao": "Descrição"}),
         use_container_width=True, hide_index=True,
     )
-
-    if not can_edit(role):
-        st.info("Seu perfil é **leitor** — visualização apenas.")
+    if somente_leitura:
         return
 
     recs = df.to_dict("records")
-    opts = ["(novo)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
+    opts = ["(nova)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
     st.divider()
-    st.markdown("#### Adicionar / editar")
-    sel = st.selectbox("Registro", options=opts, key="dom_sel")
-    editing = sel != "(novo)"
+    st.markdown("#### Adicionar / editar franquia")
+    sel = st.selectbox("Registro", options=opts, key="fr_sel")
+    editing = sel != "(nova)"
     cur = recs[opts.index(sel) - 1] if editing else {"id": None, "nome": "", "descricao": ""}
 
+    with st.form("form_fr"):
+        nome = st.text_input("Nome *", value=cur["nome"] or "")
+        desc = st.text_area("Descrição", value=cur.get("descricao") or "")
+        saved = st.form_submit_button("💾 Salvar", type="primary")
+
+    if saved:
+        nome = (nome or "").strip()
+        if not nome:
+            st.warning("Informe o nome da franquia.")
+            return
+        extra = f" AND id <> {int(cur['id'])}" if editing else ""
+        if _count(f"SELECT count(*) FROM {_cad('franquias')} WHERE lower(nome) = {q_str(nome.lower())}{extra}"):
+            st.error("Já existe uma franquia com esse nome.")
+            return
+        if editing:
+            run_exec(
+                f"UPDATE {_cad('franquias')} SET nome = {q_str(nome)}, descricao = {q_str(desc)}, "
+                f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                f"WHERE id = {int(cur['id'])}"
+            )
+        else:
+            run_exec(
+                f"INSERT INTO {_cad('franquias')} (nome, descricao, criado_em, criado_por) "
+                f"SELECT {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
+                f"FROM (SELECT 1) WHERE NOT EXISTS "
+                f"(SELECT 1 FROM {_cad('franquias')} WHERE lower(nome) = {q_str(nome.lower())})"
+            )
+        _finish_write("Franquia salva.")
+
+    if editing:
+        st.divider()
+        st.markdown("#### Excluir")
+        st.caption("A exclusão é bloqueada se houver domínios vinculados.")
+        if st.button(f"🗑️ Excluir franquia '{cur['nome']}'", key="fr_del"):
+            if _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE franquia_id = {int(cur['id'])}"):
+                st.error("Não é possível excluir: há domínios vinculados. Remova-os primeiro.")
+            else:
+                run_exec(f"DELETE FROM {_cad('franquias')} WHERE id = {int(cur['id'])}")
+                _finish_write("Franquia excluída.")
+
+
+def _cad_dominios(user: str, somente_leitura: bool) -> None:
+    frs = list_franquias().to_dict("records")
+    fr_nome = {f["id"]: f["nome"] for f in frs}
+    df = list_dominios()
+    show = df.copy()
+    if not show.empty:
+        show["Franquia"] = show["franquia_id"].map(
+            lambda i: fr_nome.get(i, "—") if pd.notna(i) else "—"
+        )
+    st.dataframe(
+        (show.rename(columns={"id": "ID", "nome": "Nome", "descricao": "Descrição"})
+             [["ID", "Franquia", "Nome", "Descrição"]] if not show.empty else show),
+        use_container_width=True, hide_index=True,
+    )
+    if somente_leitura:
+        return
+    if not frs:
+        st.warning("Cadastre uma **Franquia** primeiro (aba anterior).")
+        return
+
+    recs = df.to_dict("records")
+    opts = ["(novo)"] + [
+        f'{fr_nome.get(r.get("franquia_id"), "—")} › {r["nome"]} (id {r["id"]})' for r in recs
+    ]
+    st.divider()
+    st.markdown("#### Adicionar / editar domínio")
+    sel = st.selectbox("Registro", options=opts, key="dom_sel")
+    editing = sel != "(novo)"
+    cur = recs[opts.index(sel) - 1] if editing else {
+        "id": None, "franquia_id": None, "nome": "", "descricao": ""
+    }
+
+    fr_ids = [f["id"] for f in frs]
+    fr_idx = fr_ids.index(cur["franquia_id"]) if editing and cur.get("franquia_id") in fr_ids else 0
     with st.form("form_dom"):
+        fr_id = st.selectbox(
+            "Franquia *", options=fr_ids, index=fr_idx,
+            format_func=lambda i: fr_nome.get(i, i),
+        )
         nome = st.text_input("Nome *", value=cur["nome"] or "")
         desc = st.text_area("Descrição", value=cur.get("descricao") or "")
         saved = st.form_submit_button("💾 Salvar", type="primary")
@@ -3470,16 +3591,16 @@ def page_dominios() -> None:
             return
         if editing:
             run_exec(
-                f"UPDATE {_cad('dominios')} SET nome = {q_str(nome)}, descricao = {q_str(desc)}, "
-                f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                f"UPDATE {_cad('dominios')} SET franquia_id = {int(fr_id)}, nome = {q_str(nome)}, "
+                f"descricao = {q_str(desc)}, atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                 f"WHERE id = {int(cur['id'])}"
             )
         else:
             # INSERT atômico: o WHERE NOT EXISTS impede duplicata mesmo sob
             # concorrência/cache defasado (a checagem acima é só p/ a mensagem).
             run_exec(
-                f"INSERT INTO {_cad('dominios')} (nome, descricao, criado_em, criado_por) "
-                f"SELECT {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
+                f"INSERT INTO {_cad('dominios')} (franquia_id, nome, descricao, criado_em, criado_por) "
+                f"SELECT {int(fr_id)}, {q_str(nome)}, {q_str(desc)}, current_timestamp(), {q_str(user)} "
                 f"FROM (SELECT 1) WHERE NOT EXISTS "
                 f"(SELECT 1 FROM {_cad('dominios')} WHERE lower(nome) = {q_str(nome.lower())})"
             )
@@ -3489,7 +3610,7 @@ def page_dominios() -> None:
         st.divider()
         st.markdown("#### Excluir")
         st.caption("A exclusão é bloqueada se houver sub-domínios ou data stewards vinculados.")
-        if st.button(f"🗑️ Excluir domínio '{cur['nome']}'"):
+        if st.button(f"🗑️ Excluir domínio '{cur['nome']}'", key="dom_del"):
             dep = (
                 _count(f"SELECT count(*) FROM {_cad('subdominios')} WHERE dominio_id = {int(cur['id'])}")
                 + _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE dominio_id = {int(cur['id'])}")
@@ -3501,36 +3622,32 @@ def page_dominios() -> None:
                 _finish_write("Domínio excluído.")
 
 
-def page_subdominios() -> None:
-    st.title("🗃️ Sub-domínios")
-    st.caption("Cada sub-domínio pertence a um domínio.")
-    _show_cad_feedback()
-    role = st.session_state.get("role", "leitor")
-    user = st.session_state.get("user", "")
-
+def _cad_subdominios(user: str, somente_leitura: bool) -> None:
+    frs = list_franquias().to_dict("records")
+    fr_nome = {f["id"]: f["nome"] for f in frs}
     doms = list_dominios().to_dict("records")
     dom_nome = {d["id"]: d["nome"] for d in doms}
+    dom_fr = {d["id"]: d.get("franquia_id") for d in doms}
     subs = list_subdominios()
     show = subs.copy()
     if not show.empty:
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Franquia"] = show["dominio_id"].map(lambda i: fr_nome.get(dom_fr.get(i), "—"))
     st.dataframe(
         (show.rename(columns={"id": "ID", "nome": "Nome", "descricao": "Descrição"})
-             [["ID", "Domínio", "Nome", "Descrição"]] if not show.empty else show),
+             [["ID", "Franquia", "Domínio", "Nome", "Descrição"]] if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
-
-    if not can_edit(role):
-        st.info("Seu perfil é **leitor** — visualização apenas.")
+    if somente_leitura:
         return
     if not doms:
-        st.warning("Cadastre um **Domínio** primeiro.")
+        st.warning("Cadastre um **Domínio** primeiro (aba anterior).")
         return
 
     recs = subs.to_dict("records")
     opts = ["(novo)"] + [f'{dom_nome.get(r["dominio_id"], r["dominio_id"])} › {r["nome"]} (id {r["id"]})' for r in recs]
     st.divider()
-    st.markdown("#### Adicionar / editar")
+    st.markdown("#### Adicionar / editar sub-domínio")
     sel = st.selectbox("Registro", options=opts, key="sub_sel")
     editing = sel != "(novo)"
     cur = recs[opts.index(sel) - 1] if editing else {"id": None, "dominio_id": None, "nome": "", "descricao": ""}
@@ -3540,7 +3657,7 @@ def page_subdominios() -> None:
     with st.form("form_sub"):
         dom_id = st.selectbox(
             "Domínio *", options=dom_ids, index=idx,
-            format_func=lambda i: dom_nome.get(i, i),
+            format_func=lambda i: f'{fr_nome.get(dom_fr.get(i), "—")} › {dom_nome.get(i, i)}',
         )
         nome = st.text_input("Nome *", value=cur["nome"] or "")
         desc = st.text_area("Descrição", value=cur.get("descricao") or "")
@@ -3578,7 +3695,7 @@ def page_subdominios() -> None:
     if editing:
         st.divider()
         st.markdown("#### Excluir")
-        if st.button(f"🗑️ Excluir sub-domínio '{cur['nome']}'"):
+        if st.button(f"🗑️ Excluir sub-domínio '{cur['nome']}'", key="sub_del"):
             if _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE subdominio_id = {int(cur['id'])}"):
                 st.error("Não é possível excluir: há data stewards vinculados. Remova-os primeiro.")
             else:
@@ -4875,48 +4992,60 @@ def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str
 def page_mapa_dominio_acesso() -> None:
     st.title("🗺️ Acesso por Franquia")
     st.caption(
-        "Quais **franquias e domínios** cada usuário pode ver. Alimenta a "
-        "política ABAC (row filter) do Unity Catalog. Um usuário pode ter "
-        "várias linhas (cross-domínio = ter mais de uma linha, nunca uma flag). "
-        "Rótulos deste teste: **Franquia** = o cadastro de *Domínio* do app, "
-        "**Domínio** = o cadastro de *Sub-domínio*. **SKELETON** — em validação."
+        "Quais **domínios** (dentro de uma franquia) cada usuário pode ver. "
+        "Alimenta a política ABAC (row filter) do Unity Catalog. Um usuário pode "
+        "ter várias linhas (cross-domínio = ter mais de uma linha, nunca uma "
+        "flag). A concessão é no nível do **domínio**; o **sub-domínio** é "
+        "opcional e restringe ainda mais. **SKELETON** — em validação."
     )
     _show_cad_feedback()
     actor = st.session_state.get("user", "")
 
+    frs = list_franquias().to_dict("records")
+    fr_nome = {f["id"]: f["nome"] for f in frs}
     doms = list_dominios().to_dict("records")
     subs = list_subdominios().to_dict("records")
     dom_nome = {d["id"]: d["nome"] for d in doms}
+    dom_fr = {d["id"]: d.get("franquia_id") for d in doms}
     sub_nome = {s["id"]: s["nome"] for s in subs}
 
     df = list_mapa_dominio_acesso()
     show = df.copy()
     if not show.empty:
-        show["Franquia"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
-        show["Domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "(toda a franquia)"))
+        show["Franquia"] = show["dominio_id"].map(lambda i: fr_nome.get(dom_fr.get(i), "—"))
+        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Sub-domínio"] = show["subdominio_id"].map(
+            lambda i: sub_nome.get(i, "(todo o domínio)") if pd.notna(i) else "(todo o domínio)"
+        )
     st.dataframe(
         (show.rename(columns={"grupo": "Grupo", "usuario": "Usuário"})
-             [["Grupo", "Usuário", "Franquia", "Domínio", "criado_por", "criado_em"]]
+             [["Grupo", "Usuário", "Franquia", "Domínio", "Sub-domínio", "criado_por", "criado_em"]]
          if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
 
-    if not doms:
-        st.warning("Cadastre uma **Franquia** primeiro (menu Cadastros → Domínios).")
+    if not frs or not doms:
+        st.warning("Cadastre uma **Franquia** e um **Domínio** primeiro (menu Cadastros → Domínios).")
         return
 
     st.divider()
     st.markdown("#### Adicionar acesso")
     g_nome, g_id, usuario = _seletor_grupo_usuario("mda")
 
-    dom_ids = [d["id"] for d in doms]
-    dom_id = st.selectbox("Franquia *", options=dom_ids,
+    fr_ids = [f["id"] for f in frs]
+    fr_id = st.selectbox("Franquia *", options=fr_ids,
+                         format_func=lambda i: fr_nome.get(i, i), key="mda_fr")
+    dom_ids = [d["id"] for d in doms if dom_fr.get(d["id"]) == fr_id]
+    if not dom_ids:
+        st.info("Essa franquia ainda não tem domínios cadastrados.")
+        return
+    dom_id = st.selectbox("Domínio *", options=dom_ids,
                           format_func=lambda i: dom_nome.get(i, i), key="mda_dom")
     sub_ids = [s["id"] for s in subs if s["dominio_id"] == dom_id]
     sub_id = st.selectbox(
-        "Domínio (opcional — vazio = toda a franquia)",
+        "Sub-domínio (opcional — vazio = todo o domínio)",
         options=[None] + sub_ids,
-        format_func=lambda i: "(toda a franquia)" if i is None else sub_nome.get(i, i),
+        format_func=lambda i: "(todo o domínio)" if i is None else sub_nome.get(i, i),
         key="mda_sub",
     )
 
@@ -4930,7 +5059,7 @@ def page_mapa_dominio_acesso() -> None:
             f"AND {'subdominio_id IS NULL' if sub_id is None else f'subdominio_id = {int(sub_id)}'}"
         )
         if dup:
-            st.error("Esse usuário já tem esse acesso (mesma franquia/domínio).")
+            st.error("Esse usuário já tem esse acesso (mesmo domínio/sub-domínio).")
             return
         novo_id = str(uuid.uuid4())
         depois = {
@@ -5070,13 +5199,13 @@ def page_permissoes() -> None:
     st.caption(
         "Cadastro de usuários (espelho do workspace) e seu permissionamento. "
         "**Papel** define o que edita nos cadastros (admin/editor/leitor). As "
-        "**checkboxes** liberam menus por usuário: *Cadastro* libera Domínios, "
-        "Sub-domínios e Glossário de Negócio; *Governança* libera Governança de "
+        "**checkboxes** liberam menus por usuário: *Cadastro* libera Domínios "
+        "(Franquias / Domínios / Sub-domínios) e Glossário de Negócio; *Governança* libera Governança de "
         "Dados, Auditoria, FinOps e a visualização (sem decidir) do Backlog de "
         "Aprovação de Tags; *Aprovador de tags* libera tudo de Governança **mais** "
         "aprovar/rejeitar no Backlog; *Ver FinOps* libera só a tela FinOps; "
         "*Power Steward* além de aparecer no campo Power Steward da tela Indicador, "
-        "libera o menu Cadastros **completo** (Domínios, Sub-domínios, Data Owners "
+        "libera o menu Cadastros **completo** (Domínios, Data Owners "
         "& Stewards, Dashboards, Padrões de Dado Pessoal, Glossário de Negócio e "
         "Indicador — tudo, menos esta tela); *Engenharia* libera a tela Indicadores "
         "— Engenharia (escolha de tabelas/colunas e publicação como Metric View). "
@@ -5946,11 +6075,12 @@ def main() -> None:
 
     pages: dict = {"Painel": [pg_inicio]}
 
-    # Cadastro: a flag `ver_cadastros` (rótulo "Cadastro") libera só Domínios/
-    # Sub-domínios/Glossário de Negócio. `power_steward` libera o conjunto
-    # COMPLETO (as mesmas páginas de admin, exceto Usuários) — quem cuida de
-    # indicador de ponta a ponta também precisa de Data Owners/Dashboards/
-    # Padrões de Dado Pessoal, não só do glossário.
+    # Cadastro: a flag `ver_cadastros` (rótulo "Cadastro") libera só Domínios
+    # (página única com Franquias / Domínios / Sub-domínios em abas) e
+    # Glossário de Negócio. `power_steward` libera o conjunto COMPLETO (as
+    # mesmas páginas de admin, exceto Usuários) — quem cuida de indicador de
+    # ponta a ponta também precisa de Data Owners/Dashboards/Padrões de Dado
+    # Pessoal, não só do glossário.
     cadastro_completo = is_admin or perms["power_steward"]
     cadastro_algum = cadastro_completo or perms["ver_cadastros"]
     if cadastro_algum:
@@ -5958,7 +6088,6 @@ def main() -> None:
         nav_pages["glossario_edit"] = pg_glossario_edit
         cadastros = [
             st.Page(page_dominios, title="Domínios", icon="🗂️"),
-            st.Page(page_subdominios, title="Sub-domínios", icon="🗃️"),
         ]
         if cadastro_completo:
             pg_stewards = st.Page(page_stewards, title="Data Owners & Stewards", icon="🧑‍💼")
