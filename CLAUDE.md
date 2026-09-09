@@ -165,3 +165,24 @@ própria UI do app (que lê como SP).
     não instalados nesta máquina, então sem conferência visual). ⚠️ Viewers do
     link do artefato veem uma versão fixada anterior — re-fixar pelo menu de
     compartilhamento.
+- **2026-09-09** — Só o PDF do runbook: estava **mal formatado** porque o
+  artefato não tinha CSS de impressão (o `--print-to-pdf` do Chrome quebrava
+  o layout — rail de navegação virava tira cortada, blocos `console` perdiam
+  o fundo escuro, badges/callouts/thead sem cor, comandos de CLI e diagrama
+  cortados na margem, passos/tabelas partidos entre páginas).
+  - Adicionado bloco **`@media print`** ao HTML do artefato (não muda nada na
+    tela): `print-color-adjust:exact`; `nav.rail` escondido; `.shell` em
+    coluna única largura cheia; `.console pre` com `white-space:pre-wrap`
+    (comandos quebram em vez de sumir); tabelas sem clipping + células
+    quebram linha; `.diagram-row` empilha na vertical; `break-inside:avoid`
+    em console/callout/tabela/linha, `auto` em `.step`/`.spec-block`/`section`
+    (evita páginas meio vazias).
+  - `16-runbook-implantacao.pdf` na raiz **reexportado** (Chrome headless
+    `--print-to-pdf`), 21 páginas. Desta vez **com conferência visual**:
+    `pymupdf` (=`import fitz`, está instalado nesta máquina — ao contrário de
+    `pdftoppm`) renderiza as páginas em PNG. Revisado página a página, sem
+    conteúdo cortado. Continua **não versionado**.
+  - Artefato **republicado** na mesma URL (`11a23162…`, label "CSS de
+    impressão para o PDF") — aparência na tela idêntica. ⚠️ Segue pendente
+    **re-fixar a versão** pelo menu de compartilhamento (viewers ainda veem a
+    fixada anterior).
