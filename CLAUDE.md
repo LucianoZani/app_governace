@@ -389,6 +389,16 @@ própria UI do app (que lê como SP).
       SP consegue** rodar `users.list(filter=...)` lá (pergunta nº 1). O
       `applicationId` como `usuario` é artefato do teste; usuário Entra real →
       `userName` (pergunta nº 2: é isso que o UDF casa?).
+  - **2026-09-09 — dropdown de membros de volta** (`9100a27`, a pedido do
+    usuário). `membros_do_grupo(group_id)`: `groups.get` (traz os ids dos
+    membros) → `users.get`/`service_principals.get` por membro → `userName`/
+    `applicationId`. Custo = **tamanho do grupo**, não do diretório → escala
+    p/ grupos de time (dezenas). `groups.get` member vem com
+    `ref="Users/…"|"ServicePrincipals/…"` (não `type`). `_seletor_grupo_usuario`:
+    escolher grupo → lista membros; expander "buscar no diretório" p/ quem
+    está fora do grupo; sem grupo / grupo vazio → busca direta
+    (`_busca_usuario`, helper extraído). Validado no Free: comercial → 4
+    membros resolvidos com applicationId certo.
   - **4 perguntas p/ o time de segurança da Comgás antes de finalizar**:
     (1) SP do app lê SCIM Groups na Comgás? (2) o UDF ABAC casa `current_user()`
     contra e-mail / UPN / userName? → define o que gravar em `usuario`;
