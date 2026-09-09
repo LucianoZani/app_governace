@@ -2296,6 +2296,52 @@ def list_grupos() -> list[dict]:
     return sorted(gs, key=lambda d: d["nome"].lower())
 
 
+@st.cache_data(ttl=180, show_spinner=False)
+def membros_do_grupo(group_id: str) -> list[dict]:
+    """Membros de UM grupo — custo limitado ao **tamanho do grupo**, não ao do
+    diretório. ``groups.get`` traz os ids dos membros; cada um é resolvido para
+    ``userName`` (pessoa) / ``applicationId`` (service principal).
+
+    ``[{"ident", "rotulo"}]``. Grupos aninhados são ignorados. Erro em
+    ``st.session_state["_grupos_erro"]``.
+    """
+    if not group_id:
+        return []
+    w = get_client(prefer_user=True)
+    try:
+        full = w.groups.get(id=group_id)
+    except Exception as exc:
+        st.session_state["_grupos_erro"] = f"groups.get: {type(exc).__name__}: {exc}"
+        return []
+    out: dict[str, str] = {}
+    erro: str | None = None
+    for m in (full.members or []):
+        mid = m.value
+        if not mid:
+            continue
+        ref = str(getattr(m, "ref", None) or getattr(m, "type", None) or "")
+        try:
+            if "ervicePrincipal" in ref:
+                s = w.service_principals.get(id=mid)
+                ident, rot = (s.application_id or "").strip(), (s.display_name or "").strip()
+            elif "roup" in ref:
+                continue
+            else:
+                u = w.users.get(id=mid)
+                ident, rot = (u.user_name or "").strip(), (u.display_name or "").strip()
+        except Exception as exc:
+            erro = f"{type(exc).__name__}: {exc}"
+            ident = rot = (m.display or "").strip()
+        if ident:
+            out.setdefault(ident, rot or ident)
+    if erro and not out:
+        st.session_state["_grupos_erro"] = f"resolver membros: {erro}"
+    return sorted(
+        [{"ident": i, "rotulo": r or i} for i, r in out.items()],
+        key=lambda d: (d["rotulo"] or d["ident"]).lower(),
+    )
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def buscar_principais(termo: str) -> list[dict]:
     """Type-ahead de usuário/SP por nome ou login, via filtro SCIM server-side
@@ -2396,7 +2442,7 @@ def _clear_cad_caches() -> None:
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
         list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
         list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso, list_grupos,
-        buscar_principais,
+        buscar_principais, membros_do_grupo,
     ):
         try:
             f.clear()
@@ -5087,21 +5133,48 @@ def _fmt_principal(x: dict) -> str:
     return f'{x["rotulo"]}  ·  {x["ident"]}' if x["rotulo"] != x["ident"] else x["ident"]
 
 
+def _busca_usuario(key_prefix: str) -> str | None:
+    """Type-ahead de usuário/SP no diretório (filtro SCIM server-side).
+    Retorna o `ident` escolhido/digitado, ou None."""
+    termo = st.text_input(
+        "Buscar por nome ou login", key=f"{key_prefix}_busca",
+        placeholder="ex.: joao.silva  /  João Silva  /  teste-usuario",
+    )
+    cands = buscar_principais(termo)
+    erro = st.session_state.get("_grupos_erro")
+    if termo and erro:
+        st.caption(f"⚠️ diagnóstico (busca): {erro}")
+    if cands:
+        m = st.selectbox(
+            "Resultado", options=cands, format_func=_fmt_principal,
+            key=f"{key_prefix}_busca_sel",
+        )
+        return m["ident"]
+    if termo and len(termo.strip()) >= 2:
+        st.caption("Ninguém encontrado — informe o identificador exato abaixo.")
+    return st.text_input(
+        "Usuário (identificador exato)", key=f"{key_prefix}_u_manual"
+    ).strip() or None
+
+
 def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str | None]:
-    """Componente: escolhe o **usuário** por busca type-ahead no diretório e,
-    opcionalmente, o **grupo** (só rótulo).
+    """Componente: escolhe o **grupo** (Entra ID) e, dentro dele, o **usuário**.
+
+    Ao escolher um grupo, o segundo campo lista os membros dele
+    (``membros_do_grupo`` — custo limitado ao tamanho do grupo). Um expander
+    permite buscar qualquer usuário do diretório (ex.: visitante de outra
+    franquia). Sem grupo (ou grupo sem membros) → busca direta.
 
     Retorna (grupo_nome, grupo_id, usuario_ident). O `usuario_ident` é o que
-    entra na tabela — e é o que o UDF ABAC casa com current_user() (userName
-    para pessoa, applicationId para service principal).
+    o UDF ABAC casa com current_user() (userName p/ pessoa, applicationId p/ SP).
     """
     grupos = list_grupos()
 
-    # --- grupo: rótulo opcional ---
     g_nome = g_id = None
+    membros: list[dict] = []
     if grupos:
         escolha = st.selectbox(
-            "Grupo (Entra ID) — rótulo, opcional",
+            "Grupo (Entra ID)",
             options=[_SGU_NENHUM] + [g["nome"] for g in grupos] + [_SGU_MANUAL],
             key=f"{key_prefix}_grupo",
         )
@@ -5110,6 +5183,7 @@ def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str
         elif escolha != _SGU_NENHUM:
             g = next(x for x in grupos if x["nome"] == escolha)
             g_nome, g_id = g["nome"], g["id"]
+            membros = membros_do_grupo(g_id)
     else:
         erro = st.session_state.get("_grupos_erro")
         if erro:
@@ -5118,32 +5192,22 @@ def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str
             "Grupo (Entra ID) — opcional", key=f"{key_prefix}_grupo_txt2"
         ).strip() or None
 
-    # --- usuário: busca type-ahead (escala; não depende de membership) ---
-    termo = st.text_input(
-        "Usuário — buscar por nome ou login *", key=f"{key_prefix}_busca",
-        placeholder="ex.: joao.silva  /  João Silva  /  teste-usuario",
-    )
-    cands = buscar_principais(termo)
-    erro = st.session_state.get("_grupos_erro")
-    if termo and erro:
-        st.caption(f"⚠️ diagnóstico (busca): {erro}")
-
-    if cands:
+    if membros:
         m = st.selectbox(
-            "Resultado *", options=cands, format_func=_fmt_principal,
+            "Usuário (membro do grupo) *", options=membros, format_func=_fmt_principal,
             key=f"{key_prefix}_membro",
         )
-        return (g_nome, g_id, m["ident"])
+        ident = m["ident"]
+        with st.expander("Usuário não está no grupo? Buscar no diretório"):
+            ident = _busca_usuario(key_prefix) or ident
+        return (g_nome, g_id, ident)
 
-    if termo and len(termo.strip()) >= 2:
+    if g_id:
         st.caption(
-            "Ninguém encontrado na busca — informe o identificador exato "
-            "(o que o UDF casa com `current_user()`)."
+            "Este grupo não retornou membros (grupo vazio, ou o SP não conseguiu "
+            "resolvê-los). Busque o usuário no diretório:"
         )
-    u = st.text_input(
-        "Usuário (identificador exato) *", key=f"{key_prefix}_u_manual"
-    ).strip()
-    return (g_nome, g_id, u or None)
+    return (g_nome, g_id, _busca_usuario(key_prefix))
 
 
 def page_mapa_dominio_acesso() -> None:
