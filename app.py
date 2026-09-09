@@ -3776,9 +3776,10 @@ def _form_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict], user: 
 def page_stewards() -> None:
     st.title("🧑‍💼 Data Owners & Stewards")
     st.caption(
-        "Cadastro de responsáveis vinculados à árvore **Franquia › Domínio › "
-        "Sub-domínio**. Escolha logo abaixo se este registro é um **Data Owner** "
-        "ou um **Data Steward** — os dois usam o mesmo cadastro."
+        "Cadastro de responsáveis pela árvore **Franquia › Domínio › Sub-domínio**. "
+        "O vínculo mínimo é o **domínio**; o sub-domínio é opcional (deixe em "
+        "“todo o domínio” para um responsável do domínio inteiro). Escolha logo "
+        "abaixo se é um **Data Owner** ou um **Data Steward** — mesmo cadastro."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
@@ -3797,7 +3798,9 @@ def page_stewards() -> None:
     if not show.empty:
         show["Franquia"] = show["dominio_id"].map(_fr_de_dom)
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
-        show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, i))
+        show["Sub-domínio"] = show["subdominio_id"].map(
+            lambda i: "(todo o domínio)" if pd.isna(i) else sub_nome.get(i, i)
+        )
     st.dataframe(
         (show.rename(columns={"tipo": "Tipo", "nome": "Nome", "email": "E-mail"})
              [["Tipo", "Nome", "E-mail", "Franquia", "Domínio", "Sub-domínio"]] if not show.empty else show),
@@ -3809,13 +3812,6 @@ def page_stewards() -> None:
         return
     if not doms:
         st.warning("Cadastre um **Domínio** primeiro (menu Cadastros → Domínios).")
-        return
-    if not subs:
-        st.warning(
-            "Já há domínio(s), mas **nenhum sub-domínio** cadastrado — e o responsável "
-            "é vinculado no nível do sub-domínio. Vá em Cadastros → Domínios, "
-            "selecione a franquia e o domínio e adicione um sub-domínio."
-        )
         return
 
     st.divider()
@@ -3868,14 +3864,20 @@ def page_stewards() -> None:
         format_func=lambda i: f'{_fr_de_dom(i)} › {dom_nome.get(i, i)}', key="stw_dom",
     )
     sub_ids = [s["id"] for s in subs if s["dominio_id"] == dom_id]
-    if not sub_ids:
-        st.warning("Este domínio não tem sub-domínios. Cadastre um sub-domínio primeiro.")
     sub_id = st.selectbox(
-        "Sub-domínio *", options=sub_ids, format_func=lambda i: sub_nome.get(i, i),
-        key="stw_sub", disabled=not sub_ids,
-    ) if sub_ids else None
+        "Sub-domínio", options=[None] + sub_ids,
+        format_func=lambda i: "— todo o domínio" if i is None else sub_nome.get(i, i),
+        key="stw_sub",
+    )
+    st.caption(
+        "Deixe em **“todo o domínio”** para um responsável do domínio inteiro "
+        "(típico de **Data Owner**); escolha um sub-domínio para um recorte mais fino."
+    )
 
-    if st.button(f"💾 Adicionar {tipo_label}", type="primary", disabled=not sub_ids):
+    sub_sql = "NULL" if sub_id is None else str(int(sub_id))
+    sub_match = "subdominio_id IS NULL" if sub_id is None else f"subdominio_id = {int(sub_id)}"
+
+    if st.button(f"💾 Adicionar {tipo_label}", type="primary"):
         if not (nome and email):
             st.warning("Selecione/informe o usuário (nome e e-mail).")
             return
@@ -3885,18 +3887,18 @@ def page_stewards() -> None:
         if _count(
             f"SELECT count(*) FROM {_cad('data_stewards')} WHERE tipo = {q_str(tipo)} "
             f"AND dominio_id = {int(dom_id)} "
-            f"AND subdominio_id = {int(sub_id)} AND lower(email) = {q_str(email.lower())}"
+            f"AND {sub_match} AND lower(email) = {q_str(email.lower())}"
         ):
             st.error(f"Esse {tipo_label} já está vinculado a este domínio/sub-domínio.")
             return
         # INSERT atômico: bloqueia o mesmo e-mail (+ tipo) no mesmo domínio/sub-domínio.
         run_exec(
             f"INSERT INTO {_cad('data_stewards')} (tipo, dominio_id, subdominio_id, nome, email, criado_em, criado_por) "
-            f"SELECT {q_str(tipo)}, {int(dom_id)}, {int(sub_id)}, {q_str(nome)}, {q_str(email)}, current_timestamp(), {q_str(actor)} "
+            f"SELECT {q_str(tipo)}, {int(dom_id)}, {sub_sql}, {q_str(nome)}, {q_str(email)}, current_timestamp(), {q_str(actor)} "
             f"FROM (SELECT 1) WHERE NOT EXISTS "
             f"(SELECT 1 FROM {_cad('data_stewards')} WHERE tipo = {q_str(tipo)} "
             f"AND dominio_id = {int(dom_id)} "
-            f"AND subdominio_id = {int(sub_id)} AND lower(email) = {q_str(email.lower())})"
+            f"AND {sub_match} AND lower(email) = {q_str(email.lower())})"
         )
         _finish_write(f"{tipo} adicionado.")
 
@@ -3908,7 +3910,8 @@ def page_stewards() -> None:
         opts = [
             f'[{r["tipo"]}] {r["nome"]} <{r["email"]}> — {_fr_de_dom(r["dominio_id"])} › '
             f'{dom_nome.get(r["dominio_id"], r["dominio_id"])} › '
-            f'{sub_nome.get(r["subdominio_id"], r["subdominio_id"])} (id {r["id"]})'
+            f'{"(todo o domínio)" if pd.isna(r["subdominio_id"]) else sub_nome.get(r["subdominio_id"], r["subdominio_id"])}'
+            f' (id {r["id"]})'
             for r in recs
         ]
         sel = st.selectbox("Registro", options=opts, key="stw_del_sel")
@@ -4216,7 +4219,7 @@ def _select_pessoa_cadastrada(
     candidatos = [
         p for p in pessoas
         if p["tipo"] == tipo and dom_id is not None and p["dominio_id"] == dom_id
-        and (sub_id is None or p["subdominio_id"] == sub_id)
+        and (sub_id is None or p["subdominio_id"] == sub_id or pd.isna(p.get("subdominio_id")))
     ]
     if candidatos:
         opts = ["(nenhum)"] + [f'{p["nome"]} <{p["email"]}>' for p in candidatos]
