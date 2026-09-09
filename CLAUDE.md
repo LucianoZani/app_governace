@@ -276,10 +276,12 @@ própria UI do app (que lê como SP).
      manualmente).
   2. **Esteira = fluxo real Comgás**: Azure DevOps Repos, fluxo por PR. Dev
      sobe arquivos → PR (revisão = gate) → merge `main` → job/pipeline leva
-     pro Databricks (**mecanismo a confirmar** — pipeline c/ CLI? Git folder +
-     job de pull? só sync ou já deploya?) → instalação a partir do Databricks
-     (runbook). Diagrama refeito (fluxo único, não mais before/after CI
-     genérico). Tabela "a confirmar com o time de DevOps".
+     pro Databricks → instalação a partir do Databricks (runbook). Diagrama
+     refeito (fluxo único, não mais before/after CI genérico). **A tabela "a
+     confirmar com o time de DevOps" foi retirada a pedido do usuário** — a
+     seção só descreve o fluxo + o que o produto encaixa nele (bundle,
+     `app.yaml`, migração no 1º acesso). NFR row "Esteira" chip → "processo
+     Comgás".
   3. **IA = qual modelo**, não interno-vs-externo. Comgás tem **Llama, GPT e
      Claude** disponíveis; escolha via `LLM_ENDPOINT`. Sem citar versão.
      Removidas as menções a "provedor externo faz a pergunta sair" / privacidade
