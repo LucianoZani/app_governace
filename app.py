@@ -53,6 +53,7 @@ import os
 import re
 import time
 import unicodedata
+import uuid
 from datetime import date, timedelta
 from dataclasses import dataclass
 
@@ -1818,6 +1819,32 @@ def ensure_cadastro_tables() -> bool:
         f"memoria_calculo STRING, restricoes STRING, "
         f"dimensao_tabelas STRING, metrica_tabelas STRING, "
         f"status_publicacao STRING, expr_validada STRING, metric_view_publicada STRING, {audit})",
+        # --- Cadastro de Acesso a Dados (blueprint "Cadastro de Acesso") ---
+        # Tabelas de apoio que alimentam políticas ABAC (row filter / column
+        # mask) do Unity Catalog. Hoje mantidas via SQL na mão; aqui viram CRUD.
+        # SKELETON: por ora vivem no schema de cadastros do app; na instalação
+        # real (Comgás) devem ir para um schema de SEGURANÇA dedicado, com read
+        # para o contexto que executa o UDF ABAC — ver blueprint. Duas tabelas
+        # INDEPENDENTES por design (uma não deriva da outra).
+        #
+        # `usuario` = identificador que o UDF ABAC casa com current_user()
+        # (e-mail p/ pessoa, application-id p/ SP). `dominio_id`/`subdominio_id`
+        # referenciam o cadastro vivo de domínio; `dominio` guarda o nome
+        # denormalizado (o que a tag `domain` dos dados costuma usar) — Comgás
+        # confirma o formato (slug vs. nome).
+        f"CREATE TABLE IF NOT EXISTS {_cad('mapa_dominio_acesso')} "
+        f"(id STRING, grupo STRING, grupo_id STRING, usuario STRING, "
+        f"dominio_id BIGINT, subdominio_id BIGINT, dominio STRING, subdominio STRING, {audit})",
+        f"CREATE TABLE IF NOT EXISTS {_cad('mapa_sensibilidade_acesso')} "
+        f"(id STRING, grupo STRING, grupo_id STRING, usuario STRING, "
+        f"nivel_max_confidencialidade STRING, pode_ver_dado_pessoal BOOLEAN, "
+        f"pode_ver_dado_pessoal_sensivel BOOLEAN, {audit})",
+        # Log genérico de CRUD de cadastro (antes/depois) — o app só tinha
+        # auditoria em linha + os logs específicos de comentário/tag. Reusável
+        # por qualquer cadastro; por ora só as duas telas de Acesso a Dados.
+        f"CREATE TABLE IF NOT EXISTS {_cad('log_cadastros')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, usuario STRING, tabela STRING, "
+        f"operacao STRING, registro_id STRING, antes STRING, depois STRING, criado_em TIMESTAMP)",
     ]
     for stmt in ddl:
         run_exec(stmt)  # SP
@@ -2210,11 +2237,86 @@ def list_users_for_search() -> list[dict]:
     return sorted(res, key=lambda d: d["nome"].lower())
 
 
+# ---------------------------------------------------------------------------
+# Cadastro de Acesso a Dados (blueprint) — grupos, mapas, log de CRUD
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def list_grupos() -> list[dict]:
+    """Grupos do workspace + membros, para o dropdown grupo → usuário.
+
+    ``[{"id", "nome", "membros": [{"id", "ident"}]}]``. ``ident`` é o e-mail
+    (pessoa) ou o application-id / nome (service principal) — é o que vai em
+    ``mapa_*.usuario``. Via SP. ``[]`` se o SP não puder listar grupos (mesma
+    classe de permissão do ``w.users.list()`` que o app já usa).
+    """
+    w = get_client()
+    out: list[dict] = []
+    try:
+        for g in w.groups.list(attributes="id,displayName,members"):
+            membros = [
+                {"id": m.value, "ident": (m.display or m.value or "").strip()}
+                for m in (g.members or [])
+                if (m.display or m.value)
+            ]
+            out.append({"id": g.id, "nome": (g.display_name or g.id or "").strip(),
+                        "membros": sorted(membros, key=lambda d: d["ident"].lower())})
+    except Exception:
+        return []
+    return sorted(out, key=lambda d: d["nome"].lower())
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_mapa_dominio_acesso() -> pd.DataFrame:
+    return run_query(
+        "SELECT id, grupo, grupo_id, usuario, dominio_id, subdominio_id, "
+        "dominio, subdominio, criado_por, criado_em, atualizado_por, atualizado_em "
+        f"FROM {_cad('mapa_dominio_acesso')} ORDER BY usuario, dominio"
+    )
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_mapa_sensibilidade_acesso() -> pd.DataFrame:
+    return run_query(
+        "SELECT id, grupo, grupo_id, usuario, nivel_max_confidencialidade, "
+        "pode_ver_dado_pessoal, pode_ver_dado_pessoal_sensivel, "
+        "criado_por, criado_em, atualizado_por, atualizado_em "
+        f"FROM {_cad('mapa_sensibilidade_acesso')} ORDER BY usuario"
+    )
+
+
+def _qn(value) -> str:
+    """``q_str``, mas ``None`` vira ``NULL`` (colunas anuláveis)."""
+    return "NULL" if value is None else q_str(str(value))
+
+
+def _log_cadastro(usuario: str, tabela: str, operacao: str,
+                  registro_id: str, antes: dict | None, depois: dict | None) -> None:
+    """Registra um CRUD de cadastro (antes/depois em JSON). Best-effort —
+    falha aqui nunca bloqueia a operação principal."""
+    try:
+        run_exec(
+            f"INSERT INTO {_cad('log_cadastros')} "
+            "(usuario, tabela, operacao, registro_id, antes, depois, criado_em) VALUES ("
+            f"{q_str(usuario)}, {q_str(tabela)}, {q_str(operacao)}, {q_str(str(registro_id))}, "
+            f"{_qn(json.dumps(antes, ensure_ascii=False, default=str) if antes else None)}, "
+            f"{_qn(json.dumps(depois, ensure_ascii=False, default=str) if depois else None)}, "
+            "current_timestamp())"
+        )
+    except Exception:
+        pass
+
+
+_NIVEIS_CONFIDENCIALIDADE = ["publico", "interno", "confidencial", "restrito"]
+
+
 def _clear_cad_caches() -> None:
     for f in (
         list_dominios, list_subdominios, list_stewards, list_permissoes,
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
         list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
+        list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso,
     ):
         try:
             f.clear()
@@ -4703,6 +4805,240 @@ def page_consulta_termos() -> None:
     _render_termo_detalhe(recs[opts.index(sel)], dom_nome, sub_nome)
 
 
+# ---------------------------------------------------------------------------
+# Cadastro de Acesso a Dados (blueprint) — SKELETON
+# ---------------------------------------------------------------------------
+# Duas telas CRUD sobre tabelas que alimentam políticas ABAC do UC. Acesso
+# restrito a admin (o blueprint deixa "perfil admin de acesso dedicado" como
+# pergunta aberta). Log de antes/depois em `log_cadastros`.
+
+
+def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str | None]:
+    """Componente: escolhe um grupo do workspace, depois um membro dele.
+
+    Retorna (grupo_nome, grupo_id, usuario_ident). O `usuario_ident` é o que
+    entra na tabela — e é o que o UDF ABAC precisa casar com current_user().
+    Fallback manual se a listagem de grupos falhar.
+    """
+    grupos = list_grupos()
+    if not grupos:
+        st.warning(
+            "Não foi possível listar grupos do workspace (o SP do app pode não "
+            "ter leitura de SCIM Groups). Informe o grupo e o usuário manualmente."
+        )
+        g_nome = st.text_input("Grupo (Entra ID) *", key=f"{key_prefix}_g_manual").strip()
+        u = st.text_input("Usuário (identificador que o UDF casa) *", key=f"{key_prefix}_u_manual").strip()
+        return (g_nome or None, None, u or None)
+
+    g = st.selectbox(
+        "Grupo (Entra ID) *", options=grupos,
+        format_func=lambda x: f'{x["nome"]}  ({len(x["membros"])} membro(s))',
+        key=f"{key_prefix}_grupo",
+    )
+    membros = g["membros"]
+    if not membros:
+        st.caption("Este grupo não tem membros.")
+        return (g["nome"], g["id"], None)
+    m = st.selectbox(
+        "Usuário (membro do grupo) *", options=membros,
+        format_func=lambda x: x["ident"], key=f"{key_prefix}_membro",
+    )
+    return (g["nome"], g["id"], m["ident"])
+
+
+def page_mapa_dominio_acesso() -> None:
+    st.title("🗺️ Acesso por Domínio")
+    st.caption(
+        "Quais **domínios de negócio** cada usuário pode ver. Alimenta a "
+        "política ABAC (row filter) do Unity Catalog. Um usuário pode ter "
+        "várias linhas (cross-domínio = ter mais de uma linha, nunca uma flag). "
+        "**SKELETON** — em validação; a tabela vive no schema de cadastros do "
+        "app por ora."
+    )
+    _show_cad_feedback()
+    actor = st.session_state.get("user", "")
+
+    doms = list_dominios().to_dict("records")
+    subs = list_subdominios().to_dict("records")
+    dom_nome = {d["id"]: d["nome"] for d in doms}
+    sub_nome = {s["id"]: s["nome"] for s in subs}
+
+    df = list_mapa_dominio_acesso()
+    show = df.copy()
+    if not show.empty:
+        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "(todo o domínio)"))
+    st.dataframe(
+        (show.rename(columns={"grupo": "Grupo", "usuario": "Usuário"})
+             [["Grupo", "Usuário", "Domínio", "Sub-domínio", "criado_por", "criado_em"]]
+         if not show.empty else show),
+        use_container_width=True, hide_index=True,
+    )
+
+    if not doms:
+        st.warning("Cadastre um **Domínio** primeiro (menu Cadastros).")
+        return
+
+    st.divider()
+    st.markdown("#### Adicionar acesso")
+    g_nome, g_id, usuario = _seletor_grupo_usuario("mda")
+
+    dom_ids = [d["id"] for d in doms]
+    dom_id = st.selectbox("Domínio *", options=dom_ids,
+                          format_func=lambda i: dom_nome.get(i, i), key="mda_dom")
+    sub_ids = [s["id"] for s in subs if s["dominio_id"] == dom_id]
+    sub_id = st.selectbox(
+        "Sub-domínio (opcional — vazio = domínio inteiro)",
+        options=[None] + sub_ids,
+        format_func=lambda i: "(todo o domínio)" if i is None else sub_nome.get(i, i),
+        key="mda_sub",
+    )
+
+    if st.button("💾 Adicionar", type="primary"):
+        if not (g_nome and usuario):
+            st.warning("Selecione/informe o grupo e o usuário.")
+            return
+        dup = _count(
+            f"SELECT count(*) FROM {_cad('mapa_dominio_acesso')} "
+            f"WHERE lower(usuario) = {q_str(usuario.lower())} AND dominio_id = {int(dom_id)} "
+            f"AND {'subdominio_id IS NULL' if sub_id is None else f'subdominio_id = {int(sub_id)}'}"
+        )
+        if dup:
+            st.error("Esse usuário já tem esse acesso (mesmo domínio/sub-domínio).")
+            return
+        novo_id = str(uuid.uuid4())
+        depois = {
+            "grupo": g_nome, "usuario": usuario, "dominio": dom_nome.get(dom_id),
+            "subdominio": None if sub_id is None else sub_nome.get(sub_id),
+        }
+        run_exec(
+            f"INSERT INTO {_cad('mapa_dominio_acesso')} "
+            "(id, grupo, grupo_id, usuario, dominio_id, subdominio_id, dominio, subdominio, "
+            "criado_em, criado_por) VALUES ("
+            f"{q_str(novo_id)}, {q_str(g_nome)}, {_qn(g_id)}, {q_str(usuario)}, "
+            f"{int(dom_id)}, {'NULL' if sub_id is None else int(sub_id)}, "
+            f"{_qn(dom_nome.get(dom_id))}, "
+            f"{_qn(None if sub_id is None else sub_nome.get(sub_id))}, "
+            f"current_timestamp(), {q_str(actor)})"
+        )
+        _log_cadastro(actor, "mapa_dominio_acesso", "INSERT", novo_id, None, depois)
+        _finish_write("Acesso por domínio adicionado.")
+
+    recs = df.to_dict("records")
+    if recs:
+        st.divider()
+        st.markdown("#### Excluir")
+        opts = [
+            f'{r["usuario"]} → {dom_nome.get(r["dominio_id"], r["dominio_id"])}'
+            f'{"" if pd.isna(r["subdominio_id"]) else " › " + str(sub_nome.get(r["subdominio_id"], r["subdominio_id"]))}'
+            f'  (id {r["id"][:8]})'
+            for r in recs
+        ]
+        sel = st.selectbox("Registro", options=opts, key="mda_del")
+        if st.button("🗑️ Excluir registro selecionado"):
+            r = recs[opts.index(sel)]
+            run_exec(f"DELETE FROM {_cad('mapa_dominio_acesso')} WHERE id = {q_str(r['id'])}")
+            _log_cadastro(actor, "mapa_dominio_acesso", "DELETE", r["id"],
+                          {"usuario": r["usuario"], "dominio": r.get("dominio")}, None)
+            _finish_write("Registro excluído.")
+
+
+def page_mapa_sensibilidade_acesso() -> None:
+    st.title("🔐 Acesso por Sensibilidade")
+    st.caption(
+        "Nível de confidencialidade e categorias de dado pessoal que cada "
+        "usuário pode ver, **independente de domínio**. Exatamente **uma linha "
+        "por usuário** — se já existir, o formulário abre em modo edição. "
+        "**SKELETON** — em validação."
+    )
+    _show_cad_feedback()
+    actor = st.session_state.get("user", "")
+
+    df = list_mapa_sensibilidade_acesso()
+    st.dataframe(
+        (df.rename(columns={
+            "grupo": "Grupo", "usuario": "Usuário",
+            "nivel_max_confidencialidade": "Nível máx.",
+            "pode_ver_dado_pessoal": "Dado pessoal",
+            "pode_ver_dado_pessoal_sensivel": "Dado pessoal sensível",
+        })[["Grupo", "Usuário", "Nível máx.", "Dado pessoal", "Dado pessoal sensível",
+            "criado_por", "atualizado_em"]] if not df.empty else df),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.divider()
+    st.markdown("#### Adicionar / editar")
+    g_nome, g_id, usuario = _seletor_grupo_usuario("msa")
+
+    atual = None
+    if usuario and not df.empty:
+        m = df[df["usuario"].str.lower() == usuario.lower()]
+        if not m.empty:
+            atual = m.iloc[0].to_dict()
+            st.info(f"**{usuario}** já tem acesso cadastrado — salvando você **edita** a linha existente.")
+
+    nivel = st.selectbox(
+        "Nível máx. de confidencialidade *", options=_NIVEIS_CONFIDENCIALIDADE,
+        index=_NIVEIS_CONFIDENCIALIDADE.index(atual["nivel_max_confidencialidade"])
+        if atual and atual.get("nivel_max_confidencialidade") in _NIVEIS_CONFIDENCIALIDADE else 1,
+        key="msa_nivel",
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        pdp = st.checkbox("Pode ver dado pessoal",
+                          value=bool(atual["pode_ver_dado_pessoal"]) if atual else False, key="msa_pdp")
+    with c2:
+        pdps = st.checkbox("Pode ver dado pessoal sensível",
+                           value=bool(atual["pode_ver_dado_pessoal_sensivel"]) if atual else False, key="msa_pdps")
+
+    if st.button("💾 Salvar", type="primary"):
+        if not (g_nome and usuario):
+            st.warning("Selecione/informe o grupo e o usuário.")
+            return
+        depois = {"grupo": g_nome, "usuario": usuario, "nivel": nivel,
+                  "dado_pessoal": pdp, "dado_pessoal_sensivel": pdps}
+        if atual:
+            run_exec(
+                f"UPDATE {_cad('mapa_sensibilidade_acesso')} SET "
+                f"grupo = {q_str(g_nome)}, grupo_id = {_qn(g_id)}, "
+                f"nivel_max_confidencialidade = {q_str(nivel)}, "
+                f"pode_ver_dado_pessoal = {str(pdp).lower()}, "
+                f"pode_ver_dado_pessoal_sensivel = {str(pdps).lower()}, "
+                f"atualizado_em = current_timestamp(), atualizado_por = {q_str(actor)} "
+                f"WHERE id = {q_str(atual['id'])}"
+            )
+            _log_cadastro(actor, "mapa_sensibilidade_acesso", "UPDATE", atual["id"],
+                          {k: atual.get(k) for k in
+                           ("nivel_max_confidencialidade", "pode_ver_dado_pessoal",
+                            "pode_ver_dado_pessoal_sensivel")}, depois)
+            _finish_write("Acesso por sensibilidade atualizado.")
+        else:
+            novo_id = str(uuid.uuid4())
+            run_exec(
+                f"INSERT INTO {_cad('mapa_sensibilidade_acesso')} "
+                "(id, grupo, grupo_id, usuario, nivel_max_confidencialidade, "
+                "pode_ver_dado_pessoal, pode_ver_dado_pessoal_sensivel, criado_em, criado_por) VALUES ("
+                f"{q_str(novo_id)}, {q_str(g_nome)}, {_qn(g_id)}, {q_str(usuario)}, "
+                f"{q_str(nivel)}, {str(pdp).lower()}, {str(pdps).lower()}, "
+                f"current_timestamp(), {q_str(actor)})"
+            )
+            _log_cadastro(actor, "mapa_sensibilidade_acesso", "INSERT", novo_id, None, depois)
+            _finish_write("Acesso por sensibilidade adicionado.")
+
+    recs = df.to_dict("records")
+    if recs:
+        st.divider()
+        st.markdown("#### Excluir (usuário cai no default mais restritivo)")
+        opts = [f'{r["usuario"]}  ·  {r["nivel_max_confidencialidade"]}  (id {r["id"][:8]})' for r in recs]
+        sel = st.selectbox("Registro", options=opts, key="msa_del")
+        if st.button("🗑️ Excluir registro selecionado"):
+            r = recs[opts.index(sel)]
+            run_exec(f"DELETE FROM {_cad('mapa_sensibilidade_acesso')} WHERE id = {q_str(r['id'])}")
+            _log_cadastro(actor, "mapa_sensibilidade_acesso", "DELETE", r["id"],
+                          {"usuario": r["usuario"]}, None)
+            _finish_write("Registro excluído.")
+
+
 def page_permissoes() -> None:
     st.title("🔒 Usuários")
     st.caption(
@@ -5610,6 +5946,14 @@ def main() -> None:
     # `power_steward` dão acesso a ela).
     if is_admin:
         pages["Admin"] = [st.Page(page_permissoes, title="Usuários", icon="🔒")]
+
+    # Cadastro de Acesso a Dados (blueprint) — SKELETON, admin-only por ora
+    # (o blueprint deixa "perfil admin de acesso dedicado" como decisão aberta).
+    if is_admin:
+        pages["Acesso a Dados"] = [
+            st.Page(page_mapa_dominio_acesso, title="Acesso por Domínio", icon="🗺️"),
+            st.Page(page_mapa_sensibilidade_acesso, title="Acesso por Sensibilidade", icon="🔐"),
+        ]
 
     # Menu Governança (só a página Governança de Dados + dashboards):
     # liberado por `ver_logs` (rótulo "Governança"), `aprovador_tags` ou
