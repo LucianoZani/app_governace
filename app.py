@@ -3460,6 +3460,7 @@ _HIER_NOVA_FR = "➕ nova franquia…"
 _HIER_NOVO_DOM = "➕ novo domínio…"
 _HIER_NOVO_SUB = "➕ novo sub-domínio…"
 _HIER_NENHUM = "— (nenhum)"
+_HIER_SEM_FR = "(sem franquia — a vincular)"
 
 
 def page_dominios() -> None:
@@ -3544,21 +3545,38 @@ def _render_arvore_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict
 def _form_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict], user: str) -> None:
     """Formulário único em cascata: cria/edita qualquer nível da árvore."""
     fr_por_nome = {f["nome"]: f for f in frs}
-    sel_fr = st.selectbox("Franquia *", options=sorted(fr_por_nome) + [_HIER_NOVA_FR], key="hier_fr")
+    tem_orfaos = any(_hier_franquia_id(d) is None for d in doms)
+    fr_opts = sorted(fr_por_nome)
+    if tem_orfaos:
+        fr_opts.append(_HIER_SEM_FR)
+    fr_opts.append(_HIER_NOVA_FR)
+    sel_fr = st.selectbox("Franquia *", options=fr_opts, key="hier_fr")
     criando_fr = sel_fr == _HIER_NOVA_FR
-    fr_atual = None if criando_fr else fr_por_nome[sel_fr]
-    fr_id = None if criando_fr else int(fr_atual["id"])
+    sem_fr = sel_fr == _HIER_SEM_FR
+    fr_atual = fr_por_nome.get(sel_fr) if not (criando_fr or sem_fr) else None
+    fr_id = int(fr_atual["id"]) if fr_atual else None
     novo_fr_nome = st.text_input("Nome da nova franquia *", key="hier_fr_novo") if criando_fr else ""
 
-    dom_da_fr = [] if criando_fr else sorted(
-        [d for d in doms if _hier_franquia_id(d) == fr_id],
-        key=lambda x: (x.get("nome") or "").lower(),
-    )
+    if criando_fr:
+        dom_da_fr: list[dict] = []
+    elif sem_fr:
+        dom_da_fr = sorted(
+            [d for d in doms if _hier_franquia_id(d) is None],
+            key=lambda x: (x.get("nome") or "").lower(),
+        )
+    else:
+        dom_da_fr = sorted(
+            [d for d in doms if _hier_franquia_id(d) == fr_id],
+            key=lambda x: (x.get("nome") or "").lower(),
+        )
     dom_por_nome = {d["nome"]: d for d in dom_da_fr}
+    dom_opts = [_HIER_NENHUM] + list(dom_por_nome)
+    if not sem_fr:  # criar domínio só sob franquia real/nova
+        dom_opts.append(_HIER_NOVO_DOM)
     sel_dom = st.selectbox(
-        "Domínio", options=[_HIER_NENHUM] + list(dom_por_nome) + [_HIER_NOVO_DOM],
-        key=f"hier_dom::{sel_fr}",
-        help="Deixe em “(nenhum)” para criar ou editar apenas a franquia.",
+        "Domínio", options=dom_opts, key=f"hier_dom::{sel_fr}",
+        help=("Selecione um domínio sem franquia para vinculá-lo ou excluí-lo."
+              if sem_fr else "Deixe em “(nenhum)” para criar ou editar apenas a franquia."),
     )
     criando_dom = sel_dom == _HIER_NOVO_DOM
     dom_atual = dom_por_nome.get(sel_dom) if sel_dom not in (_HIER_NENHUM, _HIER_NOVO_DOM) else None
@@ -3587,6 +3605,10 @@ def _form_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict], user: 
     elif criando_dom:
         st.caption("Salve o domínio primeiro; depois selecione-o aqui para adicionar sub-domínios.")
 
+    if sem_fr and not dom_atual:
+        st.caption("Selecione um domínio da lista para vinculá-lo a uma franquia ou excluí-lo.")
+        return
+
     # Nível-alvo + modo
     if criando_sub:
         nivel, modo, alvo = "sub", "criar", None
@@ -3607,6 +3629,23 @@ def _form_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict], user: 
     nome_edit = None
     if modo == "editar":
         nome_edit = st.text_input(f"Nome do {rotulo} *", value=alvo.get("nome") or "", key=f"hier_nome::{rk}")
+
+    # Reatribuir franquia ao editar um domínio (resgata domínios sem franquia
+    # e permite mover de uma franquia para outra).
+    franquia_destino_id = None
+    if modo == "editar" and nivel == "dominio":
+        if not fr_por_nome:
+            st.warning("Crie uma franquia primeiro para poder vincular este domínio.")
+        else:
+            fr_nomes = sorted(fr_por_nome)
+            atual_fr = next(
+                (n for n, f in fr_por_nome.items() if int(f["id"]) == (_hier_franquia_id(alvo) or -1)),
+                None,
+            )
+            idx = fr_nomes.index(atual_fr) if atual_fr in fr_nomes else 0
+            escolha = st.selectbox("Franquia *", options=fr_nomes, index=idx, key=f"hier_fr_reassign::{rk}")
+            franquia_destino_id = int(fr_por_nome[escolha]["id"])
+
     desc_in = st.text_input(
         "Descrição", value=(alvo.get("descricao") or "") if alvo else "", key=f"hier_desc::{rk}",
     )
@@ -3702,8 +3741,13 @@ def _form_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict], user: 
             )
         if dupe:
             st.error(f"Já existe outr{'a' if nivel == 'franquia' else 'o'} {rotulo} com esse nome."); return
+        extra_set = ""
+        if nivel == "dominio":
+            if not franquia_destino_id:
+                st.warning("Escolha a franquia deste domínio."); return
+            extra_set = f"franquia_id = {int(franquia_destino_id)}, "
         run_exec(
-            f"UPDATE {_cad(tabela)} SET nome = {q_str(nome)}, descricao = {q_str(desc)}, "
+            f"UPDATE {_cad(tabela)} SET {extra_set}nome = {q_str(nome)}, descricao = {q_str(desc)}, "
             f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
             f"WHERE id = {int(alvo['id'])}"
         )
