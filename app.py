@@ -2272,77 +2272,78 @@ def list_users_for_search() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def list_grupos() -> list[dict]:
-    """Grupos do workspace + membros, para o dropdown grupo → usuário.
+    """``[{"id", "nome"}]`` dos grupos do workspace — só o rótulo.
 
-    ``[{"id", "nome", "membros": [{"ident", "rotulo"}]}]``. ``ident`` é o
-    identificador que vai em ``mapa_*.usuario`` e que o UDF ABAC casa com
-    ``current_user()``: e-mail (``userName``) para pessoa, ``applicationId``
-    para service principal. ``rotulo`` é só a exibição.
-
-    ⚠️ Fonte: ``groups.list()`` **sem** o parâmetro ``attributes`` — com o
-    filtro (mesmo pedindo ``members``) este workspace devolve ``members``
-    vazio. Os membros vêm da varredura de ``users``/``service_principals``
-    pelo atributo ``groups`` (invertido para grupo→membros), que dá o
-    identificador certo (``userName`` / ``applicationId``) em vez do id
-    numérico interno. Erros ficam em ``st.session_state["_grupos_erro"]``.
+    Os membros **não** são resolvidos aqui de propósito: (a) não escala em
+    diretório grande (varreria users + SPs inteiros), (b) o SCIM do Databricks
+    **não aceita** filtrar usuários por grupo (``groups.value eq`` → BadRequest).
+    O usuário é escolhido por busca type-ahead (``buscar_principais``). Erro em
+    ``st.session_state["_grupos_erro"]``.
     """
     st.session_state.pop("_grupos_erro", None)
     w = get_client(prefer_user=True)
-    nomes: dict[str, str] = {}
-    membros: dict[str, dict] = {}
+    try:
+        gs = [
+            {"id": g.id, "nome": (g.display_name or g.id or "").strip()}
+            for g in w.groups.list(attributes="id,displayName")
+            if g.id
+        ]
+    except Exception as exc:
+        st.session_state["_grupos_erro"] = f"groups.list: {type(exc).__name__}: {exc}"
+        return []
+    return sorted(gs, key=lambda d: d["nome"].lower())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def buscar_principais(termo: str) -> list[dict]:
+    """Type-ahead de usuário/SP por nome ou login, via filtro SCIM server-side
+    (``co`` = contains) — sempre limitado, nunca varre o diretório (escala).
+
+    ``[{"ident", "rotulo"}]``. ``ident`` é o que vai em ``mapa_*.usuario`` e o
+    UDF ABAC casa com ``current_user()``: ``userName`` (pessoa) /
+    ``applicationId`` (service principal).
+    """
+    termo = (termo or "").strip().replace('"', "")
+    if len(termo) < 2:
+        return []
+    w = get_client(prefer_user=True)
+    out: dict[str, str] = {}
     erros: list[str] = []
 
-    try:
-        for g in w.groups.list():
-            if g.id:
-                nomes[g.id] = (g.display_name or g.id).strip()
-    except Exception as exc:
-        erros.append(f"groups.list: {type(exc).__name__}: {exc}")
+    def _add_users(campo: str) -> None:
+        for u in w.users.list(
+            filter=f'{campo} co "{termo}"',
+            attributes="userName,displayName,active", count=25,
+        ):
+            ident = (u.user_name or "").strip()
+            if ident and getattr(u, "active", True) is not False:
+                out.setdefault(ident, (u.display_name or ident).strip())
 
-    def _inverter(rotulo_fonte, iterador, ident_de, rotulo_de):
+    for campo in ("userName", "displayName"):
         try:
-            for obj in iterador:
-                if getattr(obj, "active", True) is False:
-                    continue
-                ident = ident_de(obj)
-                if not ident:
-                    continue
-                for gr in (obj.groups or []):
-                    gid = getattr(gr, "value", None)
-                    if not gid:
-                        continue
-                    nomes.setdefault(gid, (getattr(gr, "display", None) or gid).strip())
-                    membros.setdefault(gid, {})[ident] = rotulo_de(obj)
+            _add_users(campo)
         except Exception as exc:
-            erros.append(f"{rotulo_fonte}: {type(exc).__name__}: {exc}")
+            erros.append(f"users({campo}): {type(exc).__name__}: {exc}")
+    try:
+        for s in w.service_principals.list(
+            filter=f'displayName co "{termo}"',
+            attributes="applicationId,displayName,active", count=25,
+        ):
+            ident = (s.application_id or "").strip()
+            if ident and getattr(s, "active", True) is not False:
+                out.setdefault(ident, (s.display_name or ident).strip())
+    except Exception as exc:
+        erros.append(f"service_principals: {type(exc).__name__}: {exc}")
 
-    _inverter(
-        "users", w.users.list(attributes="id,userName,displayName,active,groups"),
-        lambda u: (u.user_name or "").strip(),
-        lambda u: (u.display_name or u.user_name or "").strip(),
-    )
-    _inverter(
-        "service_principals",
-        w.service_principals.list(attributes="id,applicationId,displayName,active,groups"),
-        lambda s: (s.application_id or "").strip(),
-        lambda s: (s.display_name or s.application_id or "").strip(),
-    )
-
-    if erros:
+    out.pop("", None)
+    if erros and not out:
         st.session_state["_grupos_erro"] = " | ".join(erros)
-
-    out: list[dict] = []
-    for gid, nome in nomes.items():
-        itens = [
-            {"ident": ident, "rotulo": rotulo or ident}
-            for ident, rotulo in sorted(
-                membros.get(gid, {}).items(), key=lambda kv: (kv[1] or kv[0]).lower()
-            )
-        ]
-        out.append({"id": gid, "nome": nome, "membros": itens})
-    return sorted(out, key=lambda d: d["nome"].lower())
+    return sorted(
+        [{"ident": i, "rotulo": r or i} for i, r in out.items()],
+        key=lambda d: (d["rotulo"] or d["ident"]).lower(),
+    )
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -2395,6 +2396,7 @@ def _clear_cad_caches() -> None:
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
         list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
         list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso, list_grupos,
+        buscar_principais,
     ):
         try:
             f.clear()
@@ -5077,47 +5079,71 @@ def page_consulta_termos() -> None:
 # pergunta aberta). Log de antes/depois em `log_cadastros`.
 
 
+_SGU_NENHUM = "— (nenhum)"
+_SGU_MANUAL = "✍️ outro (digitar)"
+
+
+def _fmt_principal(x: dict) -> str:
+    return f'{x["rotulo"]}  ·  {x["ident"]}' if x["rotulo"] != x["ident"] else x["ident"]
+
+
 def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str | None]:
-    """Componente: escolhe um grupo do workspace, depois um membro dele.
+    """Componente: escolhe o **usuário** por busca type-ahead no diretório e,
+    opcionalmente, o **grupo** (só rótulo).
 
     Retorna (grupo_nome, grupo_id, usuario_ident). O `usuario_ident` é o que
-    entra na tabela — e é o que o UDF ABAC precisa casar com current_user().
-    Fallback manual se a listagem de grupos falhar.
+    entra na tabela — e é o que o UDF ABAC casa com current_user() (userName
+    para pessoa, applicationId para service principal).
     """
     grupos = list_grupos()
-    erro = st.session_state.get("_grupos_erro")
-    if erro:
-        st.caption(f"⚠️ diagnóstico: {erro}")
-    if not grupos:
-        st.warning(
-            "Não foi possível listar grupos do workspace (o SP do app pode não "
-            "ter leitura de SCIM Groups). Informe o grupo e o usuário manualmente."
-        )
-        g_nome = st.text_input("Grupo (Entra ID) *", key=f"{key_prefix}_g_manual").strip()
-        u = st.text_input("Usuário (identificador que o UDF casa) *", key=f"{key_prefix}_u_manual").strip()
-        return (g_nome or None, None, u or None)
 
-    g = st.selectbox(
-        "Grupo (Entra ID) *", options=grupos,
-        format_func=lambda x: f'{x["nome"]}  ({len(x["membros"])} membro(s))',
-        key=f"{key_prefix}_grupo",
-    )
-    membros = g["membros"]
-    if not membros:
-        st.caption(
-            "Este grupo não retornou membros. Se ele tem membros no Databricks, "
-            "o SP do app pode não ter leitura de SCIM — informe o usuário "
-            "manualmente por ora."
+    # --- grupo: rótulo opcional ---
+    g_nome = g_id = None
+    if grupos:
+        escolha = st.selectbox(
+            "Grupo (Entra ID) — rótulo, opcional",
+            options=[_SGU_NENHUM] + [g["nome"] for g in grupos] + [_SGU_MANUAL],
+            key=f"{key_prefix}_grupo",
         )
-        u = st.text_input("Usuário (identificador que o UDF casa) *",
-                          key=f"{key_prefix}_u_semmembro").strip()
-        return (g["nome"], g["id"], u or None)
-    m = st.selectbox(
-        "Usuário (membro do grupo) *", options=membros,
-        format_func=lambda x: f'{x["rotulo"]}  ·  {x["ident"]}' if x["rotulo"] != x["ident"] else x["ident"],
-        key=f"{key_prefix}_membro",
+        if escolha == _SGU_MANUAL:
+            g_nome = st.text_input("Nome do grupo", key=f"{key_prefix}_grupo_txt").strip() or None
+        elif escolha != _SGU_NENHUM:
+            g = next(x for x in grupos if x["nome"] == escolha)
+            g_nome, g_id = g["nome"], g["id"]
+    else:
+        erro = st.session_state.get("_grupos_erro")
+        if erro:
+            st.caption(f"⚠️ diagnóstico (grupos): {erro}")
+        g_nome = st.text_input(
+            "Grupo (Entra ID) — opcional", key=f"{key_prefix}_grupo_txt2"
+        ).strip() or None
+
+    # --- usuário: busca type-ahead (escala; não depende de membership) ---
+    termo = st.text_input(
+        "Usuário — buscar por nome ou login *", key=f"{key_prefix}_busca",
+        placeholder="ex.: joao.silva  /  João Silva  /  teste-usuario",
     )
-    return (g["nome"], g["id"], m["ident"])
+    cands = buscar_principais(termo)
+    erro = st.session_state.get("_grupos_erro")
+    if termo and erro:
+        st.caption(f"⚠️ diagnóstico (busca): {erro}")
+
+    if cands:
+        m = st.selectbox(
+            "Resultado *", options=cands, format_func=_fmt_principal,
+            key=f"{key_prefix}_membro",
+        )
+        return (g_nome, g_id, m["ident"])
+
+    if termo and len(termo.strip()) >= 2:
+        st.caption(
+            "Ninguém encontrado na busca — informe o identificador exato "
+            "(o que o UDF casa com `current_user()`)."
+        )
+    u = st.text_input(
+        "Usuário (identificador exato) *", key=f"{key_prefix}_u_manual"
+    ).strip()
+    return (g_nome, g_id, u or None)
 
 
 def page_mapa_dominio_acesso() -> None:
@@ -5181,8 +5207,8 @@ def page_mapa_dominio_acesso() -> None:
     )
 
     if st.button("💾 Adicionar", type="primary"):
-        if not (g_nome and usuario):
-            st.warning("Selecione/informe o grupo e o usuário.")
+        if not usuario:
+            st.warning("Selecione/informe o usuário.")
             return
         dup = _count(
             f"SELECT count(*) FROM {_cad('mapa_dominio_acesso')} "
@@ -5201,7 +5227,7 @@ def page_mapa_dominio_acesso() -> None:
             f"INSERT INTO {_cad('mapa_dominio_acesso')} "
             "(id, grupo, grupo_id, usuario, dominio_id, subdominio_id, dominio, subdominio, "
             "criado_em, criado_por) VALUES ("
-            f"{q_str(novo_id)}, {q_str(g_nome)}, {_qn(g_id)}, {q_str(usuario)}, "
+            f"{q_str(novo_id)}, {_qn(g_nome)}, {_qn(g_id)}, {q_str(usuario)}, "
             f"{int(dom_id)}, {'NULL' if sub_id is None else int(sub_id)}, "
             f"{_qn(dom_nome.get(dom_id))}, "
             f"{_qn(None if sub_id is None else sub_nome.get(sub_id))}, "
@@ -5278,15 +5304,15 @@ def page_mapa_sensibilidade_acesso() -> None:
                            value=bool(atual["pode_ver_dado_pessoal_sensivel"]) if atual else False, key="msa_pdps")
 
     if st.button("💾 Salvar", type="primary"):
-        if not (g_nome and usuario):
-            st.warning("Selecione/informe o grupo e o usuário.")
+        if not usuario:
+            st.warning("Selecione/informe o usuário.")
             return
         depois = {"grupo": g_nome, "usuario": usuario, "nivel": nivel,
                   "dado_pessoal": pdp, "dado_pessoal_sensivel": pdps}
         if atual:
             run_exec(
                 f"UPDATE {_cad('mapa_sensibilidade_acesso')} SET "
-                f"grupo = {q_str(g_nome)}, grupo_id = {_qn(g_id)}, "
+                f"grupo = {_qn(g_nome)}, grupo_id = {_qn(g_id)}, "
                 f"nivel_max_confidencialidade = {q_str(nivel)}, "
                 f"pode_ver_dado_pessoal = {str(pdp).lower()}, "
                 f"pode_ver_dado_pessoal_sensivel = {str(pdps).lower()}, "
@@ -5304,7 +5330,7 @@ def page_mapa_sensibilidade_acesso() -> None:
                 f"INSERT INTO {_cad('mapa_sensibilidade_acesso')} "
                 "(id, grupo, grupo_id, usuario, nivel_max_confidencialidade, "
                 "pode_ver_dado_pessoal, pode_ver_dado_pessoal_sensivel, criado_em, criado_por) VALUES ("
-                f"{q_str(novo_id)}, {q_str(g_nome)}, {_qn(g_id)}, {q_str(usuario)}, "
+                f"{q_str(novo_id)}, {_qn(g_nome)}, {_qn(g_id)}, {q_str(usuario)}, "
                 f"{q_str(nivel)}, {str(pdp).lower()}, {str(pdps).lower()}, "
                 f"current_timestamp(), {q_str(actor)})"
             )
