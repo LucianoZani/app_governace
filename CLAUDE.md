@@ -247,3 +247,19 @@ própria UI do app (que lê como SP).
   - Os `16/17/18-*.pdf` no repo seguem sendo as versões **neutras** (sem
     marca). Os **artefatos** (claude.ai) também seguem neutros — não
     republicados; se quiser alinhar, rodar o cg-*.html por cima de cada URL.
+- **2026-09-09 (5ª parte)** — Arquitetura (17): faltava a **esteira de
+  DevOps** (só tinha 1 linha na tabela de postura). Adicionada seção
+  **"Esteira de implantação"** (`#esteira`, antes da postura NFR): o que o
+  produto entrega (repo + Asset Bundle `databricks.yml` targets dev/prd +
+  config por `app.yaml`) vs. o que não entrega (runner de CI, promoção
+  dev→prd, gate, smoke test, rollback automático); **diagrama SVG
+  hoje-manual × alvo-CI/CD** (git push → runner [validar › deploy dev › smoke
+  › gate humano › deploy prd] → Apps dev/prd); tabela "decisões da esteira
+  para o arquiteto" (plataforma de CI livre, SP de CI separado do SP do app,
+  segredos em Databricks Secrets, migração de schema roda no 1º acesso e não
+  no pipeline). +1 item nos "pontos abertos". Linha da tabela NFR renomeada
+  "Deploy" → "Esteira de implantação".
+  - Regerados: `17-arquitetura-para-aprovacao.pdf` (neutro, repo, 10 p.) +
+    `Arquitetura para Aprovacao … (Comgas).pdf` (raiz Comgás). Artefato
+    `914849ee` **republicado** (neutro). Fontes em `docs-entrega-comgas/`
+    (agora com os HTML neutros + os cg-* + brand.py).
