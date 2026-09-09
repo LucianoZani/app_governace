@@ -2276,38 +2276,72 @@ def list_users_for_search() -> list[dict]:
 def list_grupos() -> list[dict]:
     """Grupos do workspace + membros, para o dropdown grupo → usuário.
 
-    ``[{"id", "nome", "membros": [{"id", "ident"}]}]``. ``ident`` é o e-mail
-    (pessoa) ou o nome/application-id (service principal) — é o que vai em
-    ``mapa_*.usuario``. Roda OBO (cai pro SP se OBO desligado).
+    ``[{"id", "nome", "membros": [{"ident", "rotulo"}]}]``. ``ident`` é o
+    identificador que vai em ``mapa_*.usuario`` e que o UDF ABAC casa com
+    ``current_user()``: e-mail (``userName``) para pessoa, ``applicationId``
+    para service principal. ``rotulo`` é só a exibição.
 
-    Robustez: alguns caminhos SCIM não trazem ``members`` na listagem — para
-    esses grupos, refaz com ``groups.get(id)``. Erro fica em
-    ``st.session_state["_grupos_erro"]`` para diagnóstico na tela.
+    ⚠️ Fonte: ``groups.list()`` **sem** o parâmetro ``attributes`` — com o
+    filtro (mesmo pedindo ``members``) este workspace devolve ``members``
+    vazio. Os membros vêm da varredura de ``users``/``service_principals``
+    pelo atributo ``groups`` (invertido para grupo→membros), que dá o
+    identificador certo (``userName`` / ``applicationId``) em vez do id
+    numérico interno. Erros ficam em ``st.session_state["_grupos_erro"]``.
     """
     st.session_state.pop("_grupos_erro", None)
     w = get_client(prefer_user=True)
-    out: list[dict] = []
+    nomes: dict[str, str] = {}
+    membros: dict[str, dict] = {}
+    erros: list[str] = []
+
     try:
-        grupos = list(w.groups.list(attributes="id,displayName,members"))
+        for g in w.groups.list():
+            if g.id:
+                nomes[g.id] = (g.display_name or g.id).strip()
     except Exception as exc:
-        st.session_state["_grupos_erro"] = f"groups.list falhou: {type(exc).__name__}: {exc}"
-        return []
-    for g in grupos:
-        membros = list(g.members or [])
-        if not membros and g.id:
-            try:
-                membros = list((w.groups.get(id=g.id).members) or [])
-            except Exception as exc:
-                st.session_state["_grupos_erro"] = (
-                    f"groups.get({g.display_name}) falhou: {type(exc).__name__}: {exc}"
-                )
+        erros.append(f"groups.list: {type(exc).__name__}: {exc}")
+
+    def _inverter(rotulo_fonte, iterador, ident_de, rotulo_de):
+        try:
+            for obj in iterador:
+                if getattr(obj, "active", True) is False:
+                    continue
+                ident = ident_de(obj)
+                if not ident:
+                    continue
+                for gr in (obj.groups or []):
+                    gid = getattr(gr, "value", None)
+                    if not gid:
+                        continue
+                    nomes.setdefault(gid, (getattr(gr, "display", None) or gid).strip())
+                    membros.setdefault(gid, {})[ident] = rotulo_de(obj)
+        except Exception as exc:
+            erros.append(f"{rotulo_fonte}: {type(exc).__name__}: {exc}")
+
+    _inverter(
+        "users", w.users.list(attributes="id,userName,displayName,active,groups"),
+        lambda u: (u.user_name or "").strip(),
+        lambda u: (u.display_name or u.user_name or "").strip(),
+    )
+    _inverter(
+        "service_principals",
+        w.service_principals.list(attributes="id,applicationId,displayName,active,groups"),
+        lambda s: (s.application_id or "").strip(),
+        lambda s: (s.display_name or s.application_id or "").strip(),
+    )
+
+    if erros:
+        st.session_state["_grupos_erro"] = " | ".join(erros)
+
+    out: list[dict] = []
+    for gid, nome in nomes.items():
         itens = [
-            {"id": m.value, "ident": (m.display or m.value or "").strip()}
-            for m in membros
-            if (m.display or m.value)
+            {"ident": ident, "rotulo": rotulo or ident}
+            for ident, rotulo in sorted(
+                membros.get(gid, {}).items(), key=lambda kv: (kv[1] or kv[0]).lower()
+            )
         ]
-        out.append({"id": g.id, "nome": (g.display_name or g.id or "").strip(),
-                    "membros": sorted(itens, key=lambda d: d["ident"].lower())})
+        out.append({"id": gid, "nome": nome, "membros": itens})
     return sorted(out, key=lambda d: d["nome"].lower())
 
 
@@ -5072,15 +5106,16 @@ def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str
     if not membros:
         st.caption(
             "Este grupo não retornou membros. Se ele tem membros no Databricks, "
-            "o SP do app provavelmente não tem permissão de ler a composição do "
-            "grupo — informe o usuário manualmente por ora."
+            "o SP do app pode não ter leitura de SCIM — informe o usuário "
+            "manualmente por ora."
         )
         u = st.text_input("Usuário (identificador que o UDF casa) *",
                           key=f"{key_prefix}_u_semmembro").strip()
         return (g["nome"], g["id"], u or None)
     m = st.selectbox(
         "Usuário (membro do grupo) *", options=membros,
-        format_func=lambda x: x["ident"], key=f"{key_prefix}_membro",
+        format_func=lambda x: f'{x["rotulo"]}  ·  {x["ident"]}' if x["rotulo"] != x["ident"] else x["ident"],
+        key=f"{key_prefix}_membro",
     )
     return (g["nome"], g["id"], m["ident"])
 
