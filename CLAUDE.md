@@ -229,3 +229,21 @@ própria UI do app (que lê como SP).
     View/Engenharia nem a worklist de catalogação por IA; índice do
     `docs-produto/README.md` para em 13 (sem o 14). Vale escrever esses
     capítulos um dia.
+- **2026-09-09 (4ª parte)** — Os 3 documentos (16/17/18) **rebrandados na
+  identidade Comgás** pra entrega. Template de referência:
+  `Documents/Projetos/Comgas/Slides_Metodo_Arquitetura_Scale_Runner_Comgas.pptx`
+  (deck gerado por IA já no estilo Comgás — extraí paleta + logo dele via
+  `zipfile`/PIL: azul `#0078B0`, verde `#78C040`, navy de tabela `#024788`,
+  laranja `#F5821F`; logo `image2.png` embutido como data-URI).
+  - Método: `docs-entrega-comgas/brand.py` aplica uma **camada de marca** no
+    fim do `<style>` de cada HTML (troca tokens → paleta Comgás, fontes →
+    **Montserrat** títulos + **Lato** corpo, `thead` azul-marinho, logo no
+    header, rodapé "Comgás | Governança de Dados | …"). Quase tudo é
+    token-driven, então recoloriu inclusive o diagrama SVG sozinho.
+  - **PDFs Comgás na raiz `Documents/Projetos/Comgas/`** (fora do repo):
+    `Arquitetura para Aprovacao …`, `Runbook de Implantacao …`,
+    `Guia de Utilizacao … (Comgas).pdf`. Fontes de build (cg-*.html + brand.py
+    + logo b64) em `docs-entrega-comgas/`.
+  - Os `16/17/18-*.pdf` no repo seguem sendo as versões **neutras** (sem
+    marca). Os **artefatos** (claude.ai) também seguem neutros — não
+    republicados; se quiser alinhar, rodar o cg-*.html por cima de cada URL.
