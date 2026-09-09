@@ -323,3 +323,35 @@ própria UI do app (que lê como SP).
   - **Comgás**: quando ligar OBO de verdade, esvaziar `FINOPS_SNAPSHOT_TABLE` →
     volta pro `system.billing` ao vivo. Ou manter o snapshot (padrão válido).
   - Commit do `app.py` (feature `FINOPS_SNAPSHOT_TABLE`) no repo.
+- **2026-09-09 (9ª parte)** — Blueprint novo do usuário
+  (`Documents/Projetos/Comgas/blueprint-cadastro-acesso-power-steward_novo.md`):
+  duas telas CRUD no Power Steward sobre tabelas que alimentam ABAC (row
+  filter / column mask) do UC — `mapa_dominio_acesso` (N linhas/usuário,
+  cross-domínio = ter +1 linha) e `mapa_sensibilidade_acesso` (1 linha/usuário,
+  `usuario` chave única). Discovery feito: o app reaproveita ~80% (padrão CRUD
+  do `page_data_stewards`, `list_dominios/subdominios`, `list_users_for_search`,
+  RBAC). Novo de verdade: dropdown **grupo → membro** (o app não lista grupos
+  hoje — `w.groups.list(attributes='...,members')` funciona), log de auditoria
+  **genérico** (só tinha em-linha + logs de comentário/tag), e schema de
+  segurança dedicado.
+  - **Esqueleto commitado** (`5db7d9f`, +344 linhas em `app.py`): tabelas
+    `mapa_dominio_acesso`/`mapa_sensibilidade_acesso`/`log_cadastros` em
+    `ensure_cadastro_tables`; `list_grupos()`, `list_mapa_*()`, `_log_cadastro()`,
+    `_qn()` (q_str-ou-NULL), `_seletor_grupo_usuario()`, `page_mapa_dominio_acesso`
+    + `page_mapa_sensibilidade_acesso`; menu **"Acesso a Dados"** admin-only.
+    SKELETON: tabelas no schema do app (`apps.power_steward_test` no Free);
+    `usuario` guarda o identificador cru do membro (e-mail p/ pessoa, app-id p/
+    SP); `dominio` denormalizado = nome do domínio.
+  - **Deployado no Free** + tabelas criadas + INSERTs simulados por SQL (todos
+    os caminhos, incl. subdomínio NULL) OK.
+  - **Fixtures de teste no Free** (workspace `governanca-free`): 4 SPs
+    (`teste-steward-vendas/marketing/posvenda`, `teste-analista-cross`) + 2
+    grupos (`teste_grupo_comercial` = eu + 3 stewards, `teste_grupo_analytics`
+    = eu + cross). 3 subdomínios semeados sob "Comercial" (Vendas/Marketing/
+    Pos-venda). Servem pra testar o dropdown grupo→membro sem Entra ID.
+  - **4 perguntas p/ o time de segurança da Comgás antes de finalizar**:
+    (1) SP do app lê SCIM Groups na Comgás? (2) o UDF ABAC casa `current_user()`
+    contra e-mail / UPN / userName? → define o que gravar em `usuario`;
+    (3) `dominio` = slug ou id? qual string a tag `domain` dos dados usa?
+    (4) catálogo/schema das `mapa_*` (schema `seguranca` dedicado) + o SP pode
+    `CREATE TABLE` lá? Perfil "admin de acesso" dedicado (hoje admin-only).
