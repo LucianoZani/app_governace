@@ -153,6 +153,16 @@ STATEMENT_TIMEOUT_S = 120
 # OBO cair pro service principal (USE_ON_BEHALF_OF_USER=false).
 PROPOSTAS_IA_TABLE = os.environ.get("PROPOSTAS_IA_TABLE", "").strip()
 
+# Snapshot de FinOps numa tabela Delta ("catalog.schema.tabela"). Alternativa
+# ao OBO quando o Service Principal do app NÃO tem acesso a `system.billing`
+# (o schema `system.billing` só concede ao grupo reservado `account admins`).
+# Um job externo — rodando com uma identidade que TEM esse acesso — mantém a
+# tabela fresca; o app a lê como SP. Colunas esperadas: dia, dominio,
+# tipo_custo, dbus, custo_usd (mesmo shape de `obter_custo_por_dominio`).
+# Ordem de fontes em `page_finops`: OBO ao vivo -> este snapshot -> xlsx demo.
+# Vazio = comportamento antigo.
+FINOPS_SNAPSHOT_TABLE = os.environ.get("FINOPS_SNAPSHOT_TABLE", "").strip()
+
 
 def schema_belongs_to_env(schema: str) -> bool:
     """True se o schema pertence ao ambiente lógico deste app (ENVIRONMENT).
@@ -3160,6 +3170,30 @@ def _carregar_finops_excel() -> pd.DataFrame | None:
     return df
 
 
+def _carregar_finops_snapshot() -> pd.DataFrame | None:
+    """Lê o snapshot de FinOps de ``FINOPS_SNAPSHOT_TABLE`` (Delta), como SP.
+
+    É o caminho para ambientes onde o SP não pode ler ``system.billing`` mas um
+    job externo mantém uma tabela agregada. ``None`` se a env var não estiver
+    configurada, a tabela não existir/estiver vazia, ou faltar grant — nunca
+    levanta (cai pro xlsx demo)."""
+    if not FINOPS_SNAPSHOT_TABLE:
+        return None
+    try:
+        df = run_query(
+            "SELECT dia, dominio, tipo_custo, dbus, custo_usd "
+            f"FROM {q_fqn(FINOPS_SNAPSHOT_TABLE)}"
+        )
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    df["dia"] = pd.to_datetime(df["dia"]).dt.date
+    df["dbus"] = pd.to_numeric(df["dbus"], errors="coerce")
+    df["custo_usd"] = pd.to_numeric(df["custo_usd"], errors="coerce")
+    return df
+
+
 def _render_finops_dashboard(df: pd.DataFrame) -> None:
     """Cards + gráfico + tabela (blueprint seção 8.2, Passos 2-4) — só
     renderiza a partir de um DataFrame já no formato de
@@ -3232,11 +3266,11 @@ def _render_finops_dashboard(df: pd.DataFrame) -> None:
 
 
 def page_finops() -> None:
-    """Página de FinOps. Tenta a consulta ao vivo em `system.billing`; se não
-    estiver acessível neste ambiente, usa silenciosamente o snapshot salvo em
-    `_FINOPS_EXCEL_FALLBACK` (dado real, só não é live) — sem expor o motivo
-    técnico na tela; fica registrado nos comentários do código pra quem for
-    mexer aqui depois (ver `LLM_ENABLED` e `testar_candidato`)."""
+    """Página de FinOps. Fontes de custo, em ordem: (1) `system.billing` ao vivo
+    via OBO; (2) `FINOPS_SNAPSHOT_TABLE` — tabela mantida por um job externo,
+    lida como SP, pra ambientes onde o SP não pode ler `system.billing`;
+    (3) `_FINOPS_EXCEL_FALLBACK` — snapshot estático de demo. A troca é
+    silenciosa (não expõe o motivo técnico na tela)."""
     st.title("💰 FinOps — Custo da Governança")
     st.caption(
         f"Custo do {APP_NAME}: Compute do App + SQL Warehouse + IA "
@@ -3257,12 +3291,16 @@ def page_finops() -> None:
         pass
 
     if df is None:
-        df_fallback = _carregar_finops_excel()
-        if df_fallback is None or df_fallback.empty:
+        # Fontes não-live: a tabela de snapshot (job externo) ou o xlsx de demo.
+        # Ambas trazem histórico — o recorte por período acontece aqui.
+        base = _carregar_finops_snapshot()
+        if base is None or base.empty:
+            base = _carregar_finops_excel()
+        if base is None or base.empty:
             st.info("Nenhum dado de custo disponível no momento.")
             return
-        df_periodo = df_fallback[(df_fallback["dia"] >= data_inicio) & (df_fallback["dia"] <= hoje)]
-        df = df_periodo if not df_periodo.empty else df_fallback
+        recorte = base[(base["dia"] >= data_inicio) & (base["dia"] <= hoje)]
+        df = recorte if not recorte.empty else base
 
     _render_finops_dashboard(df)
 

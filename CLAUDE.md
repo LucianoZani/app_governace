@@ -300,3 +300,26 @@ própria UI do app (que lê como SP).
   `.panel`/`.step`). Resultado: arq 10→8 p, guia 10→9 p, runbook 20→19 p, sem
   faixas de branco. Regerados os 6 PDFs (repo neutros + raiz Comgás) e
   republicados os 3 artefatos.
+- **2026-09-09 (8ª parte)** — **FinOps não funcionava no app Free**: o
+  `app.yaml` de teste tem `USE_ON_BEHALF_OF_USER=false` → `obter_custo_por_dominio`
+  (que roda OBO) cai pro SP → SP **não tem acesso a `system.billing`** (schema
+  RESERVED, só concede a `account admins`) → `page_finops` engolia a exceção e
+  caía pro xlsx de demo. **Nova fonte de dados**: env var **`FINOPS_SNAPSHOT_TABLE`**
+  (`catalog.schema.tabela`, opt-in) + `_carregar_finops_snapshot()` lê essa
+  tabela **como SP** (shape `dia/dominio/tipo_custo/dbus/custo_usd`). Ordem em
+  `page_finops`: OBO ao vivo → snapshot table → xlsx demo. Vazio = comportamento
+  antigo (Comgás intacto).
+  - Produtor da tabela: **job `governanca_finops_snapshot`** no workspace de
+    estudo (`estudo_databricks/notebooks/governanca/04_finops_snapshot`),
+    **run-as o usuário** (tem account-admin no Free → lê `system.billing`),
+    diário 07:30 BRT. Roda a **mesma query** do `obter_custo_por_dominio`
+    (escopo: `app_id` do SP `8d194e53…`, warehouse `20dfe5c08c3fa359`, endpoint
+    LLM), grava `governance.finops.custo_snapshot` (replace, 100 dias) + faz o
+    `GRANT SELECT` pro SP do app.
+  - Free `app.yaml` de teste ganhou `FINOPS_SNAPSHOT_TABLE=governance.finops.custo_snapshot`;
+    app.py novo + app.yaml pushados pro source do app e **deployado** (deployment
+    `01f1ac78…`, RUNNING). 1º snapshot: 50 linhas, $173.74 (Warehouse $116.71,
+    Compute App $56.95, IA $0.09).
+  - **Comgás**: quando ligar OBO de verdade, esvaziar `FINOPS_SNAPSHOT_TABLE` →
+    volta pro `system.billing` ao vivo. Ou manter o snapshot (padrão válido).
+  - Commit do `app.py` (feature `FINOPS_SNAPSHOT_TABLE`) no repo.
