@@ -354,6 +354,16 @@ própria UI do app (que lê como SP).
     Pos-venda). Servem pra testar o dropdown grupo→membro sem Entra ID.
     ⚠️ `w.service_principals.update()` faz PUT e **zera as memberships de
     grupo** do SP — se mexer nos SPs, repopular os grupos com `w.groups.update`.
+  - **2026-09-09 — SP do app virou workspace admin (SÓ TESTE).** O dropdown
+    grupo→membro do "Acesso por Franquia" vinha vazio porque o SP do app
+    (`app-z41874`, id `76230498242729`) **não era admin** e um SP comum recebe
+    `members` vazio ao listar grupos dos quais não participa. Adicionado ao
+    grupo `admins` via `w.groups.patch(op=ADD, path=members)` (o usuário
+    `lucianozani...@gmail.com` continua no grupo — sem wipe). ⚠️ **Não é o
+    modelo pra Comgás** — lá o SP não deve ser admin; vira a pergunta nº 1 pro
+    time de segurança (SP ganha SCIM read, ou o cadastro passa a usar só o
+    identificador individual sem resolver membership). Reverter no teste:
+    `w.groups.patch(op=REMOVE, path='members[value eq "76230498242729"]')`.
   - **4 perguntas p/ o time de segurança da Comgás antes de finalizar**:
     (1) SP do app lê SCIM Groups na Comgás? (2) o UDF ABAC casa `current_user()`
     contra e-mail / UPN / userName? → define o que gravar em `usuario`;
