@@ -372,6 +372,23 @@ própria UI do app (que lê como SP).
     Na Comgás a pergunta nº 1 pro time de segurança segue: o SP consegue rodar
     `users.list`/`service_principals.list` com `attributes=groups`? Se não,
     cadastro cai no identificador manual.
+  - **2026-09-09 — seletor virou busca type-ahead (formato Comgás-shape)**
+    (`010e7aa`). A inversão do diretório inteiro não escala, e o SCIM do
+    Databricks **não aceita** `filter='groups.value eq "<id>"'` (BadRequest) —
+    então resolver "membros do grupo X" server-side é impossível. Novo modelo:
+    - `list_grupos()` volta a ser só `[{id, nome}]` (barato, TTL 300).
+    - **`buscar_principais(termo)`** — filtro SCIM `userName co` / `displayName
+      co` em `users` + `service_principals`, `count=25`, nunca varre tudo.
+      Validado no Free: "teste-usuario"→4 SPs (applicationId), "luci"→e-mail.
+    - `_seletor_grupo_usuario`: **grupo = rótulo opcional** (dropdown de nomes
+      ou digitar); **usuário = busca type-ahead** (fallback: identificador
+      exato digitado). `ident` = `userName` (pessoa) / `applicationId` (SP).
+    - Validação das 2 telas passou a exigir **só o usuário**; `grupo`/`grupo_id`
+      gravam via `_qn` (aceitam NULL).
+    - Comgás: `userName co` funcionou no Free como usuário; **confirmar que o
+      SP consegue** rodar `users.list(filter=...)` lá (pergunta nº 1). O
+      `applicationId` como `usuario` é artefato do teste; usuário Entra real →
+      `userName` (pergunta nº 2: é isso que o UDF casa?).
   - **4 perguntas p/ o time de segurança da Comgás antes de finalizar**:
     (1) SP do app lê SCIM Groups na Comgás? (2) o UDF ABAC casa `current_user()`
     contra e-mail / UPN / userName? → define o que gravar em `usuario`;
