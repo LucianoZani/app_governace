@@ -344,11 +344,16 @@ própria UI do app (que lê como SP).
     SP); `dominio` denormalizado = nome do domínio.
   - **Deployado no Free** + tabelas criadas + INSERTs simulados por SQL (todos
     os caminhos, incl. subdomínio NULL) OK.
+  - ⚠️ Os sujeitos das tabelas `mapa_*` são **usuários comuns / consumidores
+    de dado** (analistas), NÃO stewards. Steward/dono de domínio é quem
+    **opera** a tela. As telas usam "usuário" em todo lugar.
   - **Fixtures de teste no Free** (workspace `governanca-free`): 4 SPs
-    (`teste-steward-vendas/marketing/posvenda`, `teste-analista-cross`) + 2
-    grupos (`teste_grupo_comercial` = eu + 3 stewards, `teste_grupo_analytics`
+    (`teste-usuario-vendas/marketing/posvenda`, `teste-usuario-cross`) + 2
+    grupos (`teste_grupo_comercial` = eu + 3 usuários, `teste_grupo_analytics`
     = eu + cross). 3 subdomínios semeados sob "Comercial" (Vendas/Marketing/
     Pos-venda). Servem pra testar o dropdown grupo→membro sem Entra ID.
+    ⚠️ `w.service_principals.update()` faz PUT e **zera as memberships de
+    grupo** do SP — se mexer nos SPs, repopular os grupos com `w.groups.update`.
   - **4 perguntas p/ o time de segurança da Comgás antes de finalizar**:
     (1) SP do app lê SCIM Groups na Comgás? (2) o UDF ABAC casa `current_user()`
     contra e-mail / UPN / userName? → define o que gravar em `usuario`;
