@@ -359,4 +359,13 @@ própria UI do app (que lê como SP).
     contra e-mail / UPN / userName? → define o que gravar em `usuario`;
     (3) `dominio` = slug ou id? qual string a tag `domain` dos dados usa?
     (4) catálogo/schema das `mapa_*` (schema `seguranca` dedicado) + o SP pode
-    `CREATE TABLE` lá? Perfil "admin de acesso" dedicado (hoje admin-only).
+    `CREATE TABLE` lá?
+  - **2026-09-09 (ajustes pós-review)** — commit `06fc125`:
+    - nova flag **`admin_acesso`** em `permissoes` (coluna + checkbox no
+      cadastro de Usuários + `get_user_perms` + gate no `main()`). Mesma regra
+      dos outros menus: ter a flag = ver e usar; admin ignora. Menu deixou de
+      ser admin-only.
+    - **relabel** na tela: "Acesso por Domínio" → **"Acesso por Franquia"**;
+      campo *Franquia* = o cadastro de **Domínio** do app, campo *Domínio* = o
+      cadastro de **Sub-domínio**. Só rótulo (colunas do banco intactas:
+      `dominio_id`/`subdominio_id`).
