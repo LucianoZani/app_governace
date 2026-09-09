@@ -402,3 +402,38 @@ própria UI do app (que lê como SP).
   - ⚠️ Pendente: seed de uma franquia + religar os subdomínios de teste
     (Vendas/Marketing/Pos-venda hoje pendem de "Comercial" como *domínio*;
     no modelo novo "Comercial" é *franquia*). Click-test do usuário.
+- **2026-09-09 (11ª parte)** — Iteração de UX da hierarquia + propagação do
+  nível Franquia pras telas vizinhas. Commits `5a6f0f0` … `de524d4`, todos
+  pushados. Deploys por `databricks workspace import app.py` (só o app.py) +
+  `apps deploy` — **não** por `databricks sync .` (ver ⚠️ do app.yaml abaixo).
+  - `page_dominios`: as 3 abas viraram **árvore (read) + formulário único em
+    cascata** (`_render_arvore_hierarquia` + `_form_hierarquia`). Consts
+    `_HIER_*`, helper `_hier_franquia_id`.
+  - Bug: domínios com `franquia_id` nulo (órfãos da migração) ficavam
+    **inalcançáveis** no form. Corrigido: opção `(sem franquia — a vincular)`
+    no seletor de Franquia + seletor "Franquia" no modo edição de domínio
+    (religa/move; `UPDATE` inclui `franquia_id`).
+  - **Owners & Stewards** (`page_stewards`): coluna Franquia; seletor mostra
+    "Franquia › Domínio"; **sub-domínio virou OPCIONAL** — opção
+    "— todo o domínio" (grava `subdominio_id NULL`); dedup/INSERT/listagem
+    tratam NULL. Motivo: Owner é do domínio, Steward do sub-domínio — não dá
+    pra exigir sub-domínio. `_select_pessoa_cadastrada` inclui responsável de
+    domínio inteiro como candidato de qualquer sub-domínio.
+  - **Dashboards** (`page_dashboards`): coluna Franquia + seletor
+    "Franquia › Domínio" (já tinha sub-domínio opcional).
+  - 🔴 **app.yaml drift causado nesta sessão**: os 3 primeiros `databricks
+    sync . --full` (≈21:31–21:51) subiram o **app.yaml do repo** por cima do
+    **app.yaml de teste** que estava no workspace. Efeito: schema de cadastros
+    mudou de `apps.power_steward_test` → **`apps.governanca_unity_catalog_prd`**
+    (com sufixo `_prd`, `CADASTRO_SCHEMA_ENV_SUFFIX` default) e
+    **`FINOPS_SNAPSHOT_TABLE` saiu da config** (FinOps volta a cair no xlsx de
+    demo — o snapshot da 8ª parte não é mais lido). Todo o teste de hoje
+    (franquia "Comercial" + domínios Vendas/Marketing/Pós vendas, já religados)
+    está em `governanca_unity_catalog_prd`. Os dados velhos
+    (`power_steward_test`: 1 domínio "Comercial" + 3 subdomínios, modelo 2
+    níveis) **ficaram lá** e não migram (modelo mudou). **Decisão do usuário
+    ainda pendente**: (a) ficar no `_prd` e só repor `FINOPS_SNAPSHOT_TABLE`
+    no app.yaml do workspace (sem commitar — o do repo é o neutro do produto);
+    ou (b) restaurar o app.yaml de teste (`power_steward_test`) e recriar
+    "Comercial"+domínios lá. Enquanto isso: **deployar só com `workspace
+    import app.py`**, nunca `sync --full`.
