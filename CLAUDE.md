@@ -354,16 +354,24 @@ própria UI do app (que lê como SP).
     Pos-venda). Servem pra testar o dropdown grupo→membro sem Entra ID.
     ⚠️ `w.service_principals.update()` faz PUT e **zera as memberships de
     grupo** do SP — se mexer nos SPs, repopular os grupos com `w.groups.update`.
-  - **2026-09-09 — SP do app virou workspace admin (SÓ TESTE).** O dropdown
-    grupo→membro do "Acesso por Franquia" vinha vazio porque o SP do app
-    (`app-z41874`, id `76230498242729`) **não era admin** e um SP comum recebe
-    `members` vazio ao listar grupos dos quais não participa. Adicionado ao
-    grupo `admins` via `w.groups.patch(op=ADD, path=members)` (o usuário
-    `lucianozani...@gmail.com` continua no grupo — sem wipe). ⚠️ **Não é o
-    modelo pra Comgás** — lá o SP não deve ser admin; vira a pergunta nº 1 pro
-    time de segurança (SP ganha SCIM read, ou o cadastro passa a usar só o
-    identificador individual sem resolver membership). Reverter no teste:
-    `w.groups.patch(op=REMOVE, path='members[value eq "76230498242729"]')`.
+  - **2026-09-09 — dropdown grupo→membro vazio: causa real era a QUERY, não
+    permissão.** Fazer o SP admin (adicionado ao `admins` via `groups.patch`
+    op ADD — usuário continua no grupo) **não resolveu** — os grupos seguiam
+    com 0 membros, inclusive `admins`. Diagnóstico: `w.groups.list(attributes=
+    "id,displayName,members")` devolve `members` **vazio** neste workspace;
+    `w.groups.list()` **sem** `attributes` traz os membros, mas com o **id
+    numérico interno** (não o `userName`/`applicationId` que o UDF ABAC casa).
+    Fix (`e00d81d`): `list_grupos` usa `groups.list()` só pro nome e monta os
+    membros **invertendo** `w.users.list(attributes=...groups)` +
+    `w.service_principals.list(attributes=...groups)` — o atributo `.groups`
+    de cada user/SP vem populado e dá o identificador certo. Cada membro agora
+    tem `ident` (grava) + `rotulo` (exibe). Validado como usuário:
+    comercial=4, analytics=2, admins=2. ⚠️ O SP admin continua (inofensivo no
+    Free) mas **não era necessário** — reverter quando quiser:
+    `w.groups.patch(id=<admins>, op=REMOVE, path='members[value eq "76230498242729"]')`.
+    Na Comgás a pergunta nº 1 pro time de segurança segue: o SP consegue rodar
+    `users.list`/`service_principals.list` com `attributes=groups`? Se não,
+    cadastro cai no identificador manual.
   - **4 perguntas p/ o time de segurança da Comgás antes de finalizar**:
     (1) SP do app lê SCIM Groups na Comgás? (2) o UDF ABAC casa `current_user()`
     contra e-mail / UPN / userName? → define o que gravar em `usuario`;
