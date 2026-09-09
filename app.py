@@ -1859,7 +1859,8 @@ def ensure_cadastro_tables() -> bool:
             f"AND lower(table_name) = 'permissoes'"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
-        for col in ("ver_logs", "ver_cadastros", "aprovador_tags", "power_steward", "ver_finops", "engenharia"):
+        for col in ("ver_logs", "ver_cadastros", "aprovador_tags", "power_steward",
+                    "ver_finops", "engenharia", "admin_acesso"):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS ({col} BOOLEAN)")
         if "nome" not in existing_cols:  # nome de exibição do usuário
@@ -1999,13 +2000,13 @@ def get_user_perms(email: str) -> dict:
     base = {
         "papel": "leitor", "ver_logs": False, "ver_cadastros": False,
         "aprovador_tags": False, "ver_finops": False, "power_steward": False,
-        "engenharia": False, "registrado": False, "nome": "",
+        "engenharia": False, "admin_acesso": False, "registrado": False, "nome": "",
     }
     if not email:
         return base
     df = run_query(
         f"SELECT coalesce(nome, '') AS nome, papel, ver_logs, ver_cadastros, "
-        f"aprovador_tags, ver_finops, power_steward, engenharia "
+        f"aprovador_tags, ver_finops, power_steward, engenharia, admin_acesso "
         f"FROM {_cad('permissoes')} WHERE lower(email) = {q_str(email.lower())} LIMIT 1"
     )
     if df.empty:
@@ -2018,7 +2019,7 @@ def get_user_perms(email: str) -> dict:
         return {
             "papel": "admin", "ver_logs": True, "ver_cadastros": True,
             "aprovador_tags": True, "ver_finops": True, "power_steward": power_steward,
-            "engenharia": True, "registrado": True, "nome": nome,
+            "engenharia": True, "admin_acesso": True, "registrado": True, "nome": nome,
         }
     return {
         "papel": papel,
@@ -2028,6 +2029,7 @@ def get_user_perms(email: str) -> dict:
         "ver_finops": _as_bool(row["ver_finops"]),
         "power_steward": power_steward,
         "engenharia": _as_bool(row["engenharia"]),
+        "admin_acesso": _as_bool(row["admin_acesso"]),
         "registrado": True,
         "nome": nome,
     }
@@ -2124,7 +2126,8 @@ def list_permissoes() -> pd.DataFrame:
         f"coalesce(ver_logs,false) AS ver_logs, coalesce(aprovador_tags,false) AS aprovador_tags, "
         f"coalesce(ver_finops,false) AS ver_finops, "
         f"coalesce(power_steward,false) AS power_steward, "
-        f"coalesce(engenharia,false) AS engenharia "
+        f"coalesce(engenharia,false) AS engenharia, "
+        f"coalesce(admin_acesso,false) AS admin_acesso "
         f"FROM {_cad('permissoes')} ORDER BY email"
     )
 
@@ -4847,13 +4850,13 @@ def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str
 
 
 def page_mapa_dominio_acesso() -> None:
-    st.title("🗺️ Acesso por Domínio")
+    st.title("🗺️ Acesso por Franquia")
     st.caption(
-        "Quais **domínios de negócio** cada usuário pode ver. Alimenta a "
+        "Quais **franquias e domínios** cada usuário pode ver. Alimenta a "
         "política ABAC (row filter) do Unity Catalog. Um usuário pode ter "
         "várias linhas (cross-domínio = ter mais de uma linha, nunca uma flag). "
-        "**SKELETON** — em validação; a tabela vive no schema de cadastros do "
-        "app por ora."
+        "Rótulos deste teste: **Franquia** = o cadastro de *Domínio* do app, "
+        "**Domínio** = o cadastro de *Sub-domínio*. **SKELETON** — em validação."
     )
     _show_cad_feedback()
     actor = st.session_state.get("user", "")
@@ -4866,17 +4869,17 @@ def page_mapa_dominio_acesso() -> None:
     df = list_mapa_dominio_acesso()
     show = df.copy()
     if not show.empty:
-        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
-        show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "(todo o domínio)"))
+        show["Franquia"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "(toda a franquia)"))
     st.dataframe(
         (show.rename(columns={"grupo": "Grupo", "usuario": "Usuário"})
-             [["Grupo", "Usuário", "Domínio", "Sub-domínio", "criado_por", "criado_em"]]
+             [["Grupo", "Usuário", "Franquia", "Domínio", "criado_por", "criado_em"]]
          if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
 
     if not doms:
-        st.warning("Cadastre um **Domínio** primeiro (menu Cadastros).")
+        st.warning("Cadastre uma **Franquia** primeiro (menu Cadastros → Domínios).")
         return
 
     st.divider()
@@ -4884,13 +4887,13 @@ def page_mapa_dominio_acesso() -> None:
     g_nome, g_id, usuario = _seletor_grupo_usuario("mda")
 
     dom_ids = [d["id"] for d in doms]
-    dom_id = st.selectbox("Domínio *", options=dom_ids,
+    dom_id = st.selectbox("Franquia *", options=dom_ids,
                           format_func=lambda i: dom_nome.get(i, i), key="mda_dom")
     sub_ids = [s["id"] for s in subs if s["dominio_id"] == dom_id]
     sub_id = st.selectbox(
-        "Sub-domínio (opcional — vazio = domínio inteiro)",
+        "Domínio (opcional — vazio = toda a franquia)",
         options=[None] + sub_ids,
-        format_func=lambda i: "(todo o domínio)" if i is None else sub_nome.get(i, i),
+        format_func=lambda i: "(toda a franquia)" if i is None else sub_nome.get(i, i),
         key="mda_sub",
     )
 
@@ -4904,7 +4907,7 @@ def page_mapa_dominio_acesso() -> None:
             f"AND {'subdominio_id IS NULL' if sub_id is None else f'subdominio_id = {int(sub_id)}'}"
         )
         if dup:
-            st.error("Esse usuário já tem esse acesso (mesmo domínio/sub-domínio).")
+            st.error("Esse usuário já tem esse acesso (mesma franquia/domínio).")
             return
         novo_id = str(uuid.uuid4())
         depois = {
@@ -5067,6 +5070,7 @@ def page_permissoes() -> None:
             "ver_cadastros": "Cadastro", "ver_logs": "Governança",
             "aprovador_tags": "Aprovador de tags", "ver_finops": "Ver FinOps",
             "power_steward": "Power Steward", "engenharia": "Engenharia",
+            "admin_acesso": "Acesso a Dados",
         }),
         use_container_width=True, hide_index=True,
     )
@@ -5112,7 +5116,7 @@ def page_permissoes() -> None:
         placeholder="ex.: Luciano Zani — usado na saudação da tela de Início",
     )
     papel_add = st.selectbox("Papel *", options=["admin", "editor", "leitor"], key="perm_papel_add")
-    ca, cb, cc, cd, ce, cf = st.columns(6)
+    ca, cb, cc, cd, ce, cf, cg = st.columns(7)
     with ca:
         add_ver_cad = st.checkbox("Cadastro", value=True, key="perm_add_ver_cad")
     with cb:
@@ -5125,9 +5129,12 @@ def page_permissoes() -> None:
         add_power = st.checkbox("Power Steward", value=False, key="perm_add_power")
     with cf:
         add_eng = st.checkbox("Engenharia", value=False, key="perm_add_eng")
+    with cg:
+        add_acesso = st.checkbox("Acesso a Dados", value=False, key="perm_add_acesso")
     st.caption("Admin ignora as checkboxes (vê/faz tudo). *Power Steward* também "
                "libera o menu Cadastros completo, além de ser o rótulo que aparece "
-               "no campo Power Steward do Indicador.")
+               "no campo Power Steward do Indicador. *Acesso a Dados* libera as "
+               "telas de Acesso por Franquia e por Sensibilidade.")
     if st.button("💾 Adicionar usuário", type="primary"):
         em = (email or "").strip().lower()
         if "@" not in em:
@@ -5140,10 +5147,10 @@ def page_permissoes() -> None:
             return
         run_exec(
             f"INSERT INTO {_cad('permissoes')} "
-            f"(nome, email, papel, ver_cadastros, ver_logs, aprovador_tags, ver_finops, power_steward, engenharia, criado_em, criado_por) "
+            f"(nome, email, papel, ver_cadastros, ver_logs, aprovador_tags, ver_finops, power_steward, engenharia, admin_acesso, criado_em, criado_por) "
             f"SELECT {q_str((nome_add or '').strip())}, {q_str(em)}, {q_str(papel_add)}, "
             f"{str(add_ver_cad).lower()}, {str(add_ver_log).lower()}, {str(add_aprov).lower()}, "
-            f"{str(add_finops).lower()}, {str(add_power).lower()}, {str(add_eng).lower()}, current_timestamp(), {q_str(user)} "
+            f"{str(add_finops).lower()}, {str(add_power).lower()}, {str(add_eng).lower()}, {str(add_acesso).lower()}, current_timestamp(), {q_str(user)} "
             f"FROM (SELECT 1) WHERE NOT EXISTS "
             f"(SELECT 1 FROM {_cad('permissoes')} WHERE lower(email) = {q_str(em)})"
         )
@@ -5166,7 +5173,7 @@ def page_permissoes() -> None:
             if (cur.get("papel") or "leitor").lower() in papeis else 2,
             key=f"perm_papel_edit_{rid}",
         )
-        e1, e2, e3, e4, e5, e6 = st.columns(6)
+        e1, e2, e3, e4, e5, e6, e7 = st.columns(7)
         with e1:
             ed_ver_cad = st.checkbox(
                 "Cadastro", value=_as_bool(cur.get("ver_cadastros")), key=f"perm_edit_ver_cad_{rid}")
@@ -5185,6 +5192,9 @@ def page_permissoes() -> None:
         with e6:
             ed_eng = st.checkbox(
                 "Engenharia", value=_as_bool(cur.get("engenharia")), key=f"perm_edit_eng_{rid}")
+        with e7:
+            ed_acesso = st.checkbox(
+                "Acesso a Dados", value=_as_bool(cur.get("admin_acesso")), key=f"perm_edit_acesso_{rid}")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("💾 Salvar"):
@@ -5194,6 +5204,7 @@ def page_permissoes() -> None:
                     f"ver_cadastros = {str(ed_ver_cad).lower()}, ver_logs = {str(ed_ver_log).lower()}, "
                     f"aprovador_tags = {str(ed_aprov).lower()}, ver_finops = {str(ed_finops).lower()}, "
                     f"power_steward = {str(ed_power).lower()}, engenharia = {str(ed_eng).lower()}, "
+                    f"admin_acesso = {str(ed_acesso).lower()}, "
                     f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                     f"WHERE id = {rid}"
                 )
@@ -5947,11 +5958,11 @@ def main() -> None:
     if is_admin:
         pages["Admin"] = [st.Page(page_permissoes, title="Usuários", icon="🔒")]
 
-    # Cadastro de Acesso a Dados (blueprint) — SKELETON, admin-only por ora
-    # (o blueprint deixa "perfil admin de acesso dedicado" como decisão aberta).
-    if is_admin:
+    # Cadastro de Acesso a Dados (blueprint) — liberado pela flag `admin_acesso`
+    # (mesma regra dos outros menus: ter a flag = ver e usar). Admin ignora.
+    if is_admin or perms["admin_acesso"]:
         pages["Acesso a Dados"] = [
-            st.Page(page_mapa_dominio_acesso, title="Acesso por Domínio", icon="🗺️"),
+            st.Page(page_mapa_dominio_acesso, title="Acesso por Franquia", icon="🗺️"),
             st.Page(page_mapa_sensibilidade_acesso, title="Acesso por Sensibilidade", icon="🔐"),
         ]
 
