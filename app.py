@@ -3807,8 +3807,15 @@ def page_stewards() -> None:
     if not can_edit(role):
         st.info("Seu perfil é **leitor** — visualização apenas.")
         return
-    if not doms or not subs:
-        st.warning("Cadastre um **Domínio** e um **Sub-domínio** primeiro.")
+    if not doms:
+        st.warning("Cadastre um **Domínio** primeiro (menu Cadastros → Domínios).")
+        return
+    if not subs:
+        st.warning(
+            "Já há domínio(s), mas **nenhum sub-domínio** cadastrado — e o responsável "
+            "é vinculado no nível do sub-domínio. Vá em Cadastros → Domínios, "
+            "selecione a franquia e o domínio e adicione um sub-domínio."
+        )
         return
 
     st.divider()
