@@ -186,3 +186,23 @@ própria UI do app (que lê como SP).
     impressão para o PDF") — aparência na tela idêntica. ⚠️ Segue pendente
     **re-fixar a versão** pelo menu de compartilhamento (viewers ainda veem a
     fixada anterior).
+- **2026-09-09 (2ª parte)** — Novo artefato **"Arquitetura Governança UC"**
+  (`https://claude.ai/code/artifact/914849ee-9f3f-4211-b58b-06efb9d1d51b`,
+  favicon 📐) — **recorte de arquitetura para aprovação de desenho** por um
+  arquiteto, derivado do runbook mas focado: o runbook lidera com o passo a
+  passo de deploy (B1–B8 + specs), o arquiteto precisa do desenho e das
+  lacunas. Seções: "o desenho em uma tela" (decisões que a aprovação endossa
+  + o que o doc não decide), arquitetura de execução (com **diagrama SVG** de
+  fluxo de requisição + fronteira de confiança — navegador → app → 2
+  identidades OBO/SP → warehouse → catálogos de negócio / schema interno; a
+  única aresta de escrita fora do schema do app destacada), modelo de
+  identidade (tabela condensada, 9 linhas), integração com a plataforma,
+  pegada no ambiente, **postura NFR** (tabela dimensão × situação com chips
+  `no desenho`/`configurar`/`não coberto` — observabilidade, rollback,
+  retenção, disponibilidade marcados como gap), e "pontos abertos que a
+  aprovação assume" (7 itens). Tipografia Newsreader (títulos) + IBM Plex
+  Sans/Mono; tema claro/escuro; tem `@media print`.
+  - Export **`17-arquitetura-para-aprovacao.pdf`** na raiz (9 páginas, Chrome
+    headless, conferido com `pymupdf`). **Não versionado**, como o do runbook.
+  - Conteúdo 100% do produto principal (este repo) — sem citar cliente. Fatos
+    tirados do próprio runbook + `app.py`.
