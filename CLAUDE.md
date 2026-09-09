@@ -288,3 +288,15 @@ própria UI do app (que lê como SP).
      (a pedido do usuário: o modelo já vem do endpoint configurado). Sem citar
      versão. Removidas as menções a "provedor externo faz a pergunta sair" /
      privacidade como framing. NFR row "Egress & privacidade" → "Modelo de IA".
+- **2026-09-09 (7ª parte)** — Usuário: "formatação esquisita, muito espaço em
+  branco" nos PDFs. Causa: `break-inside:avoid` em `.tbl`/`figure`/`.panel`/
+  `.table-wrap` fazia tabela/figura grande **pular a página inteira** quando
+  não cabia, deixando o cabeçalho sozinho + meia página vazia. Corrigido nos
+  3 `@media print` (neutros) + na camada de marca do `brand.py`:
+  `.tbl`/`table`/`tbody`/`figure`/`.table-wrap`/`section`/`.step`/`.spec-block`
+  → `break-inside:auto` (fluem entre páginas, `thead` repete); só
+  `tr`/`li`/`.callout`/`.console`/`.figframe`/`.spec-row` ficam indivisíveis.
+  Ritmo vertical apertado (margens de `section`/`h2`/`h3`/`p`, padding de
+  `.panel`/`.step`). Resultado: arq 10→8 p, guia 10→9 p, runbook 20→19 p, sem
+  faixas de branco. Regerados os 6 PDFs (repo neutros + raiz Comgás) e
+  republicados os 3 artefatos.
