@@ -381,10 +381,16 @@ própria UI do app (que lê como SP).
   - `list_franquias()` novo; `list_dominios()` agora traz `franquia_id`;
     `_clear_cad_caches` inclui `list_franquias`.
   - As **duas telas** `page_dominios`/`page_subdominios` viraram **uma só**
-    (`page_dominios`, título "🗂️ Domínios") com **3 abas** (`st.tabs`):
-    Franquias / Domínios / Sub-domínios. Helpers `_cad_franquias`,
-    `_cad_dominios`, `_cad_subdominios` (CRUD com guarda de exclusão em
-    cascata). Menu Cadastros perdeu o item "Sub-domínios".
+    (`page_dominios`, título "🗂️ Domínios"). Menu Cadastros perdeu o item
+    "Sub-domínios". **1ª versão** tinha 3 abas; **substituída** (commit
+    `5a6f0f0`, a pedido do usuário) por **árvore aninhada (read) + formulário
+    único em cascata**: `_render_arvore_hierarquia` desenha
+    Franquia › Domínio › Sub-domínio (+ seção "domínios sem franquia");
+    `_form_hierarquia` — escolher/criar Franquia → Domínio (opcional) →
+    Sub-domínio (opcional), e o nível-alvo (criar/editar) + o modo saem da
+    combinação selecionada. Renomeia via campo "Nome"; exclui com guarda de
+    cascata. Consts `_HIER_NOVA_FR`/`_HIER_NOVO_DOM`/`_HIER_NOVO_SUB`/
+    `_HIER_NENHUM`, helper `_hier_franquia_id` (trata `franquia_id` NaN).
   - `page_mapa_dominio_acesso` ("Acesso por Franquia") **realinhada** ao modelo
     real: a concessão continua em `dominio_id` (+ `subdominio_id` opcional), mas
     o seletor agora é **Franquia real → Domínio (filtrado) → Sub-domínio
