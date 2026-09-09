@@ -2245,28 +2245,42 @@ def list_users_for_search() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def list_grupos() -> list[dict]:
     """Grupos do workspace + membros, para o dropdown grupo → usuário.
 
     ``[{"id", "nome", "membros": [{"id", "ident"}]}]``. ``ident`` é o e-mail
-    (pessoa) ou o application-id / nome (service principal) — é o que vai em
-    ``mapa_*.usuario``. Via SP. ``[]`` se o SP não puder listar grupos (mesma
-    classe de permissão do ``w.users.list()`` que o app já usa).
+    (pessoa) ou o nome/application-id (service principal) — é o que vai em
+    ``mapa_*.usuario``. Roda OBO (cai pro SP se OBO desligado).
+
+    Robustez: alguns caminhos SCIM não trazem ``members`` na listagem — para
+    esses grupos, refaz com ``groups.get(id)``. Erro fica em
+    ``st.session_state["_grupos_erro"]`` para diagnóstico na tela.
     """
-    w = get_client()
+    st.session_state.pop("_grupos_erro", None)
+    w = get_client(prefer_user=True)
     out: list[dict] = []
     try:
-        for g in w.groups.list(attributes="id,displayName,members"):
-            membros = [
-                {"id": m.value, "ident": (m.display or m.value or "").strip()}
-                for m in (g.members or [])
-                if (m.display or m.value)
-            ]
-            out.append({"id": g.id, "nome": (g.display_name or g.id or "").strip(),
-                        "membros": sorted(membros, key=lambda d: d["ident"].lower())})
-    except Exception:
+        grupos = list(w.groups.list(attributes="id,displayName,members"))
+    except Exception as exc:
+        st.session_state["_grupos_erro"] = f"groups.list falhou: {type(exc).__name__}: {exc}"
         return []
+    for g in grupos:
+        membros = list(g.members or [])
+        if not membros and g.id:
+            try:
+                membros = list((w.groups.get(id=g.id).members) or [])
+            except Exception as exc:
+                st.session_state["_grupos_erro"] = (
+                    f"groups.get({g.display_name}) falhou: {type(exc).__name__}: {exc}"
+                )
+        itens = [
+            {"id": m.value, "ident": (m.display or m.value or "").strip()}
+            for m in membros
+            if (m.display or m.value)
+        ]
+        out.append({"id": g.id, "nome": (g.display_name or g.id or "").strip(),
+                    "membros": sorted(itens, key=lambda d: d["ident"].lower())})
     return sorted(out, key=lambda d: d["nome"].lower())
 
 
@@ -2319,7 +2333,7 @@ def _clear_cad_caches() -> None:
         list_dominios, list_subdominios, list_stewards, list_permissoes,
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
         list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
-        list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso,
+        list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso, list_grupos,
     ):
         try:
             f.clear()
@@ -4824,6 +4838,9 @@ def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str
     Fallback manual se a listagem de grupos falhar.
     """
     grupos = list_grupos()
+    erro = st.session_state.get("_grupos_erro")
+    if erro:
+        st.caption(f"⚠️ diagnóstico: {erro}")
     if not grupos:
         st.warning(
             "Não foi possível listar grupos do workspace (o SP do app pode não "
@@ -4840,8 +4857,14 @@ def _seletor_grupo_usuario(key_prefix: str) -> tuple[str | None, str | None, str
     )
     membros = g["membros"]
     if not membros:
-        st.caption("Este grupo não tem membros.")
-        return (g["nome"], g["id"], None)
+        st.caption(
+            "Este grupo não retornou membros. Se ele tem membros no Databricks, "
+            "o SP do app provavelmente não tem permissão de ler a composição do "
+            "grupo — informe o usuário manualmente por ora."
+        )
+        u = st.text_input("Usuário (identificador que o UDF casa) *",
+                          key=f"{key_prefix}_u_semmembro").strip()
+        return (g["nome"], g["id"], u or None)
     m = st.selectbox(
         "Usuário (membro do grupo) *", options=membros,
         format_func=lambda x: x["ident"], key=f"{key_prefix}_membro",
