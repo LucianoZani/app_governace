@@ -206,3 +206,26 @@ própria UI do app (que lê como SP).
     headless, conferido com `pymupdf`). **Não versionado**, como o do runbook.
   - Conteúdo 100% do produto principal (este repo) — sem citar cliente. Fatos
     tirados do próprio runbook + `app.py`.
+- **2026-09-09 (3ª parte)** — Terceiro artefato: **"Guia de Uso Governança
+  UC"** (`https://claude.ai/code/artifact/cc09b782-6963-4878-87e6-b08750c3c77f`,
+  favicon 📘) — **guia de utilização** do app (documentação de referência pra
+  guardar/consultar). O usuário vai entregar os 3 juntos: **17 = estudo da
+  reunião** de aprovação; runbook + guia de uso = documentação do app.
+  - Compilado do `docs-produto/` + `app.py`. Escopo decidido pelo usuário:
+    **só os módulos de uso**, **sem o que o runbook já cobre** (fora
+    instalação/config/grants). Seções: o que o app faz · o que você vê
+    depende do papel (papéis + flags, visão de *uso* do RBAC) · Painel ·
+    Governança de Dados · Revisar catalogação por IA · Cadastros ·
+    Glossário/Indicadores · **Indicadores—Engenharia** (fluxo Metric View em
+    4 passos, tirado do `app.py`) · Assistente IA · **FinOps** (tirado do
+    `app.py` — nenhum dos dois tinha doc em `docs-produto/`) · problemas
+    comuns (subset voltado ao usuário final).
+  - Mesma identidade visual do 17 (Newsreader + IBM Plex, claro/escuro,
+    `@media print`, `pymupdf` pra conferir). Export
+    **`18-guia-de-utilizacao.pdf`** na raiz, 10 páginas, **não versionado**.
+  - Label do campo `macroprocesso` sai como **"Franquia"** (o `app.py` deste
+    repo já tem o relabel — `docs-produto/10` ainda diz "Macroprocesso").
+  - ⚠️ `docs-produto/` está desatualizado: não tem FinOps, Metric
+    View/Engenharia nem a worklist de catalogação por IA; índice do
+    `docs-produto/README.md` para em 13 (sem o 14). Vale escrever esses
+    capítulos um dia.
