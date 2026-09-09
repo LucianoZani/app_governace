@@ -3776,26 +3776,31 @@ def _form_hierarquia(frs: list[dict], doms: list[dict], subs: list[dict], user: 
 def page_stewards() -> None:
     st.title("🧑‍💼 Data Owners & Stewards")
     st.caption(
-        "Cadastro de responsáveis vinculados a um Domínio e Sub-domínio. Escolha "
-        "logo abaixo se este registro é um **Data Owner** ou um **Data Steward** — "
-        "os dois usam o mesmo cadastro."
+        "Cadastro de responsáveis vinculados à árvore **Franquia › Domínio › "
+        "Sub-domínio**. Escolha logo abaixo se este registro é um **Data Owner** "
+        "ou um **Data Steward** — os dois usam o mesmo cadastro."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
     actor = st.session_state.get("user", "")
 
+    frs = list_franquias().to_dict("records")
+    fr_nome = {int(f["id"]): f["nome"] for f in frs}
     doms = list_dominios().to_dict("records")
     subs = list_subdominios().to_dict("records")
     dom_nome = {d["id"]: d["nome"] for d in doms}
+    dom_fr = {d["id"]: _hier_franquia_id(d) for d in doms}
     sub_nome = {s["id"]: s["nome"] for s in subs}
+    _fr_de_dom = lambda i: fr_nome.get(dom_fr.get(i) or -1, "—")
     stw = list_stewards()
     show = stw.copy()
     if not show.empty:
+        show["Franquia"] = show["dominio_id"].map(_fr_de_dom)
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
         show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, i))
     st.dataframe(
         (show.rename(columns={"tipo": "Tipo", "nome": "Nome", "email": "E-mail"})
-             [["Tipo", "Nome", "E-mail", "Domínio", "Sub-domínio"]] if not show.empty else show),
+             [["Tipo", "Nome", "E-mail", "Franquia", "Domínio", "Sub-domínio"]] if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
 
@@ -3851,7 +3856,10 @@ def page_stewards() -> None:
             st.text_input("E-mail", value=email or "", disabled=True, key="stw_email_view")
 
     dom_ids = [d["id"] for d in doms]
-    dom_id = st.selectbox("Domínio *", options=dom_ids, format_func=lambda i: dom_nome.get(i, i), key="stw_dom")
+    dom_id = st.selectbox(
+        "Domínio *", options=dom_ids,
+        format_func=lambda i: f'{_fr_de_dom(i)} › {dom_nome.get(i, i)}', key="stw_dom",
+    )
     sub_ids = [s["id"] for s in subs if s["dominio_id"] == dom_id]
     if not sub_ids:
         st.warning("Este domínio não tem sub-domínios. Cadastre um sub-domínio primeiro.")
@@ -3891,7 +3899,8 @@ def page_stewards() -> None:
         st.divider()
         st.markdown("#### Excluir")
         opts = [
-            f'[{r["tipo"]}] {r["nome"]} <{r["email"]}> — {dom_nome.get(r["dominio_id"], r["dominio_id"])} › '
+            f'[{r["tipo"]}] {r["nome"]} <{r["email"]}> — {_fr_de_dom(r["dominio_id"])} › '
+            f'{dom_nome.get(r["dominio_id"], r["dominio_id"])} › '
             f'{sub_nome.get(r["subdominio_id"], r["subdominio_id"])} (id {r["id"]})'
             for r in recs
         ]
