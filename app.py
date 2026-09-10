@@ -89,6 +89,15 @@ USE_ON_BEHALF_OF_USER = os.environ.get("USE_ON_BEHALF_OF_USER", "true").lower() 
 # e vice-versa — num metastore compartilhado.
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev").strip().lower()
 
+# Desliga o filtro de schema por sufixo (_dev) e o badge de ambiente na
+# sidebar. Instalações que já separam DEV/PRD por CATÁLOGO (ex.: comgas_dev /
+# comgas_prd, catálogos distintos) não usam a convenção de sufixo de schema —
+# filtrar por ela esconderia os schemas reais. Padrão "true" preserva o
+# comportamento de metastore unificado (Free Edition).
+ENV_SCHEMA_FILTER_ENABLED = (
+    os.environ.get("ENV_SCHEMA_FILTER_ENABLED", "true").strip().lower() == "true"
+)
+
 # Allowlist de catálogos exibidos no app (separados por vírgula). Vazio = todos
 # os catálogos visíveis ao service principal. Ex.: "suprimentos".
 ALLOWED_CATALOGS = {
@@ -109,6 +118,11 @@ ACCOUNT_HOST = os.environ.get(
 # assistente). Termo de negócio "Power Steward" (usuário marcado como
 # responsável por um indicador) é outra coisa — não use esta var pra ele.
 APP_NAME = os.environ.get("APP_NAME", "Power Steward").strip() or "Power Steward"
+
+# Logo opcional (branding do cliente) exibido no topo da sidebar via
+# st.logo(). Caminho relativo a este arquivo (ex.: "assets/logo.png"). Vazio
+# (padrão) = sem logo — mantém o app neutro nas instalações sem branding.
+APP_LOGO_PATH = os.environ.get("APP_LOGO_PATH", "").strip()
 
 # Endpoint do LLM. Usado por (a) `gerar_expr_sql` (pipeline de publicação de
 # indicador, blueprint seção 5.1, Passo 1) e (b) o painel "Assistente de
@@ -175,6 +189,8 @@ def schema_belongs_to_env(schema: str) -> bool:
     s = schema.lower()
     if s in ("information_schema", "default"):
         return False
+    if not ENV_SCHEMA_FILTER_ENABLED:
+        return True
     is_dev_schema = s.endswith("_dev")
     if ENVIRONMENT == "prd":
         return not is_dev_schema
@@ -700,13 +716,16 @@ def get_governed_tags() -> dict[str, list[str]]:
 
 
 def render_sidebar() -> None:
+    if APP_LOGO_PATH and os.path.isfile(APP_LOGO_PATH):
+        st.logo(APP_LOGO_PATH)
     with st.sidebar:
         st.markdown(f"## 🏷️ {APP_NAME}")
         st.caption("Governança de dados no Unity Catalog")
         st.divider()
         st.markdown("### ℹ️ Sessão")
-        env_badge = "🟢 PRD" if ENVIRONMENT == "prd" else "🟡 DEV"
-        st.caption(f"Ambiente: **{env_badge}** (mostra apenas schemas de {ENVIRONMENT.upper()})")
+        if ENV_SCHEMA_FILTER_ENABLED:
+            env_badge = "🟢 PRD" if ENVIRONMENT == "prd" else "🟡 DEV"
+            st.caption(f"Ambiente: **{env_badge}** (mostra apenas schemas de {ENVIRONMENT.upper()})")
         user_display = st.session_state.get("user")
         if user_display and user_display != "unknown":
             st.caption(f"Usuário: **{user_display}**")
@@ -766,7 +785,10 @@ def select_object(user: str) -> tuple[str | None, str | None, str | None]:
                 options=schemas,
                 index=None,
                 placeholder="Selecione…",
-                help=f"Exibindo apenas schemas de **{ENVIRONMENT.upper()}**.",
+                help=(
+                    f"Exibindo apenas schemas de **{ENVIRONMENT.upper()}**."
+                    if ENV_SCHEMA_FILTER_ENABLED else None
+                ),
                 key="gov_sel_sch",
             )
 
