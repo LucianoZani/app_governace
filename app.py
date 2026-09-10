@@ -1714,6 +1714,10 @@ _CAD_SCHEMA_BASE = os.environ.get("CADASTRO_SCHEMA", "governanca_unity_catalog")
 _CAD_SCHEMA_ENV_SUFFIX = os.environ.get("CADASTRO_SCHEMA_ENV_SUFFIX", "true").strip().lower() == "true"
 CAD_SCHEMA = f"{_CAD_SCHEMA_BASE}_{ENVIRONMENT}" if _CAD_SCHEMA_ENV_SUFFIX else _CAD_SCHEMA_BASE
 SEED_ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "t.guilherme.massafer@ero.com").strip().lower()
+# Prefixo aplicado ao nome de toda tabela de cadastro — necessário quando
+# CAD_SCHEMA é compartilhado com outra aplicação (schema pré-provisionado de
+# nome fixo, não exclusivo deste app). Vazio (padrão) = sem prefixo.
+CAD_TABLE_PREFIX = os.environ.get("CADASTRO_TABLE_PREFIX", "").strip()
 
 
 def _cad(table: str) -> str:
@@ -1724,7 +1728,7 @@ def _cad(table: str) -> str:
     `CAD_SCHEMA`, sem schema `ontologia_<env>` separado (consolidado em
     2026-08-30; ver migração dos dados de `ontologia_<env>` para cá).
     """
-    return f"{q_ident(CAD_CATALOG)}.{q_ident(CAD_SCHEMA)}.{q_ident(table)}"
+    return f"{q_ident(CAD_CATALOG)}.{q_ident(CAD_SCHEMA)}.{q_ident(CAD_TABLE_PREFIX + table)}"
 
 
 @st.cache_resource(show_spinner=False)
@@ -1862,7 +1866,7 @@ def ensure_cadastro_tables() -> bool:
         cols_df = run_query(
             f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
             f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
-            f"AND lower(table_name) = 'permissoes'"
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'permissoes')}"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
         for col in ("ver_logs", "ver_cadastros", "aprovador_tags", "power_steward",
@@ -1880,7 +1884,7 @@ def ensure_cadastro_tables() -> bool:
         cols_df = run_query(
             f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
             f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
-            f"AND lower(table_name) = 'data_stewards'"
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'data_stewards')}"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
         if "tipo" not in existing_cols:
@@ -1895,7 +1899,7 @@ def ensure_cadastro_tables() -> bool:
         cols_df = run_query(
             f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
             f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
-            f"AND lower(table_name) = 'dominios'"
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'dominios')}"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
         if "franquia_id" not in existing_cols:
@@ -1909,7 +1913,7 @@ def ensure_cadastro_tables() -> bool:
         cols_df = run_query(
             f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
             f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
-            f"AND lower(table_name) = 'indicadores'"
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'indicadores')}"
         )
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
         if "power_steward" not in existing_cols:
@@ -1959,7 +1963,7 @@ def ensure_cadastro_tables() -> bool:
         tbl_df = run_query(
             f"SELECT lower(table_name) AS t FROM {q_ident(CAD_CATALOG)}.information_schema.tables "
             f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
-            f"AND lower(table_name) = 'termos_negocio'"
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'termos_negocio')}"
         )
         if not tbl_df.empty:
             _comuns = (
