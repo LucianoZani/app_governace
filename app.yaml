@@ -22,8 +22,9 @@ env:
 
   # Restringe o app a estes catálogos (vazio = todos). Todos os schemas do
   # catálogo continuam disponíveis (respeitando o filtro de ambiente).
+  # 2026-09-09: ambiente Free limpo — só catálogos de pipeline (dev/prod).
   - name: ALLOWED_CATALOGS
-    value: "supply_chain,vendas,poc_de_para_materiais_fornecedores"
+    value: "dev,prod"
 
   # Busca de usuários no nível de CONTA (Account SCIM API) — permite encontrar
   # usuários ainda não provisionados neste workspace (ex.: só existem em DEV).
