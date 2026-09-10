@@ -482,3 +482,26 @@ própria UI do app (que lê como SP).
     ou (b) restaurar o app.yaml de teste (`power_steward_test`) e recriar
     "Comercial"+domínios lá. Enquanto isso: **deployar só com `workspace
     import app.py`**, nunca `sync --full`.
+- **2026-09-10 — faxina do ambiente Free ("refazer as PoCs com dados de
+  pipeline").** O usuário rodou os DROPs (o classificador bloqueia `DROP
+  CATALOG`/`DROP SCHEMA` pra mim — passo o SQL, ele executa).
+  - **Catálogos dropados** (`CASCADE`): `demo_catalog_explorer`,
+    `poc_de_para_materiais_fornecedores`, `prot_m17_bronze`, `sandbox`,
+    `supply_chain`, `vendas`.
+  - **Schemas dropados**: `apps.power_steward_test` (schema de teste antigo,
+    órfão desde o drift do app.yaml de 21:31), `apps.ontos` (vazio).
+  - **Ficam**: catálogos `apps`, `dev`, `prod`, `governance` (+ system/samples/
+    workspace). `apps` agora só tem `governanca_unity_catalog_prd` (15 tabelas,
+    em uso) + `default`.
+  - **Limpeza pós-drop** (feita por mim): `DELETE` dos 2 indicadores que
+    apontavam pra `vendas.vendas_gold` (ids 2 e 3 — `indicadores` ficou vazia);
+    `app.yaml` **`ALLOWED_CATALOGS`** de `supply_chain,vendas,poc_...` → **`dev,prod`**
+    (commit `dbe0f41`, deployado por `workspace import` do app.yaml). App RUNNING.
+  - `dev` tem pipeline real (bronze 8 / silver 9 / gold 7 tabelas) — é a base
+    pras PoCs refeitas. `prod` quase vazio (gold 1 / silver 1). Os jobs de
+    governança já apontam pra `dev.gold`.
+  - ⚠️ O app `data-catalog-streamlit` (explorer) perdeu o `demo_catalog_explorer`
+    — quando for refeito, apontar pra `dev`.
+  - **PoCs a refazer com dados de pipeline**: (1) Metric View (era em `vendas`),
+    (2) de-para materiais (era `poc_de_para_materiais_fornecedores`),
+    (3) ABAC/`mapa_dominio_acesso` numa gold de `dev`.
