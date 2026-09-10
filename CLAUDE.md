@@ -505,3 +505,77 @@ própria UI do app (que lê como SP).
   - **PoCs a refazer com dados de pipeline**: (1) Metric View (era em `vendas`),
     (2) de-para materiais (era `poc_de_para_materiais_fornecedores`),
     (3) ABAC/`mapa_dominio_acesso` numa gold de `dev`.
+
+---
+
+## ▶️ PONTO DE RETOMADA — 2026-09-10 (fim do dia)
+
+**Onde estamos:** ambiente Free faxinado; app de governança rodando com a
+hierarquia de 3 níveis + as 2 telas de Acesso a Dados funcionais. A próxima
+frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
+
+### Estado do app (Free)
+- App `governanca-unity-catalog` **RUNNING**. Fonte: HEAD do repo
+  (`github.com/LucianoZani/app_governace`, `main`, último commit `c77790b`).
+- `app.yaml` no workspace = repo: `USE_ON_BEHALF_OF_USER=false` (tudo SP),
+  `CADASTRO_SCHEMA=governanca_unity_catalog` → schema real
+  **`apps.governanca_unity_catalog_prd`**, `ALLOWED_CATALOGS=dev,prod`,
+  `LLM_ENABLED=true` (`databricks-gpt-oss-120b`). **Sem** `FINOPS_SNAPSHOT_TABLE`.
+- ⚠️ Deploy: **só `databricks workspace import <arquivo>` + `apps deploy`**.
+  NUNCA `databricks sync . --full` (hoje isso sobrescreveu o app.yaml de teste
+  e moveu o schema de `power_steward_test` → `governanca_unity_catalog_prd`).
+- ⚠️ SP do app (`app-z41874`, id `76230498242729`) está no grupo `admins` do
+  workspace — **atalho de teste, remover antes de qualquer coisa séria**
+  (`w.groups.patch(op=REMOVE, path='members[value eq "76230498242729"]')`).
+  Não era necessário (o fix real foi na query de `list_grupos`).
+
+### O que funciona / foi entregue hoje
+- **Hierarquia Franquia › Domínio › Sub-domínio** numa página só
+  (`page_dominios`): árvore (read) + formulário único em cascata. Tabela
+  `apps.governanca_unity_catalog_prd`: `franquias` (1: "Comercial"),
+  `dominios` (3: Vendas/Marketing/Pós vendas, ligados à Comercial),
+  `subdominios` (0).
+- **Owners & Stewards** e **Dashboards**: mostram a Franquia; sub-domínio
+  virou **opcional** (Owner = domínio inteiro).
+- **Acesso por Franquia** (`page_mapa_dominio_acesso`): seletor grupo → membros
+  (`membros_do_grupo`, escala) + busca type-ahead (`buscar_principais`,
+  filtro SCIM `co`, escala). `mapa_dominio_acesso` tem **1 linha de teste**:
+  `usuario = a16b75a5-…` (applicationId do SP `teste-usuario-vendas`),
+  `dominio = Vendas`, sub NULL. `log_cadastros` registrou o INSERT.
+- Fixtures de teste (workspace `governanca-free`): grupos `teste_grupo_comercial`
+  (eu + 3 SPs) / `teste_grupo_analytics` (eu + cross); SPs
+  `teste-usuario-{vendas,marketing,posvenda,cross}`.
+
+### Decisões em aberto (não bloqueiam, mas resolver)
+1. **FinOps no Free**: `FINOPS_SNAPSHOT_TABLE` saiu no drift → página cai no
+   xlsx demo. O job `governanca_finops_snapshot` ainda grava
+   `governance.finops.custo_snapshot`. Repor a env var (workspace only) ou
+   deixar quieto.
+2. **`mapa_*` num schema de segurança**: hoje só SP + owner leem
+   `mapa_dominio_acesso`. Pro row filter ABAC, quem consulta a gold precisa de
+   SELECT nela → mover pra schema dedicado + grant (pergunta nº 4 Comgás).
+3. **Formato do `usuario`**: hoje grava `applicationId` (SP de teste). Pessoa
+   real Comgás = `userName`/UPN. É o que o UDF casa com `current_user()` —
+   confirmar (pergunta nº 2).
+
+### Próximos passos (ordem sugerida)
+1. **PoC Metric View** — refazer sobre uma gold de `dev` (era `vendas`):
+   cadastrar 1 indicador, rodar `gerar_expr_sql` → `_validar_expr_sql_segura`
+   → `testar_candidato` → `publicar_metric_view` (precisa `CREATE` no schema
+   alvo + warehouse). `indicadores` está vazia.
+2. **PoC ABAC** (Fase 2) — escrever a UDF de row filter que lê
+   `apps.governanca_unity_catalog_prd.mapa_dominio_acesso` casando
+   `session_user()` com `usuario`; classificar uma gold de `dev` com tag
+   `domain`; `ALTER TABLE … SET ROW FILTER`; provar filtragem por usuário
+   (usar os SPs `teste-usuario-*`). Antes: resolver decisões 2 e 3 acima
+   (pelo menos pro teste, com um GRANT SELECT nos SPs).
+3. **PoC de-para materiais** — refazer em `dev` (era
+   `poc_de_para_materiais_fornecedores`).
+4. Reapontar o app `data-catalog-streamlit` (explorer) pra `dev` quando for
+   mexer nele (perdeu `demo_catalog_explorer`).
+
+### 4 perguntas pro time de segurança da Comgás (recorrente)
+(1) SP do app lê SCIM (`users.list(filter=…)`, `groups.get`) na Comgás?
+(2) UDF ABAC casa `current_user()` contra e-mail / UPN / userName?
+(3) `dominio` na `mapa_*` = slug ou id? o que a tag `domain` dos dados usa?
+(4) schema dedicado pras `mapa_*` + o SP pode `CREATE TABLE` lá?
