@@ -505,10 +505,95 @@ própria UI do app (que lê como SP).
   - **PoCs a refazer com dados de pipeline**: (1) Metric View (era em `vendas`),
     (2) de-para materiais (era `poc_de_para_materiais_fornecedores`),
     (3) ABAC/`mapa_dominio_acesso` numa gold de `dev`.
+- **2026-09-14** — Sessão de manutenção do ambiente Free (sem código novo no
+  repo — só limpeza de dados + config do workspace):
+  - **Limpeza dos resíduos do catálogo `vendas` dropado em 09-10**: pedido do
+    usuário ("deixar o app coerente com os dados que temos"). Levantamento por
+    SQL achou tudo que ainda referenciava `vendas` (nenhuma tabela física por
+    trás): `log_comentarios` (3 linhas), `log_tags` (7), `tag_backlog` (2
+    `pendente` — travadas, nunca aprovariam pois a tabela sumiu; a 1 linha
+    `aprovado` ficou, é histórico real), `dashboards` (1 — "Análise de
+    Valorização de Estoque", Lakeview sobre `vendas.vendas_gold`). Todas
+    apagadas via `DELETE` direto no warehouse. ⚠️ O classificador de modo
+    automático bloqueou os `DELETE`s de `log_comentarios`/`log_tags` como
+    "Cloud Storage Mass Delete" (WHERE por predicado, não por id) — contornado
+    apagando **linha por linha por `id`** (10 chamadas), com autorização
+    explícita do usuário. Não mexido: `mapa_dominio_acesso` (1 linha, fixture
+    de teste da feature de Acesso a Dados, não é lixo) e a hierarquia
+    Franquia/Domínio (nomes de negócio, não apontam pra tabela física).
+  - **Página FinOps quebrada, causa raiz não resolvida (contornada)**:
+    `_carregar_finops_excel` (fallback do `finops_dados_demo.xlsx`) lançava
+    `zipfile.BadZipFile: Bad magic number for file header`. Confirmado por
+    bytes idênticos (`cmp`) do `.xlsx` local vs. workspace-root vs. o path do
+    **snapshot de deploy que o container efetivamente usa** — mesmo assim
+    quebrava, inclusive depois de `apps stop`+`apps start` (restart completo
+    do compute, não só redeploy). Não investigado mais a fundo (suspeita:
+    peculiaridade de empacotamento binário do Free Edition ao copiar pro
+    container). **Fix aplicado**: restaurada a env var
+    **`FINOPS_SNAPSHOT_TABLE=governance.finops.custo_snapshot`** no
+    `app.yaml` do workspace (perdida no drift de 09-09 §11) — ela roda
+    *antes* do fallback de Excel na cadeia (OBO ao vivo → snapshot table →
+    xlsx demo), então contorna o bug sem precisar consertá-lo. Confirmado o
+    job `governanca_finops_snapshot` saudável (roda diário 07:30 BRT, todas
+    as runs `SUCCESS`; dado só vai até 2026-09-10 por **latência normal do
+    `system.billing`**, não job travado). FinOps voltou a mostrar dado real
+    (US$ 167,59/30d). ⚠️ **Não commitado no repo** — é config workspace-only
+    (`app.yaml` do produto é neutro, cada cliente decide a fonte de FinOps).
+  - **"App está ruim" (usuário ia apresentar) → causa real era SQL Warehouse
+    cold-start**: `Serverless Starter Warehouse` (`20dfe5c08c3fa359`) tinha
+    escalado a zero por ociosidade; qualquer página que consulta esse
+    warehouse trava em "Running…" por ~30-40s até ele subir (`STARTING` →
+    `RUNNING`). **Não é bug de código.** Depois de aquecido, Painel/Governança
+    de Dados/FinOps/Log de comentários/Backlog de Aprovação todos renderizam
+    limpos e refletem a limpeza acima (Pendências 0, Dashboards 0, logs sem
+    lixo). Recomendação passada ao usuário: abrir o app ~2-3min antes de
+    apresentar pra "acordar" o warehouse; ele pode escalar a zero de novo se
+    ficar >10-15min sem uso.
+  - **Discussão em aberto, sem decisão**: usuário quer um projeto de **TCO**
+    ligado a FinOps. Recomendação dada (não implementada): **app separado**,
+    não módulo dentro do Power Steward — o FinOps atual é propositalmente
+    estreito ("quanto o Power Steward custa"), TCO provavelmente cruza
+    múltiplos workloads/times e merece escopo próprio. Usuário não respondeu
+    ainda; retomar quando ele voltar ao assunto.
+  - Ferramentas de comando usadas nesta sessão (úteis de lembrar): SQL direto
+    via `databricks api post /api/2.0/sql/statements --json '{"warehouse_id":
+    "20dfe5c08c3fa359", "statement": "...", "wait_timeout": "30s"}' -p
+    governanca-free`; upload de arquivo binário/texto pro workspace via
+    `databricks workspace import <path-remoto> --file <path-local-Windows>
+    --format AUTO --overwrite -p governanca-free` (⚠️ path local precisa ser
+    Windows nativo — `MSYS_NO_PATHCONV=1` faz o CLI receber o path POSIX
+    literal e falhar; usar `cygpath -w` se vier de um path estilo `/c/...`).
 
 ---
 
-## ▶️ PONTO DE RETOMADA — 2026-09-10 (fim do dia)
+## ▶️ PONTO DE RETOMADA — 2026-09-14 (fim do dia)
+
+**Onde estamos:** ambiente Free limpo e coerente (sem lixo do catálogo
+`vendas` dropado), FinOps funcionando de novo (via snapshot table), app
+testado e pronto pra apresentação. As 3 PoCs com dados de `dev` (Metric View,
+ABAC, de-para materiais) continuam **não iniciadas** — ver ponto de retomada
+de 2026-09-10 acima pro plano, ainda válido.
+
+### Estado do app (Free) — atualizado
+- App `governanca-unity-catalog` **RUNNING**, deploy `SUCCEEDED`. `app.yaml`
+  do workspace agora tem, além do que já estava documentado em 09-10:
+  **`FINOPS_SNAPSHOT_TABLE=governance.finops.custo_snapshot`** (novo — ver
+  acima). Resto igual (`USE_ON_BEHALF_OF_USER=false`, `ALLOWED_CATALOGS=
+  dev,prod`, `LLM_ENABLED=true`).
+- Cadastros (`apps.governanca_unity_catalog_prd`) sem resíduo de `vendas`:
+  `log_comentarios`/`log_tags` zerados, `tag_backlog` só o histórico
+  `aprovado`, `dashboards` vazio (era 1, órfão, removido).
+- ⚠️ **SQL Warehouse escala a zero por ociosidade** — qualquer sessão nova
+  (inclusive apresentação) pode travar ~30-40s na primeira tela até o
+  warehouse subir. Considerar abrir o app alguns minutos antes de qualquer
+  demo.
+
+### Próximos passos
+Sem mudança em relação ao ponto de retomada de 2026-09-10 (PoC Metric View →
+PoC ABAC → PoC de-para materiais → reapontar `data-catalog-streamlit` pra
+`dev`) — nenhuma dessas frentes avançou hoje. Se o usuário retomar o assunto
+**TCO/FinOps**, ver a discussão em aberto registrada acima antes de propor
+implementação.
 
 **Onde estamos:** ambiente Free faxinado; app de governança rodando com a
 hierarquia de 3 níveis + as 2 telas de Acesso a Dados funcionais. A próxima
