@@ -54,6 +54,7 @@ import re
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from dataclasses import dataclass
 
@@ -407,6 +408,21 @@ def run_query(sql: str, prefer_user: bool = False) -> pd.DataFrame:
 def run_exec(sql: str, prefer_user: bool = False) -> None:
     """Executa um comando SQL sem esperar resultado (DDL: ALTER/COMMENT)."""
     run_query(sql, prefer_user=prefer_user)
+
+
+def _parallel(*fns):
+    """Roda `fns` (thunks sem argumento) em paralelo e retorna os resultados
+    na mesma ordem. Cada `run_query`/`_count` é uma chamada HTTP bloqueante
+    pra Statement Execution API — são todas I/O-bound e independentes entre
+    si (tabelas diferentes), então threads paralelizam de verdade (o GIL
+    libera durante a espera de rede) sem risco de corromper estado
+    compartilhado (a Statement Execution API é stateless por chamada, não
+    tem cursor/conexão único sendo disputado)."""
+    if len(fns) == 1:
+        return [fns[0]()]
+    with ThreadPoolExecutor(max_workers=len(fns)) as ex:
+        futures = [ex.submit(fn) for fn in fns]
+        return [f.result() for f in futures]
 
 
 # ---------------------------------------------------------------------------
@@ -6114,14 +6130,14 @@ def _novos_na_semana() -> dict:
     """Quantos registros de cada cadastro foram criados nos últimos 7 dias —
     para os `delta` dos `st.metric` da tela de início."""
     wk = "criado_em >= current_timestamp() - INTERVAL 7 DAYS"
+    chaves = ("dominios", "subdominios", "stewards", "termos", "indicadores")
+    tabelas = ("dominios", "subdominios", "data_stewards", "glossario_negocio", "indicadores")
     try:
-        return {
-            "dominios": _count(f"SELECT count(*) FROM {_cad('dominios')} WHERE {wk}"),
-            "subdominios": _count(f"SELECT count(*) FROM {_cad('subdominios')} WHERE {wk}"),
-            "stewards": _count(f"SELECT count(*) FROM {_cad('data_stewards')} WHERE {wk}"),
-            "termos": _count(f"SELECT count(*) FROM {_cad('glossario_negocio')} WHERE {wk}"),
-            "indicadores": _count(f"SELECT count(*) FROM {_cad('indicadores')} WHERE {wk}"),
-        }
+        valores = _parallel(*(
+            (lambda t=t: _count(f"SELECT count(*) FROM {_cad(t)} WHERE {wk}"))
+            for t in tabelas
+        ))
+        return dict(zip(chaves, valores))
     except Exception:
         return {}
 
@@ -6172,8 +6188,7 @@ def _atividade_recente(limit: int = 8) -> tuple[list[str], int]:
     """Últimas alterações de comentário + tag (texto pronto) e a contagem da
     semana."""
     try:
-        lc = list_log_comentarios(40)
-        lt = list_log_tags(40)
+        lc, lt = _parallel(lambda: list_log_comentarios(40), lambda: list_log_tags(40))
     except Exception:
         return [], 0
 
@@ -6260,8 +6275,10 @@ def page_inicio() -> None:
     can_eng = is_admin or bool(perms.get("engenharia"))
 
     try:
-        doms, subs, stew = list_dominios(), list_subdominios(), list_stewards()
-        glo, ind, dash = list_glossario_negocio(), list_indicadores(), list_dashboards()
+        doms, subs, stew, glo, ind, dash = _parallel(
+            list_dominios, list_subdominios, list_stewards,
+            list_glossario_negocio, list_indicadores, list_dashboards,
+        )
     except Exception as exc:
         st.error(f"Não foi possível carregar o painel: {exc}")
         return
