@@ -664,3 +664,54 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
 (2) UDF ABAC casa `current_user()` contra e-mail / UPN / userName?
 (3) `dominio` na `mapa_*` = slug ou id? o que a tag `domain` dos dados usa?
 (4) schema dedicado pras `mapa_*` + o SP pode `CREATE TABLE` lá?
+
+- **2026-09-15** — Redesenho da tela **Indicador** pra bater com o
+  questionário de cadastro que os Power Stewards da Comgás vão preencher
+  (um Excel, "CADASTRO DE INDICADORES", compartilhado pelo usuário na
+  sessão — mais fácil de circular com outras áreas na hora de definir o
+  indicador do que já nascer direto no app). Esse Excel virou **a fonte da
+  verdade dos campos**.
+  - Excel: 4 abas idênticas (uma por indicador de exemplo), template fixo
+    de **19 perguntas em 5 blocos** — Por que existe? / Como é calculado? /
+    Como analisar? / O que significa? / Quem utiliza? — colunas `Indicador |
+    Bloco | Pergunta orientadora | Exemplo | Preenchimento do Power
+    Steward | Status`.
+  - Mapeamento: 8 perguntas já tinham campo equivalente (`objetivo`,
+    `decisao_negocio`, `memoria_calculo`, `dimensoes_negocio`,
+    `nivel_apuracao`, `restricoes`, `rotulo_seguranca`,
+    `rotulo_privacidade`); 11 são colunas novas (`valor_gerado`,
+    `problema_negocio`, `resultado_esperado`, `fontes_autorizadas`,
+    `consistencia_temporal`, `comparacoes_relevantes`, `significado`,
+    `premissas`, `quem_utiliza`, `privacidade_justificativa`,
+    `seguranca_justificativa`) — migração idempotente em
+    `ensure_cadastro_tables()`.
+  - Formulário do Indicador (`_render_glossario_editor`) reorganizado em
+    **5 `st.expander`**, um por bloco, com o texto de "Exemplo" da
+    planilha como `help=` de cada campo (fiel ao original — não resumido;
+    revisão pedida explicitamente pelo usuário depois de eu ter cortado 3
+    textos na primeira versão). Por pedido do usuário: `Unidade` e
+    `Variáveis utilizadas` (que não vêm do Excel) foram pro Bloco 2, perto
+    de fórmula/fontes autorizadas ("conceitualmente a mesma coisa");
+    `Observações` virou nota geral única no fim (não dá pra duplicar um
+    campo só do banco em 5 blocos). `Rótulo de segurança`/`privacidade`
+    continuam dropdown de tag governada (usados em busca por tag) — os 2
+    campos de justificativa novos complementam, não substituem. Uma
+    menção visível à planilha Excel que tinha vazado pro `st.caption` da
+    tela foi removida a pedido do usuário (não deve aparecer pro usuário
+    final). Tela de detalhe e fila da Engenharia ganharam um expander "Ver
+    questionário completo do negócio". Pipeline de publicação de Metric
+    View **intocado** — a descrição publicada continua só `objetivo` +
+    `decisao_negocio`.
+  - **Testado ao vivo no Free Edition** antes de portar: deploy, criação
+    de indicador de teste ("Teste Questionário Excel"), os 5 blocos
+    renderizando, tooltips batendo com o Excel, salvar/recarregar
+    persistindo certo.
+  - Commitado direto na `main` (fluxo do repo): `561d928` (questionário) +
+    `cd6fd47` (remoção da menção ao Excel). Mesma mudança **portada pro
+    bundle da Comgás** (`dados-ia-power-steward`, aplicando o diff via
+    `git apply`) — ver `Documents/Projetos/Comgas/CLAUDE.md` (arquivo de
+    contexto compartilhado) pro relato completo dessa frente, incluindo os
+    bugs de permissão achados/corrigidos no mesmo dia e a PR !57296
+    (`feature/indicador-questionario-obo` → `dev`, aberta, aguardando
+    aprovação) que junta essa mudança com o fix do `admin_acesso` e a
+    ligação do OBO.
