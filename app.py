@@ -1975,6 +1975,21 @@ def ensure_cadastro_tables() -> bool:
             run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (dimensoes_negocio STRING)")
         if "decisao_negocio" not in existing_cols:
             run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS (decisao_negocio STRING)")
+        # Campos de negócio alinhados ao questionário de cadastro de
+        # indicadores usado pelos Power Stewards (planilha "CADASTRO DE
+        # INDICADORES", 19 perguntas em 5 blocos — essa passou a ser a fonte
+        # da verdade dos campos). `privacidade_justificativa`/
+        # `seguranca_justificativa` complementam os dropdowns de tag
+        # governada `rotulo_privacidade`/`rotulo_seguranca` (que continuam
+        # como estavam) com o texto narrativo que a planilha pede.
+        for col in (
+            "valor_gerado", "problema_negocio", "resultado_esperado",
+            "fontes_autorizadas", "consistencia_temporal",
+            "comparacoes_relevantes", "significado", "premissas",
+            "quem_utiliza", "privacidade_justificativa", "seguranca_justificativa",
+        ):
+            if col not in existing_cols:
+                run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS ({col} STRING)")
     except Exception:
         pass
     # Migração da antiga `termos_negocio` (registro único com seletor de tipo)
@@ -4709,6 +4724,10 @@ def _render_glossario_editor(
         "rotulo_seguranca": "", "rotulo_privacidade": "",
         "nivel_apuracao": "", "unidade": "", "variaveis_utilizadas": "",
         "memoria_calculo": "", "restricoes": "", "dimensoes_negocio": "", "decisao_negocio": "",
+        "valor_gerado": "", "problema_negocio": "", "resultado_esperado": "",
+        "fontes_autorizadas": "", "consistencia_temporal": "", "comparacoes_relevantes": "",
+        "significado": "", "premissas": "", "quem_utiliza": "",
+        "privacidade_justificativa": "", "seguranca_justificativa": "",
         "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
         "status_publicacao": "rascunho",
     }
@@ -4774,76 +4793,181 @@ def _render_glossario_editor(
             on_change=_add_keyword, args=(kp,),
         )
     kw_list = _render_keyword_chips(kp)
-    objetivo = st.text_area(
-        "Objetivo" if is_indicador else "Definição",
-        value=cur.get("objetivo") or "", key=f"{kp}_obj_{rk}",
-    )
 
     rotulo_seguranca = rotulo_privacidade = observacoes = ""
     variaveis_utilizadas = memoria_calculo = restricoes = unidade = nivel_apuracao = ""
     dimensoes_negocio = decisao_negocio = ""
-    if is_indicador:
-        decisao_negocio = st.text_area(
-            "Decisão apoiada", value=cur.get("decisao_negocio") or "", key=f"term_decisao_{rk}",
-            help='Que decisão esse indicador ajuda a tomar? Ex.: "decidir se '
-                 'abrimos uma nova frente comercial na região X". Junto com o '
-                 "Objetivo, vira a descrição da Metric View publicada.",
+    valor_gerado = problema_negocio = resultado_esperado = ""
+    fontes_autorizadas = consistencia_temporal = comparacoes_relevantes = ""
+    significado = premissas = quem_utiliza = ""
+    privacidade_justificativa = seguranca_justificativa = ""
+
+    if not is_indicador:
+        objetivo = st.text_area("Definição", value=cur.get("objetivo") or "", key=f"{kp}_obj_{rk}")
+    else:
+        # Os 5 blocos abaixo espelham, pergunta a pergunta, o questionário da
+        # planilha "CADASTRO DE INDICADORES" que os Power Stewards preenchem
+        # antes de cadastrar aqui (fonte da verdade dos campos). O texto de
+        # `help=` reproduz o "Exemplo" da planilha.
+        objetivo = ""
+        st.caption(
+            "Questionário alinhado à planilha de cadastro de indicadores dos "
+            "Power Stewards — mesmos campos, organizados nos mesmos blocos."
         )
 
-        st.markdown("##### Classificação")
-        c3, c4 = st.columns(2)
-        with c3:
-            rotulo_seguranca = st.selectbox(
-                "Rótulo de segurança", options=seguranca_opts,
-                index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
-                key=f"{kp}_seg_{rk}",
+        with st.expander("1 · Por que o indicador existe?", expanded=True):
+            objetivo = st.text_area(
+                "Qual objetivo estratégico monitora?",
+                value=cur.get("objetivo") or "", key=f"{kp}_obj_{rk}",
+                help="Ex.: Objetivo Estratégico Reduzir perdas operacionais;",
             )
-        with c4:
-            rotulo_privacidade = st.selectbox(
-                "Rótulo de privacidade", options=privacidade_opts,
-                index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
-                key=f"{kp}_priv_{rk}",
+            decisao_negocio = st.text_area(
+                "Qual decisão ele apoia?", value=cur.get("decisao_negocio") or "", key=f"term_decisao_{rk}",
+                help="Ex.: Decisão apoiada: Priorização de investimentos e "
+                     "manutenção emergencial da rede. Junto com o objetivo, "
+                     "vira a descrição da Metric View publicada.",
+            )
+            valor_gerado = st.text_area(
+                "Qual valor gera para a COMGÁS?", value=cur.get("valor_gerado") or "", key=f"term_valor_{rk}",
+                help="Ex.: Valor gerado: Redução de custos com perda e "
+                     "aumento da eficiência operacional.",
+            )
+            problema_negocio = st.text_area(
+                "Qual o problema de negócio ele busca identificar?",
+                value=cur.get("problema_negocio") or "", key=f"term_problema_{rk}",
+                help="Ex.: há pouca capacidade de reação pois a Comgás só "
+                     "consegue perceber a perda a partir da cobrança.",
+            )
+            resultado_esperado = st.text_area(
+                "Qual resultado do indicador é positivo para COMGÁS?",
+                value=cur.get("resultado_esperado") or "", key=f"term_resultado_{rk}",
+                help="Ex.: Valor Esperado: Quanto menor o índice, melhor o "
+                     "resultado para Comgás.",
             )
 
-        st.markdown("##### Indicador")
-        c5, c6 = st.columns(2)
-        with c5:
-            default_unidade = cur.get("unidade") or ""
-            unidade_opts = _UNIDADE_OPTIONS if default_unidade in _UNIDADE_OPTIONS else [default_unidade] + _UNIDADE_OPTIONS
-            unidade_sel = st.selectbox(
-                "Unidade", options=unidade_opts, index=unidade_opts.index(default_unidade), key=f"term_unidade_{rk}",
-            )
-            if unidade_sel == "Outra…":
-                unidade = st.text_input(
-                    "Unidade (digite)",
-                    value="" if default_unidade in _UNIDADE_OPTIONS else default_unidade,
-                    key=f"term_unidade_custom_{rk}",
+        with st.expander("2 · Como ele é calculado?", expanded=True):
+            c_mem, c_uni = st.columns([2, 1])
+            with c_mem:
+                memoria_calculo = st.text_area(
+                    "Qual é a fórmula oficial de cálculo?",
+                    value=cur.get("memoria_calculo") or "", key=f"term_memoria_{rk}",
+                    help="Ex.: Receita Bruta - Imposto - Cancelamentos · "
+                         "Receita Bruta = Valor Faturado da nota fiscal · "
+                         "Impostos = Soma de Impostos da nota fiscal · "
+                         "Cancelamentos = Anulação de Fatura e Descontos "
+                         "Financeiros. A Engenharia usa esse texto pra montar "
+                         "a fórmula técnica.",
                 )
-            else:
-                unidade = unidade_sel
-        with c6:
+            with c_uni:
+                default_unidade = cur.get("unidade") or ""
+                unidade_opts = _UNIDADE_OPTIONS if default_unidade in _UNIDADE_OPTIONS else [default_unidade] + _UNIDADE_OPTIONS
+                unidade_sel = st.selectbox(
+                    "Unidade", options=unidade_opts, index=unidade_opts.index(default_unidade), key=f"term_unidade_{rk}",
+                )
+                if unidade_sel == "Outra…":
+                    unidade = st.text_input(
+                        "Unidade (digite)",
+                        value="" if default_unidade in _UNIDADE_OPTIONS else default_unidade,
+                        key=f"term_unidade_custom_{rk}",
+                    )
+                else:
+                    unidade = unidade_sel
+            fontes_autorizadas = st.text_area(
+                "Quais são as fontes autorizadas?",
+                value=cur.get("fontes_autorizadas") or "", key=f"term_fontes_{rk}",
+                help="Ex.: Receita Bruta: SAP financeiro (automático) · "
+                     "Cancelamentos: Planilha (manual).",
+            )
+            variaveis_utilizadas = st.text_area(
+                "Variáveis utilizadas", value=cur.get("variaveis_utilizadas") or "", key=f"term_vars_{rk}",
+                help="Mesma ideia de 'fontes autorizadas', em formato de "
+                     "lista de variáveis — se já preencheu lá, pode deixar "
+                     "este em branco.",
+            )
+            consistencia_temporal = st.text_area(
+                "Como garantir consistência ao longo do tempo?",
+                value=cur.get("consistencia_temporal") or "", key=f"term_consist_{rk}",
+                help="Ex.: Periodicidade: indicador fechado é Mensal, mas "
+                     "deve ser apurado diariamente para acompanhamento de "
+                     "tendência.",
+            )
+
+        with st.expander("3 · Como ele deve ser analisado?", expanded=True):
+            dimensoes_negocio = st.text_area(
+                "Quais dimensões importam?", value=cur.get("dimensoes_negocio") or "", key=f"term_dimneg_{rk}",
+                help="Ex.: Região; Canal; Produto; Cliente; Tipo de "
+                     "Instalação. A Engenharia usa esse texto pra escolher "
+                     "as colunas de Dimensão.",
+            )
             nivel_apuracao = st.selectbox(
-                "Nível de apuração", options=_NIVEL_APURACAO_OPTIONS,
+                "Qual granularidade gera valor?", options=_NIVEL_APURACAO_OPTIONS,
                 index=_NIVEL_APURACAO_OPTIONS.index(cur["nivel_apuracao"]) if cur.get("nivel_apuracao") in _NIVEL_APURACAO_OPTIONS else 0,
+                help="Ex.: Mensal, com apuração diária.",
                 key=f"term_nivel_{rk}",
             )
-        variaveis_utilizadas = st.text_area("Variáveis utilizadas", value=cur.get("variaveis_utilizadas") or "", key=f"term_vars_{rk}")
-        dimensoes_negocio = st.text_area(
-            "Dimensões", value=cur.get("dimensoes_negocio") or "", key=f"term_dimneg_{rk}",
-            help='Por quais recortes esse indicador deve poder ser analisado? '
-                 'Ex.: "por região, por mês, por tipo de cliente". A '
-                 "Engenharia usa esse texto pra escolher as colunas de "
-                 "Dimensão.",
+            comparacoes_relevantes = st.text_area(
+                "Quais comparações são relevantes?",
+                value=cur.get("comparacoes_relevantes") or "", key=f"term_comp_{rk}",
+                help="Ex.: Volume de Vendas não pode ser negativo.",
+            )
+
+        with st.expander("4 · O que significa?", expanded=True):
+            significado = st.text_area(
+                "O que o indicador significa?", value=cur.get("significado") or "", key=f"term_signif_{rk}",
+                help="Ex.: Definição oficial: Cliente com primeiro contrato "
+                     "ativo registrado no período.",
+            )
+            restricoes = st.text_area(
+                "O que fica fora do conceito?", value=cur.get("restricoes") or "", key=f"term_restr_{rk}",
+                help="Ex.: Limitação: Não considera reativações.",
+            )
+            premissas = st.text_area(
+                "Quais premissas sustentam a definição?", value=cur.get("premissas") or "", key=f"term_premissas_{rk}",
+                help="Ex.: Contrato ativo considera data de início do "
+                     "contrato, não criação/assinatura.",
+            )
+
+        with st.expander("5 · Quem utiliza?", expanded=True):
+            quem_utiliza = st.text_area(
+                "Quem consome e para qual decisão?", value=cur.get("quem_utiliza") or "", key=f"term_quemutiliza_{rk}",
+                help="Ex.: Diretoria Comercial: gerente distrital precisa do "
+                     "indicador para decisão mensal de alocação de recursos "
+                     "em vendas. Pode visualizar somente o seu Distrito. · "
+                     "Planejamento Estratégico: Gerência Executiva precisa "
+                     "do indicador para definir investimentos anuais. · "
+                     "Presidência: presidente acompanha indicador no nível "
+                     "macro e região para entender tendências futuras.",
+            )
+            c3, c4 = st.columns(2)
+            with c3:
+                rotulo_seguranca = st.selectbox(
+                    "Rótulo de segurança", options=seguranca_opts,
+                    index=seguranca_opts.index(cur["rotulo_seguranca"]) if cur.get("rotulo_seguranca") in seguranca_opts else 0,
+                    key=f"{kp}_seg_{rk}",
+                )
+                seguranca_justificativa = st.text_area(
+                    "Qual é a classificação de segurança? (justificativa)",
+                    value=cur.get("seguranca_justificativa") or "", key=f"term_segjust_{rk}",
+                    help="Ex.: Classificação de Segurança: Confidencial. "
+                         "Classes: Público/Interno/Confidencial/Restrito.",
+                )
+            with c4:
+                rotulo_privacidade = st.selectbox(
+                    "Rótulo de privacidade", options=privacidade_opts,
+                    index=privacidade_opts.index(cur["rotulo_privacidade"]) if cur.get("rotulo_privacidade") in privacidade_opts else 0,
+                    key=f"{kp}_priv_{rk}",
+                )
+                privacidade_justificativa = st.text_area(
+                    "Qual é a classificação de Privacidade? (justificativa)",
+                    value=cur.get("privacidade_justificativa") or "", key=f"term_privjust_{rk}",
+                    help="Ex.: Dado Pessoal quando visto por Empregado e "
+                         "Depto (quando é menor que 3 pessoas na área).",
+                )
+
+        observacoes = st.text_area(
+            "Observações gerais", value=cur.get("observacoes") or "", key=f"{kp}_obs_{rk}",
+            help="Qualquer coisa que não coube nos blocos acima.",
         )
-        memoria_calculo = st.text_area(
-            "Memória de cálculo (fórmula)",
-            value=cur.get("memoria_calculo") or "", key=f"term_memoria_{rk}",
-            help="Descreva a conta como você explicaria pra alguém do time — "
-                 "ex.: \"Receita total dividida pela quantidade de clientes ativos\". "
-                 "A Engenharia usa esse texto pra montar a fórmula técnica.",
-        )
-        restricoes = st.text_area("Restrições", value=cur.get("restricoes") or "", key=f"term_restr_{rk}")
-        observacoes = st.text_area("Observações", value=cur.get("observacoes") or "", key=f"{kp}_obs_{rk}")
 
     rotulo_item = "indicador" if is_indicador else "termo"
     st.divider()
@@ -4871,6 +4995,12 @@ def _render_glossario_editor(
                 variaveis_utilizadas=variaveis_utilizadas, memoria_calculo=memoria_calculo,
                 restricoes=restricoes,
                 dimensoes_negocio=dimensoes_negocio, decisao_negocio=decisao_negocio,
+                valor_gerado=valor_gerado, problema_negocio=problema_negocio,
+                resultado_esperado=resultado_esperado, fontes_autorizadas=fontes_autorizadas,
+                consistencia_temporal=consistencia_temporal, comparacoes_relevantes=comparacoes_relevantes,
+                significado=significado, premissas=premissas, quem_utiliza=quem_utiliza,
+                privacidade_justificativa=privacidade_justificativa,
+                seguranca_justificativa=seguranca_justificativa,
             )
             # `status_publicacao` só é tocado aqui na criação (sempre nasce
             # 'rascunho'). Em edição, a tela de negócio nunca escreve nessa
@@ -4905,7 +5035,10 @@ def _render_glossario_editor(
                 st.session_state.pop(f"{kp}_{suf}_novo", None)
             for base in ("ind_ps", "term_unidade", "term_unidade_custom",
                          "term_nivel", "term_vars", "term_restr", "term_memoria",
-                         "term_dimneg", "term_decisao"):
+                         "term_dimneg", "term_decisao", "term_valor", "term_problema",
+                         "term_resultado", "term_fontes", "term_consist", "term_comp",
+                         "term_signif", "term_premissas", "term_quemutiliza",
+                         "term_segjust", "term_privjust"):
                 st.session_state.pop(f"{base}_novo", None)
         _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} salvo.")
 
@@ -4983,6 +5116,24 @@ def page_indicadores_engenharia() -> None:
         st.caption(f"Variáveis utilizadas: {cur['variaveis_utilizadas']}")
     if cur.get("restricoes"):
         st.caption(f"Restrições: {cur['restricoes']}")
+
+    with st.expander("Ver questionário completo do negócio"):
+        for titulo, campo in (
+            ("1 · Por que existe — Valor gerado", "valor_gerado"),
+            ("1 · Por que existe — Problema de negócio", "problema_negocio"),
+            ("1 · Por que existe — Resultado esperado", "resultado_esperado"),
+            ("2 · Como é calculado — Fontes autorizadas", "fontes_autorizadas"),
+            ("2 · Como é calculado — Consistência ao longo do tempo", "consistencia_temporal"),
+            ("3 · Como analisar — Comparações relevantes", "comparacoes_relevantes"),
+            ("4 · O que significa", "significado"),
+            ("4 · O que significa — Premissas", "premissas"),
+            ("5 · Quem utiliza", "quem_utiliza"),
+            ("5 · Quem utiliza — Justificativa de segurança", "seguranca_justificativa"),
+            ("5 · Quem utiliza — Justificativa de privacidade", "privacidade_justificativa"),
+        ):
+            if cur.get(campo):
+                st.markdown(f"**{titulo}**")
+                st.write(cur[campo])
 
     st.divider()
     _sync_tabela_picker_state("dim", rk, _parse_tabelas_json(cur.get("dimensao_tabelas")))
@@ -5066,6 +5217,23 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
         if cur.get("restricoes"):
             st.markdown("**Restrições**")
             st.write(cur["restricoes"])
+        with st.expander("Ver questionário completo do negócio"):
+            for titulo, campo in (
+                ("1 · Valor gerado", "valor_gerado"),
+                ("1 · Problema de negócio", "problema_negocio"),
+                ("1 · Resultado esperado", "resultado_esperado"),
+                ("2 · Fontes autorizadas", "fontes_autorizadas"),
+                ("2 · Consistência ao longo do tempo", "consistencia_temporal"),
+                ("3 · Comparações relevantes", "comparacoes_relevantes"),
+                ("4 · O que significa", "significado"),
+                ("4 · Premissas", "premissas"),
+                ("5 · Quem utiliza", "quem_utiliza"),
+                ("5 · Justificativa de segurança", "seguranca_justificativa"),
+                ("5 · Justificativa de privacidade", "privacidade_justificativa"),
+            ):
+                if cur.get(campo):
+                    st.markdown(f"**{titulo}**")
+                    st.write(cur[campo])
         for titulo, campo in (("Dimensão", "dimensao_tabelas"), ("Métrica", "metrica_tabelas")):
             items = _parse_tabelas_json(cur.get(campo))
             if items:
