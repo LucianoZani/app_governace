@@ -4810,11 +4810,6 @@ def _render_glossario_editor(
         # antes de cadastrar aqui (fonte da verdade dos campos). O texto de
         # `help=` reproduz o "Exemplo" da planilha.
         objetivo = ""
-        st.caption(
-            "Questionário alinhado à planilha de cadastro de indicadores dos "
-            "Power Stewards — mesmos campos, organizados nos mesmos blocos."
-        )
-
         with st.expander("1 · Por que o indicador existe?", expanded=True):
             objetivo = st.text_area(
                 "Qual objetivo estratégico monitora?",
