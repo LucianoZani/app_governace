@@ -1893,6 +1893,17 @@ def ensure_cadastro_tables() -> bool:
         f"CREATE TABLE IF NOT EXISTS {_cad('log_cadastros')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, usuario STRING, tabela STRING, "
         f"operacao STRING, registro_id STRING, antes STRING, depois STRING, criado_em TIMESTAMP)",
+        # Pedidos de acesso em autoatendimento: qualquer usuário logado pode
+        # descrever o que precisa (ex.: virar Power Steward, ver Cadastros) na
+        # tela "Solicitar Acesso"; cai numa fila que só admin vê e decide
+        # ("Solicitações de Acesso"). Aprovar/negar aqui só registra a decisão
+        # — quem de fato marca as flags é o admin, à mão, em Usuários (sem
+        # concessão automática).
+        f"CREATE TABLE IF NOT EXISTS {_cad('solicitacoes_acesso')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, usuario STRING, nome STRING, "
+        f"o_que_precisa STRING, motivo STRING, status STRING, "
+        f"decidido_por STRING, decidido_em TIMESTAMP, comentario_decisao STRING, "
+        f"criado_em TIMESTAMP)",
     ]
     for stmt in ddl:
         run_exec(stmt)  # SP
@@ -2233,6 +2244,40 @@ def list_tag_backlog(status: str | None = None) -> pd.DataFrame:
     )
 
 
+@st.cache_data(ttl=15, show_spinner=False)
+def list_solicitacoes_acesso(status: str | None = None) -> pd.DataFrame:
+    where = f"WHERE status = {q_str(status)}" if status else ""
+    return run_query(
+        f"SELECT id, usuario, nome, o_que_precisa, motivo, status, decidido_por, "
+        f"decidido_em, comentario_decisao, criado_em "
+        f"FROM {_cad('solicitacoes_acesso')} {where} ORDER BY criado_em DESC"
+    )
+
+
+def _registrar_solicitacao_acesso(usuario: str, nome: str, o_que_precisa: str, motivo: str) -> None:
+    run_exec(
+        f"INSERT INTO {_cad('solicitacoes_acesso')} "
+        "(usuario, nome, o_que_precisa, motivo, status, criado_em) VALUES ("
+        f"{q_str(usuario)}, {_qn(nome)}, {q_str(o_que_precisa)}, {_qn(motivo)}, "
+        "'pendente', current_timestamp())"
+    )
+    list_solicitacoes_acesso.clear()
+
+
+def _decidir_solicitacao_acesso(item: dict, status: str, aprovador: str, comentario: str) -> None:
+    run_exec(
+        f"UPDATE {_cad('solicitacoes_acesso')} SET status = {q_str(status)}, "
+        f"decidido_por = {q_str(aprovador)}, decidido_em = current_timestamp(), "
+        f"comentario_decisao = {_qn(comentario)} WHERE id = {int(item['id'])}"
+    )
+    list_solicitacoes_acesso.clear()
+    st.session_state["cad_feedback"] = (
+        "success",
+        "✅ Solicitação aprovada." if status == "aprovado" else "🚫 Solicitação negada.",
+    )
+    st.rerun()
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def list_log_comentarios(limit: int = 1000) -> pd.DataFrame:
     """Log de auditoria das alterações de comentário (mais recentes primeiro)."""
@@ -2499,7 +2544,7 @@ def _clear_cad_caches() -> None:
         list_dashboards, list_padroes_dado_pessoal, list_tag_backlog, get_user_perms,
         list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
         list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso, list_grupos,
-        buscar_principais, membros_do_grupo,
+        buscar_principais, membros_do_grupo, list_solicitacoes_acesso,
     ):
         try:
             f.clear()
@@ -6061,6 +6106,124 @@ def page_tag_backlog() -> None:
             )
 
 
+def page_solicitar_acesso() -> None:
+    st.title("🙋 Solicitar Acesso")
+    st.caption(
+        "Precisa de acesso a alguma tela ou papel (ex.: virar Power Steward, ver "
+        "Cadastros, Engenharia)? Descreva abaixo — um admin revisa e ajusta suas "
+        "permissões em **Usuários**. Enviar aqui não concede acesso automaticamente."
+    )
+    _show_cad_feedback()
+    user = st.session_state.get("user", "")
+    perms = st.session_state.get("perms", {}) or {}
+
+    with st.form("form_solicitar_acesso", clear_on_submit=True):
+        nome = st.text_input("Seu nome", value=str(perms.get("nome") or ""))
+        o_que = st.text_area(
+            "O que você precisa?",
+            placeholder="Ex.: acesso como Power Steward para cadastrar o indicador X",
+        )
+        motivo = st.text_area("Por quê? (opcional)", placeholder="Contexto que ajuda o admin a decidir")
+        enviado = st.form_submit_button("Enviar solicitação", type="primary")
+
+    if enviado:
+        if not o_que.strip():
+            st.session_state["cad_feedback"] = ("error", "Descreva o que você precisa.")
+        else:
+            try:
+                _registrar_solicitacao_acesso(user, nome.strip(), o_que.strip(), motivo.strip())
+                st.session_state["cad_feedback"] = ("success", "✅ Solicitação enviada. Um admin vai revisar.")
+            except Exception as exc:
+                st.session_state["cad_feedback"] = ("error", f"Falha ao enviar: {exc}")
+        st.rerun()
+
+    st.divider()
+    st.markdown("#### Minhas solicitações")
+    try:
+        minhas = list_solicitacoes_acesso()
+        minhas = minhas[minhas["usuario"] == user]
+    except Exception:
+        minhas = pd.DataFrame()
+    if minhas.empty:
+        st.caption("Nenhuma solicitação enviada ainda.")
+    else:
+        st.dataframe(
+            minhas.rename(columns={
+                "criado_em": "Enviado em", "o_que_precisa": "O que precisa", "motivo": "Motivo",
+                "status": "Status", "comentario_decisao": "Comentário do admin",
+            })[["Enviado em", "O que precisa", "Motivo", "Status", "Comentário do admin"]],
+            use_container_width=True, hide_index=True,
+        )
+
+
+def page_solicitacoes_acesso() -> None:
+    st.title("📥 Solicitações de Acesso")
+    st.caption(
+        "Pedidos enviados por usuários na tela **Solicitar Acesso**. Aprovar/negar "
+        "aqui só registra a decisão — quem de fato concede o acesso é você, à mão, "
+        "marcando as flags certas em **Usuários**."
+    )
+    _show_cad_feedback()
+    user = st.session_state.get("user", "")
+
+    try:
+        pend = list_solicitacoes_acesso("pendente")
+    except Exception as exc:
+        st.warning(f"Não foi possível ler as solicitações: {exc}")
+        return
+
+    if pend.empty:
+        st.success("Nenhuma solicitação pendente. 🎉")
+    else:
+        st.dataframe(
+            pend.rename(columns={
+                "criado_em": "Enviado em", "usuario": "Usuário", "nome": "Nome",
+                "o_que_precisa": "O que precisa", "motivo": "Motivo",
+            })[["Enviado em", "Usuário", "Nome", "O que precisa", "Motivo"]],
+            use_container_width=True, hide_index=True,
+        )
+
+        st.divider()
+        st.markdown("#### Decidir solicitação")
+        recs = pend.to_dict("records")
+        opts = [
+            f'#{r["id"]} — {r["nome"] or r["usuario"]} — {str(r["o_que_precisa"])[:60]}'
+            for r in recs
+        ]
+        sel = st.selectbox("Item", options=opts, key="sol_acesso_sel")
+        cur = recs[opts.index(sel)]
+        comentario = st.text_input("Comentário (opcional)", key="sol_acesso_comentario")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Aprovar", type="primary"):
+                _decidir_solicitacao_acesso(cur, "aprovado", user, comentario)
+        with c2:
+            if st.button("❌ Negar"):
+                _decidir_solicitacao_acesso(cur, "negado", user, comentario)
+
+    st.divider()
+    with st.expander("Histórico de decisões"):
+        try:
+            hist = list_solicitacoes_acesso()
+            hist = hist[hist["status"] != "pendente"]
+        except Exception:
+            hist = pd.DataFrame()
+        if hist.empty:
+            st.caption("Nenhuma decisão registrada ainda.")
+        else:
+            st.dataframe(
+                hist.rename(columns={
+                    "criado_em": "Enviado em", "usuario": "Usuário", "nome": "Nome",
+                    "o_que_precisa": "O que precisa", "status": "Status",
+                    "decidido_por": "Decidido por", "decidido_em": "Decidido em",
+                    "comentario_decisao": "Comentário",
+                })[["Enviado em", "Usuário", "Nome", "O que precisa", "Status",
+                    "Decidido por", "Decidido em", "Comentário"]],
+                use_container_width=True, hide_index=True,
+            )
+
+
 def make_dashboard_page(row: dict):
     """Fábrica de página para um dashboard cadastrado (um `st.Page` por linha)."""
 
@@ -6499,8 +6662,14 @@ def main() -> None:
     pg_inicio = st.Page(page_inicio, title="Início", icon="🧭", default=True)
     pg_consulta = st.Page(page_consulta_termos, title="Termos de Negócio", icon="📚")
     nav_pages["consulta"] = pg_consulta
+    # Solicitar Acesso: visível pra qualquer usuário logado (não depende de
+    # nenhuma flag) — é o ponto de entrada pra quem ainda não tem papel/flag
+    # nenhuma, ex. um Power Steward novo. Só registra o pedido; quem concede
+    # de fato é o admin em Usuários (ver page_solicitar_acesso).
+    pg_solicitar_acesso = st.Page(page_solicitar_acesso, title="Solicitar Acesso", icon="🙋")
+    nav_pages["solicitar_acesso"] = pg_solicitar_acesso
 
-    pages: dict = {"Painel": [pg_inicio]}
+    pages: dict = {"Painel": [pg_inicio, pg_solicitar_acesso]}
 
     # Cadastro: a flag `ver_cadastros` (rótulo "Cadastro") libera só Domínios
     # (página única com Franquias / Domínios / Sub-domínios em abas) e
@@ -6535,7 +6704,14 @@ def main() -> None:
     # menu próprio em vez de dentro de Cadastros (nem `ver_cadastros` nem
     # `power_steward` dão acesso a ela).
     if is_admin:
-        pages["Admin"] = [st.Page(page_permissoes, title="Usuários", icon="🔒")]
+        pg_solicitacoes_acesso = st.Page(
+            page_solicitacoes_acesso, title="Solicitações de Acesso", icon="📥"
+        )
+        nav_pages["solicitacoes_acesso"] = pg_solicitacoes_acesso
+        pages["Admin"] = [
+            st.Page(page_permissoes, title="Usuários", icon="🔒"),
+            pg_solicitacoes_acesso,
+        ]
 
     # Cadastro de Acesso a Dados (blueprint) — liberado pela flag `admin_acesso`
     # (mesma regra dos outros menus: ter a flag = ver e usar). Admin ignora.
