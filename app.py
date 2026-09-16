@@ -2009,10 +2009,26 @@ def ensure_cadastro_tables() -> bool:
         # `seguranca_justificativa` complementam os dropdowns de tag
         # governada `rotulo_privacidade`/`rotulo_seguranca` (que continuam
         # como estavam) com o texto narrativo que a planilha pede.
+        # `significado` virou `definicao` — o campo subiu pro topo do
+        # formulário (ao lado de Franquia, rótulo "Definição do indicador")
+        # e deixou de ser parte do bloco 4 do questionário. RENAME COLUMN
+        # exige column mapping por nome no Delta; habilita antes se preciso.
+        # Roda antes do loop abaixo (que só CRIA `definicao` do zero se ela
+        # ainda não existir) pra tabela com dado antigo ser renomeada em vez
+        # de ganhar uma coluna nova vazia.
+        if "significado" in existing_cols and "definicao" not in existing_cols:
+            run_exec(
+                f"ALTER TABLE {_cad('indicadores')} SET TBLPROPERTIES ("
+                "'delta.columnMapping.mode' = 'name', "
+                "'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5')"
+            )
+            run_exec(f"ALTER TABLE {_cad('indicadores')} RENAME COLUMN significado TO definicao")
+            existing_cols.discard("significado")
+            existing_cols.add("definicao")
         for col in (
             "valor_gerado", "problema_negocio", "resultado_esperado",
             "fontes_autorizadas", "consistencia_temporal",
-            "comparacoes_relevantes", "significado", "premissas",
+            "comparacoes_relevantes", "definicao", "premissas",
             "quem_utiliza", "privacidade_justificativa", "seguranca_justificativa",
         ):
             if col not in existing_cols:
@@ -2171,6 +2187,17 @@ _GLOSSARIO_COLS_COMUNS = (
     "rotulo_seguranca, rotulo_privacidade"
 )
 
+# As 11 colunas do questionário de cadastro (planilha "CADASTRO DE
+# INDICADORES") que não têm campo equivalente pré-existente — ver commit
+# 561d928. Precisam estar no SELECT de `list_indicadores`, senão o valor é
+# salvo no banco mas nunca volta pro formulário/detalhe (bug real, achado
+# 2026-09-15 no bundle Comgás e corrigido aqui também).
+_INDICADOR_QUESTIONARIO_COLS = (
+    "valor_gerado, problema_negocio, resultado_esperado, fontes_autorizadas, "
+    "consistencia_temporal, comparacoes_relevantes, definicao, premissas, "
+    "quem_utiliza, privacidade_justificativa, seguranca_justificativa"
+)
+
 
 @st.cache_data(ttl=30, show_spinner=False)
 def list_glossario_negocio() -> pd.DataFrame:
@@ -2184,7 +2211,7 @@ def list_indicadores() -> pd.DataFrame:
     return run_query(
         f"SELECT {_GLOSSARIO_COLS_COMUNS}, power_steward, nivel_apuracao, unidade, "
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
-        f"dimensoes_negocio, decisao_negocio, "
+        f"dimensoes_negocio, decisao_negocio, {_INDICADOR_QUESTIONARIO_COLS}, "
         f"dimensao_tabelas, metrica_tabelas, status_publicacao, "
         f"expr_validada, metric_view_publicada "
         f"FROM {_cad('indicadores')} ORDER BY nome"
@@ -2202,12 +2229,14 @@ def list_termos_negocio() -> pd.DataFrame:
         f"CAST(NULL AS STRING) AS variaveis_utilizadas, "
         f"CAST(NULL AS STRING) AS memoria_calculo, CAST(NULL AS STRING) AS restricoes, "
         f"CAST(NULL AS STRING) AS dimensoes_negocio, CAST(NULL AS STRING) AS decisao_negocio, "
+        + ", ".join(f"CAST(NULL AS STRING) AS {c}" for c in _INDICADOR_QUESTIONARIO_COLS.split(", "))
+        + " , "
         f"'[]' AS dimensao_tabelas, '[]' AS metrica_tabelas "
         f"FROM {_cad('glossario_negocio')} "
         f"UNION ALL "
         f"SELECT {_GLOSSARIO_COLS_COMUNS}, power_steward, nivel_apuracao, unidade, "
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
-        f"dimensoes_negocio, decisao_negocio, "
+        f"dimensoes_negocio, decisao_negocio, {_INDICADOR_QUESTIONARIO_COLS}, "
         f"dimensao_tabelas, metrica_tabelas FROM {_cad('indicadores')} "
         f"ORDER BY nome"
     )
@@ -3185,7 +3214,15 @@ def gerar_expr_sql(formula_texto: str, measures_colunas: list[str]) -> dict:
     response = client.chat.completions.create(
         model=LLM_ENDPOINT,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=400,
+        # 400 não bastava: modelos de raciocínio (ex.: gpt-oss) gastam boa
+        # parte do orçamento de tokens num bloco `reasoning` interno antes do
+        # bloco `text` com a resposta de fato — com 400 o corte
+        # (`finish_reason=length`) acontecia no meio do raciocínio e a
+        # resposta nunca trazia texto nenhum, só o raciocínio (que
+        # `_extract_text` descarta de propósito). Confirmado testando o
+        # endpoint direto: 400 -> só bloco `reasoning`, sem `text`; 2000 ->
+        # bloco `text` com o JSON esperado, `finish_reason=stop`.
+        max_tokens=2000,
     )
     texto = _extract_text(response.choices[0].message.content).strip()
     # Alguns modelos devolvem o JSON dentro de um bloco ```json ... ``` mesmo
@@ -4787,7 +4824,7 @@ def _render_glossario_editor(
         "memoria_calculo": "", "restricoes": "", "dimensoes_negocio": "", "decisao_negocio": "",
         "valor_gerado": "", "problema_negocio": "", "resultado_esperado": "",
         "fontes_autorizadas": "", "consistencia_temporal": "", "comparacoes_relevantes": "",
-        "significado": "", "premissas": "", "quem_utiliza": "",
+        "definicao": "", "premissas": "", "quem_utiliza": "",
         "privacidade_justificativa": "", "seguranca_justificativa": "",
         "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
         "status_publicacao": "rascunho",
@@ -4847,12 +4884,19 @@ def _render_glossario_editor(
         )
         # `macroprocesso` é o nome da coluna; na UI Comgás o campo é rotulado "Franquia".
         macroprocesso = st.text_input("Franquia", value=cur.get("macroprocesso") or "", key=f"{kp}_macro_{rk}")
+    definicao = ""
     with c2:
         st.text_input(
             "Palavras-chave", key=f"{kp}_kw_input",
             placeholder="digite uma palavra e tecle Enter",
             on_change=_add_keyword, args=(kp,),
         )
+        if is_indicador:
+            definicao = st.text_area(
+                "Definição do indicador", value=cur.get("definicao") or "", key=f"term_definicao_{rk}",
+                help="Ex.: Definição oficial: Cliente com primeiro contrato "
+                     "ativo registrado no período.",
+            )
     kw_list = _render_keyword_chips(kp)
 
     rotulo_seguranca = rotulo_privacidade = observacoes = ""
@@ -4860,7 +4904,7 @@ def _render_glossario_editor(
     dimensoes_negocio = decisao_negocio = ""
     valor_gerado = problema_negocio = resultado_esperado = ""
     fontes_autorizadas = consistencia_temporal = comparacoes_relevantes = ""
-    significado = premissas = quem_utiliza = ""
+    premissas = quem_utiliza = ""
     privacidade_justificativa = seguranca_justificativa = ""
 
     if not is_indicador:
@@ -4968,11 +5012,6 @@ def _render_glossario_editor(
             )
 
         with st.expander("4 · O que significa?", expanded=True):
-            significado = st.text_area(
-                "O que o indicador significa?", value=cur.get("significado") or "", key=f"term_signif_{rk}",
-                help="Ex.: Definição oficial: Cliente com primeiro contrato "
-                     "ativo registrado no período.",
-            )
             restricoes = st.text_area(
                 "O que fica fora do conceito?", value=cur.get("restricoes") or "", key=f"term_restr_{rk}",
                 help="Ex.: Limitação: Não considera reativações.",
@@ -5054,7 +5093,7 @@ def _render_glossario_editor(
                 valor_gerado=valor_gerado, problema_negocio=problema_negocio,
                 resultado_esperado=resultado_esperado, fontes_autorizadas=fontes_autorizadas,
                 consistencia_temporal=consistencia_temporal, comparacoes_relevantes=comparacoes_relevantes,
-                significado=significado, premissas=premissas, quem_utiliza=quem_utiliza,
+                definicao=definicao, premissas=premissas, quem_utiliza=quem_utiliza,
                 privacidade_justificativa=privacidade_justificativa,
                 seguranca_justificativa=seguranca_justificativa,
             )
@@ -5165,6 +5204,8 @@ def page_indicadores_engenharia() -> None:
         st.markdown(f"**Objetivo:** {cur['objetivo']}")
     if cur.get("decisao_negocio"):
         st.markdown(f"**Decisão apoiada:** {cur['decisao_negocio']}")
+    if cur.get("definicao"):
+        st.markdown(f"**Definição do indicador:** {cur['definicao']}")
     st.markdown(f"**Memória de cálculo (fórmula do negócio):** {cur.get('memoria_calculo') or '—'}")
     if cur.get("dimensoes_negocio"):
         st.caption(f"Dimensões desejadas (descrição do negócio): {cur['dimensoes_negocio']}")
@@ -5181,8 +5222,7 @@ def page_indicadores_engenharia() -> None:
             ("2 · Como é calculado — Fontes autorizadas", "fontes_autorizadas"),
             ("2 · Como é calculado — Consistência ao longo do tempo", "consistencia_temporal"),
             ("3 · Como analisar — Comparações relevantes", "comparacoes_relevantes"),
-            ("4 · O que significa", "significado"),
-            ("4 · O que significa — Premissas", "premissas"),
+            ("4 · Premissas", "premissas"),
             ("5 · Quem utiliza", "quem_utiliza"),
             ("5 · Quem utiliza — Justificativa de segurança", "seguranca_justificativa"),
             ("5 · Quem utiliza — Justificativa de privacidade", "privacidade_justificativa"),
@@ -5234,6 +5274,9 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
     c1.markdown(f"**Data Owner**\n\n{cur.get('data_owner') or '—'}")
     c2.markdown(f"**Data Steward**\n\n{cur.get('data_steward') or '—'}")
     c3.markdown(f"**Franquia**\n\n{cur.get('macroprocesso') or '—'}")
+    if is_indicador and cur.get("definicao"):
+        st.markdown("**Definição do indicador**")
+        st.write(cur["definicao"])
 
     if cur.get("palavras_chave"):
         st.markdown(f"**Palavras-chave:** {cur['palavras_chave']}")
@@ -5281,7 +5324,6 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
                 ("2 · Fontes autorizadas", "fontes_autorizadas"),
                 ("2 · Consistência ao longo do tempo", "consistencia_temporal"),
                 ("3 · Comparações relevantes", "comparacoes_relevantes"),
-                ("4 · O que significa", "significado"),
                 ("4 · Premissas", "premissas"),
                 ("5 · Quem utiliza", "quem_utiliza"),
                 ("5 · Justificativa de segurança", "seguranca_justificativa"),
