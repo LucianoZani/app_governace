@@ -715,3 +715,41 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     (`feature/indicador-questionario-obo` → `dev`, aberta, aguardando
     aprovação) que junta essa mudança com o fix do `admin_acesso` e a
     ligação do OBO.
+
+- **2026-09-17** — Duas features pequenas em **Solicitar Acesso** e no
+  fluxo de visitante, pedidas pelo usuário:
+  - **Referência de módulos na tela Solicitar Acesso** — expander "Quais
+    módulos existem?" lista as 8 flags/papéis (Power Steward, Cadastro,
+    Governança, Aprovador de tags, Engenharia, Ver FinOps, Acesso a Dados,
+    Admin) com descrição breve do que cada um libera (`_MODULOS_ACESSO`,
+    perto do `main()` de propósito — lembrete pra manter em dia se um
+    módulo novo entrar). O campo livre "O que você precisa?" virou
+    multiselect "Quais módulos você precisa?" + "Detalhe o pedido"; a
+    seleção vira prefixo `"Módulo(s) solicitado(s): X, Y. "` no texto
+    salvo — não mudou o schema de `solicitacoes_acesso`.
+  - **Visitante (sem linha em `permissoes`, `registrado=False`) não cai
+    mais no Painel/Início** — não fazia sentido mostrar métricas e atalhos
+    administrativos pra quem não tem nada cadastrado. Agora a página
+    padrão (`default=True` no `st.Page`) é o **Glossário de Termos de
+    Negócio**, com um card "👋 Olá, visitante" + botão **Solicitar acesso**
+    no topo (`page_consulta_termos`, via `_atalho("solicitar_acesso", …)`).
+    Início nem entra no menu "Painel" pra visitante (`main()`: `pages =
+    {"Painel": [pg_inicio, pg_solicitar_acesso] if registrado else
+    [pg_solicitar_acesso]}`); quem tem qualquer papel/flag cadastrado
+    continua caindo no Início como sempre.
+  - **Testado ao vivo no Free Edition** (deploy via `workspace import` +
+    `apps start`/`apps deploy`, app tinha escalado a zero — normal):
+    módulos + multiselect enviando com o prefixo certo (confirmado por
+    SQL); visitante simulado via `UPDATE permissoes SET email = …` (trocar
+    temporariamente o e-mail da própria linha de admin pra forçar
+    `registrado=False` na sessão logada, depois revertido) — menu lateral
+    ficou só com Solicitar Acesso + Termos de Negócio, landing correta no
+    Glossário. Dado de teste (a solicitação "Engenharia") apagado depois.
+  - Commit `eabeb2a` em `main`, pushado. Mesma mudança **portada pro
+    bundle da Comgás** (`git apply` do diff, sem conflito) — commit
+    `77201e3` em `fix/indicador-questionario-select-incompleta`, pushado
+    (atualiza a PR !57364 — ver `Documents/Projetos/Comgas/CLAUDE.md` pro
+    estado completo dessa frente). Esse push também levou junto o commit
+    de 2026-09-16 que tinha ficado pendente (`b1cee91` — Solicitar Acesso
+    + definição do indicador + fixes de LLM/colunas, que só existia local
+    até então).
