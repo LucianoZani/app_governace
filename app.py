@@ -5347,6 +5347,17 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
 
 def page_consulta_termos() -> None:
     st.title("📚 Glossário de Termos de Negócio")
+    perms = st.session_state.get("perms", {}) or {}
+    if not bool(perms.get("registrado", True)):
+        with st.container(border=True):
+            st.markdown("##### 👋 Olá, visitante")
+            st.caption(
+                "Você ainda não tem acesso cadastrado neste app — pode consultar o "
+                "glossário livremente. Precisa de mais acesso (ex.: virar Power "
+                "Steward, cadastrar domínios, aplicar governança)? Solicite abaixo."
+            )
+            _atalho("solicitar_acesso", "🙋 Solicitar acesso", "🙋")
+        st.divider()
     st.caption(
         "Consulta aberta ao glossário de termos de negócio e indicadores. Use a "
         "busca e os filtros para localizar um termo; os detalhes aparecem abaixo."
@@ -6148,6 +6159,40 @@ def page_tag_backlog() -> None:
             )
 
 
+# (rótulo, descrição breve, flag/papel correspondente em `permissoes`) — texto
+# de apoio na tela de Solicitar Acesso, pra quem pede saber qual módulo pedir
+# sem precisar conhecer o nome técnico da flag. Mantido perto de `main()`
+# (onde cada flag é checada) pra ficar fácil notar se um módulo novo precisa
+# entrar aqui também.
+_MODULOS_ACESSO = [
+    ("Power Steward", "power_steward",
+     "Cadastro completo de ponta a ponta de um indicador: Domínios, Data Owners "
+     "& Stewards, Dashboards, Padrões de Dado Pessoal, Glossário de Negócio e "
+     "Indicador — mais aplicar tags/comentários em Governança de Dados. Para "
+     "quem é dono de um indicador de negócio."),
+    ("Cadastro", "ver_cadastros",
+     "Cadastro básico: só Domínios (Franquia/Domínio/Sub-domínio) e Glossário "
+     "de Negócio. Sem Governança de Dados nem os demais cadastros."),
+    ("Governança", "ver_logs",
+     "Aplicar tags e comentários nas tabelas do Unity Catalog (Governança de "
+     "Dados) + ver Relatório de Auditoria e os logs de alteração."),
+    ("Aprovador de tags", "aprovador_tags",
+     "Aprovar ou rejeitar, no Backlog de Aprovação, as tags que outra pessoa "
+     "propôs. Inclui Governança de Dados e Auditoria."),
+    ("Engenharia", "engenharia",
+     "Fila de Indicadores — Engenharia: escolher as tabelas/colunas técnicas de "
+     "um indicador e publicá-lo como Metric View."),
+    ("Ver FinOps", "ver_finops",
+     "Acompanhar o custo (FinOps) por domínio."),
+    ("Acesso a Dados", "admin_acesso",
+     "Cadastrar Acesso por Franquia e por Sensibilidade — a base das políticas "
+     "de máscara/row filter (ABAC) do Unity Catalog."),
+    ("Admin", None,
+     "Acesso total ao app, incluindo gerenciar usuários (tela Usuários) e "
+     "decidir estas solicitações de acesso."),
+]
+
+
 def page_solicitar_acesso() -> None:
     st.title("🙋 Solicitar Acesso")
     st.caption(
@@ -6159,21 +6204,30 @@ def page_solicitar_acesso() -> None:
     user = st.session_state.get("user", "")
     perms = st.session_state.get("perms", {}) or {}
 
+    with st.expander("📋 Quais módulos existem? (ajuda a escolher o que pedir)", expanded=False):
+        for nome_mod, _flag, desc in _MODULOS_ACESSO:
+            st.markdown(f"- **{nome_mod}** — {desc}")
+
     with st.form("form_solicitar_acesso", clear_on_submit=True):
         nome = st.text_input("Seu nome", value=str(perms.get("nome") or ""))
+        modulos_sel = st.multiselect(
+            "Quais módulos você precisa? (opcional — veja acima o que cada um faz)",
+            options=[nome_mod for nome_mod, _flag, _desc in _MODULOS_ACESSO],
+        )
         o_que = st.text_area(
-            "O que você precisa?",
+            "Detalhe o pedido",
             placeholder="Ex.: acesso como Power Steward para cadastrar o indicador X",
         )
         motivo = st.text_area("Por quê? (opcional)", placeholder="Contexto que ajuda o admin a decidir")
         enviado = st.form_submit_button("Enviar solicitação", type="primary")
 
     if enviado:
-        if not o_que.strip():
-            st.session_state["cad_feedback"] = ("error", "Descreva o que você precisa.")
+        if not modulos_sel and not o_que.strip():
+            st.session_state["cad_feedback"] = ("error", "Escolha ao menos um módulo ou descreva o que você precisa.")
         else:
+            prefixo = f"Módulo(s) solicitado(s): {', '.join(modulos_sel)}. " if modulos_sel else ""
             try:
-                _registrar_solicitacao_acesso(user, nome.strip(), o_que.strip(), motivo.strip())
+                _registrar_solicitacao_acesso(user, nome.strip(), (prefixo + o_que.strip()).strip(), motivo.strip())
                 st.session_state["cad_feedback"] = ("success", "✅ Solicitação enviada. Um admin vai revisar.")
             except Exception as exc:
                 st.session_state["cad_feedback"] = ("error", f"Falha ao enviar: {exc}")
@@ -6701,8 +6755,16 @@ def main() -> None:
     # Páginas — algumas guardadas em `nav_pages` pros atalhos da tela de Início
     # (só entram no dict se o papel permite, então os atalhos já respeitam o RBAC).
     nav_pages: dict = {}
-    pg_inicio = st.Page(page_inicio, title="Início", icon="🧭", default=True)
-    pg_consulta = st.Page(page_consulta_termos, title="Termos de Negócio", icon="📚")
+    # Visitante (sem linha em `permissoes`, `registrado=False`): a página de
+    # entrada não é o Painel/Início (métricas e atalhos administrativos não
+    # fazem sentido pra quem não tem nada cadastrado) — é direto o Glossário,
+    # com um convite pra Solicitar Acesso. Início nem entra no menu "Painel"
+    # nesse caso; quem tem acesso continua caindo no Início como sempre.
+    registrado = bool(perms.get("registrado", True))
+    pg_inicio = st.Page(page_inicio, title="Início", icon="🧭", default=registrado)
+    pg_consulta = st.Page(
+        page_consulta_termos, title="Termos de Negócio", icon="📚", default=not registrado
+    )
     nav_pages["consulta"] = pg_consulta
     # Solicitar Acesso: visível pra qualquer usuário logado (não depende de
     # nenhuma flag) — é o ponto de entrada pra quem ainda não tem papel/flag
@@ -6711,7 +6773,7 @@ def main() -> None:
     pg_solicitar_acesso = st.Page(page_solicitar_acesso, title="Solicitar Acesso", icon="🙋")
     nav_pages["solicitar_acesso"] = pg_solicitar_acesso
 
-    pages: dict = {"Painel": [pg_inicio, pg_solicitar_acesso]}
+    pages: dict = {"Painel": [pg_inicio, pg_solicitar_acesso] if registrado else [pg_solicitar_acesso]}
 
     # Cadastro: a flag `ver_cadastros` (rótulo "Cadastro") libera só Domínios
     # (página única com Franquias / Domínios / Sub-domínios em abas) e
