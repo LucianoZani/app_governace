@@ -4790,7 +4790,7 @@ def _render_glossario_editor(
         show = termos.copy()
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, "—") if pd.notna(i) else "—")
         show["Sub-domínio"] = show["subdominio_id"].map(lambda i: sub_nome.get(i, "—") if pd.notna(i) else "—")
-        cols_show = ["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner"]
+        cols_show = ["Tipo", "Nome", "Domínio", "Sub-domínio", "Data Owner" if is_indicador else "Data Steward"]
         if is_indicador:
             cols_show += ["Nível de Apuração", "Status"]
             show["Status"] = show["status_publicacao"].fillna("rascunho").map(
@@ -4799,7 +4799,7 @@ def _render_glossario_editor(
         st.dataframe(
             show.rename(columns={
                 "tipo": "Tipo", "nome": "Nome", "data_owner": "Data Owner",
-                "nivel_apuracao": "Nível de Apuração",
+                "data_steward": "Data Steward", "nivel_apuracao": "Nível de Apuração",
             })[cols_show],
             use_container_width=True, hide_index=True,
         )
@@ -4868,12 +4868,14 @@ def _render_glossario_editor(
         # Power Steward selecionado acima.
         data_owner = data_steward = power_steward
     else:
-        data_owner = _select_pessoa_cadastrada(
-            "Data owner", "Owner", stewards, dom_id, sub_id, cur.get("data_owner") or "", f"{kp}_owner_{rk}",
-        )
+        # Termo de negócio não tem Data Owner próprio — só Data Steward.
+        # `data_owner` fica espelhado (mantém compatibilidade com telas que
+        # ainda leem essa coluna, ex. Indicador na busca unificada).
         data_steward = _select_pessoa_cadastrada(
-            "Data steward", "Steward", stewards, dom_id, sub_id, cur.get("data_steward") or "", f"{kp}_steward_{rk}",
+            "Data steward", "Steward", stewards, dom_id, sub_id,
+            cur.get("data_steward") or cur.get("data_owner") or "", f"{kp}_steward_{rk}",
         )
+        data_owner = data_steward
 
     st.divider()
     c1, c2 = st.columns(2)
@@ -5271,9 +5273,13 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
     c2.markdown(f"**Domínio**\n\n{dom}")
     c3.markdown(f"**Sub-domínio**\n\n{sub}")
     c1, c2, c3 = st.columns(3)
-    c1.markdown(f"**Data Owner**\n\n{cur.get('data_owner') or '—'}")
-    c2.markdown(f"**Data Steward**\n\n{cur.get('data_steward') or '—'}")
-    c3.markdown(f"**Franquia**\n\n{cur.get('macroprocesso') or '—'}")
+    if is_indicador:
+        c1.markdown(f"**Data Owner**\n\n{cur.get('data_owner') or '—'}")
+        c2.markdown(f"**Data Steward**\n\n{cur.get('data_steward') or '—'}")
+        c3.markdown(f"**Franquia**\n\n{cur.get('macroprocesso') or '—'}")
+    else:
+        c1.markdown(f"**Data Steward**\n\n{cur.get('data_steward') or '—'}")
+        c2.markdown(f"**Franquia**\n\n{cur.get('macroprocesso') or '—'}")
     if is_indicador and cur.get("definicao"):
         st.markdown("**Definição do indicador**")
         st.write(cur["definicao"])
