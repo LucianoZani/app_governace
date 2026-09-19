@@ -1205,7 +1205,27 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     sem as margens padrão do `st.markdown`/`st.caption`, e os botões
     "Recolher"/"Nova" perderam o `use_container_width` (ficam do tamanho
     do texto). Commits `53a5070` + `9ca49e4` em `main`, pushados; portado
-    pro bundle no commit `797410f` (mesma branch). **Branch
-    `feature/metric-view-joins` do bundle agora com 7 commits
-    acumulados, nenhum pushado ainda** — decisão de dar `git push`+abrir
-    PR segue pendente (ver ponto de retomada acima).
+    pro bundle no commit `797410f` (mesma branch).
+  - **PR aberta, aprovada e mesclada na mesma sessão** (a pedido do
+    usuário — "vamos passar todas as alterações para a comgás?"): PR
+    **!57702** (`feature/metric-view-joins` → `dev`, 6 commits, work item
+    218352), self-approve + auto-complete, CI (`power-steward-validate-pr`)
+    ficou só na fila de agente (`cg-prd-vmss-devops-agentes`, sem bloqueio
+    de autorização dessa vez) e mesclou sozinha (`1a57aad7`).
+  - 🔴 **Bug 2 do pipeline (registrado em 2026-09-17/18) confirmado de
+    novo**: `power-steward-deploy` rodou verde, mas
+    `active_deployment.update_time` do app continuava de **2026-09-18**
+    (deploy anterior) — o merge de hoje não tinha sido refletido.
+    Confirmado por `databricks apps get power-steward -p comgas-nie-dev`
+    e corrigido com o redeploy manual de sempre (`databricks apps deploy
+    power-steward --source-code-path .../dev/files/src/power-steward -p
+    comgas-nie-dev`) — novo deployment `01f1b433...`, conferido por
+    `workspace export` que o `app.py` publicado já tem
+    `pipeline_tecnico_indicador`/`sugerir_chave_de_juncao`. **O checklist
+    manual pós-merge continua obrigatório** — ninguém corrigiu o script
+    do pipeline ainda.
+  - ⚠️ Login CLI do profile `comgas-nie-dev` tinha expirado no meio da
+    sessão (`refresh token is invalid`) — renovado com `databricks auth
+    login --profile comgas-nie-dev` em background; completou sozinho
+    reaproveitando a sessão SSO do Chrome já logada (sem precisar de MFA
+    manual dessa vez).
