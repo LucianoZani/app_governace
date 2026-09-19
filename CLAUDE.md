@@ -1051,3 +1051,21 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     uma validação DURA de nome duplicado no botão "💾 Salvar" — hoje é só
     o assistente que avisa, se o usuário passar por ele; salvar direto no
     formulário não bloqueia nome repetido.
+
+- **2026-09-18 (8ª parte)** — Usuário reclamou que o painel do Assistente
+  (dock retrátil à direita) ficava ruim de usar: resposta de IA forçava
+  rolagem grande e ficava difícil de ler. Pediu pra melhorar mantendo
+  retrátil. Causa: painel de 380px é estreito demais pra texto de IA com
+  lista/tabela — quebrava quase palavra por palavra.
+  - Largura do dock 380px → 460px (mobile 320 → 380); área de histórico
+    de mensagens 420px → 520px; CSS de tipografia (fonte um pouco menor +
+    mais entrelinha) e tabela markdown (se aparecer) ganha scroll próprio
+    em vez de espremer o painel inteiro.
+  - `ASSISTANT_SYSTEM_PROMPT` ganhou instrução pra evitar tabela markdown
+    de propósito (responde num painel estreito, não página larga) —
+    prefere texto corrido curto ou lista com negrito.
+  - Testado ao vivo: mesma pergunta de rascunho de indicador que antes
+    vinha como tabela apertada, agora vem em lista com negrito, bem mais
+    fácil de ler. Commit `f157a2d` em `main`, **e já portado pro bundle
+    da Comgás** na mesma branch `feature/metric-view-joins` (commit a
+    seguir), ainda sem push/PR/deploy.
