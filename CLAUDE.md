@@ -1016,3 +1016,38 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   lembrete de rodar o DDL de verdade antes de marcar como publicado.
   Testado visualmente no Free (screenshot do expander aberto, textos
   legíveis). Commit `b6cdd29` em `main`.
+
+- **2026-09-18 (7ª parte)** — Usuário trouxe 6 boas práticas de
+  preenchimento de indicador (clareza de nomenclatura, descrição técnica
+  precisa, contextualização estratégica/decisão de negócio, governança
+  via Power Steward, documentação/classificação corporativa, nome único
+  sem duplicidade) e pediu duas coisas: (1) mostrar isso na tela de
+  NEGÓCIO (Cadastros → Indicador, não Engenharia); (2) o Assistente de
+  Governança aplicar essas práticas ao ajudar a rascunhar um indicador,
+  **sem citá-las** como regra pro usuário.
+  - (1) Expander "📐 Boas práticas de preenchimento" no topo de
+    `_render_glossario_editor` quando `is_indicador=True` (não aparece na
+    tela de Glossário de Negócio comum).
+  - (2) `ASSISTANT_SYSTEM_PROMPT` (ponto A, sobre ajudar com indicador)
+    ganhou uma seção instruindo o modelo a: nome objetivo sem sigla;
+    objetivo/memória de cálculo precisos e auditáveis; sempre perguntar a
+    decisão de negócio concreta antes de fechar o texto (não inventar
+    uma genérica); pedir Power Steward/Data Owner reais (nunca
+    inventar nome de pessoa); sugerir preencher restrições/dimensões/
+    rótulos junto; e — o mais importante — **conferir em
+    `termos_de_negocio` se já existe indicador com nome igual/parecido
+    ANTES de sugerir um nome novo**, avisando e propondo alternativa se
+    achar. Tudo isso aplicado no texto que o assistente escreve, sem
+    nunca dizer "conforme a boas prática X" pro usuário.
+  - **Testado ao vivo**: pedido "quero cadastrar 'Margem Bruta 2'..." —
+    o assistente detectou o indicador "Margem bruta" já cadastrado,
+    avisou que o nome ficava parecido, sugeriu "Margem Bruta por
+    Cliente"/"Margem Bruta – Cliente", e seguiu perguntando decisão de
+    negócio, Power Steward, Data Owner/Steward e rótulo de segurança/
+    privacidade antes de fechar o rascunho — sem citar "boas práticas"
+    nenhuma vez. Comportamento validado como o pedido. Commit `e7938f8`
+    em `main`.
+  - Não implementado (fora do escopo pedido, mencionar se surgir depois):
+    uma validação DURA de nome duplicado no botão "💾 Salvar" — hoje é só
+    o assistente que avisa, se o usuário passar por ele; salvar direto no
+    formulário não bloqueia nome repetido.
