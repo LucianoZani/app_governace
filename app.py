@@ -3342,7 +3342,7 @@ def render_assistant_dock(user: str) -> None:
         return
 
     with st.container(key="assistant_dock"):
-        if st.button("→  Recolher", key="assistant_close_btn", use_container_width=True):
+        if st.button("→  Recolher", key="assistant_close_btn"):
             st.session_state["show_assistant"] = False
             st.rerun()
         render_assistant_panel(user)
@@ -3366,7 +3366,7 @@ def render_assistant_panel(user: str) -> None:
         st.info("Assistente de IA não configurado (`LLM_ENABLED`/`LLM_ENDPOINT`).")
         return
     with btn_col:
-        nova_conversa = st.button("🧹 Nova", use_container_width=True, key="assistant_nova_btn")
+        nova_conversa = st.button("🧹 Nova", key="assistant_nova_btn")
     st.markdown(
         "<div style='font-size:0.75rem;color:rgba(49,51,63,0.6);line-height:1.3;"
         "margin-bottom:0.5rem;'>Respostas geradas por IA — confira antes de agir. "
