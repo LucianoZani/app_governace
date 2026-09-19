@@ -1096,6 +1096,58 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     explícita em vez de descrição em prosa) e sugeriu meta quantitativa
     no resultado esperado. Nenhuma tabela markdown, resposta bem legível
     com o painel mais largo da 8ª parte. Commit `4fb187e` em `main`.
-  - Pendente: portar esse commit pro bundle da Comgás (mesma branch
-    `feature/metric-view-joins`) — ainda não feito no momento desta
-    entrada; fazer junto com o fechamento da branch.
+  - **Portado pro bundle na mesma sessão** (commit `a8e2a95` na branch
+    `feature/metric-view-joins`) — item acima já resolvido.
+  - Discussão em aberto (sem implementação): usuário perguntou se o
+    assistente poderia ajudar a ENGENHARIA também e ser útil em outras
+    partes do app, e se precisaria de tool nova. Resposta dada: a maior
+    parte dá pra fazer só com prompt (reaproveitando `termos_de_negocio`/
+    `tags_e_comentarios_da_tabela`, mesmo padrão de hoje) — um "ponto E"
+    revisando o pipeline técnico do indicador (joins/filtro/expressão
+    batem com o que o negócio pediu?) antes de publicar, e rascunho de
+    comentário de tabela/coluna em Governança de Dados. Só uma ideia
+    pediria tool nova de verdade: "sugerir chave de junção entre duas
+    tabelas" (hoje esse cálculo só existe dentro do picker visual, em
+    código). FinOps e Acesso a Dados ficaram de fora da sugestão (mais
+    sensíveis — custo real e política de permissão). **Nada disso foi
+    implementado ainda** — fica como ideia pra uma próxima sessão, sem
+    compromisso.
+
+  **▶️ PONTO DE RETOMADA (para amanhã — implementar na Comgás):**
+  1. Branch `feature/metric-view-joins` no clone do bundle (
+     `...\AppData\Local\Temp\claude\...-poc-metric-view-freeedition\8d5539c9-0c03-429b-b1d1-7f6a26689b8b\scratchpad\dados-ia-power-steward`
+     — **confirmar se essa pasta de scratchpad ainda existe**; se não
+     existir mais, reclonar o repo e reaplicar os 5 commits a partir do
+     repo principal, commits `887c0f8`, `4e0e349`, `bc29f0e`, `4fb187e`,
+     mais este). Tem **5 commits acumulados**, nenhum pushado:
+     - `887c0f8` — Metric View com joins/filtro/dimensão calculada
+     - `4e0e349` — boas práticas de preenchimento na tela Indicador
+     - `bc29f0e` — legibilidade do painel do assistente
+     - `a8e2a95` — assistente revisa qualidade de indicador cadastrado
+     - (a "outra página" que o usuário ajustou em sessão separada — não
+       documentada neste arquivo, conferir com ele o que foi)
+  2. **Decisão pendente**: dar `git push` na branch e abrir a PR (ou
+     confirmar antes se o usuário quer revisar o diff primeiro). Self-approve
+     é permitido pra esses arquivos (não é `devops/*`/`*/databricks.yml`).
+  3. Depois do merge, **repetir o checklist manual pós-merge** (Bug 2 do
+     pipeline ainda não corrigido — `power-steward-deploy` pode passar
+     verde sem o app realmente reiniciar): checar
+     `active_deployment.update_time` via `databricks apps get power-steward
+     -p comgas-nie-dev` e redeployar manualmente
+     (`databricks apps deploy power-steward --source-code-path
+     /Workspace/production/data-products/power-steward/dev/files/src/power-steward
+     -p comgas-nie-dev`) se não tiver atualizado.
+  4. **Testar de verdade contra dado real da Comgás**: cadastrar o
+     indicador "Desconto Total" (a query real de 5 joins que motivou todo
+     esse trabalho) em `nie_prd_legacy.ref_faturamento...` — confirmar que
+     `USING` basta (os 5 joins da query real usam mesmo nome de coluna,
+     só muda caixa em 2 casos) e que `nie_prd_legacy` está acessível
+     (conferir `ALLOWED_CATALOGS` do bundle, hoje só tem `nie_prd`).
+  5. **Testar o assistente lá** (curiosidade do usuário sobre o resultado
+     em ambiente real): rascunhar um indicador novo (checar duplicidade
+     de nome, perguntar decisão de negócio/responsáveis) e revisar a
+     qualidade de um indicador já cadastrado de verdade na Comgás — ver
+     se o comportamento se mantém tão bom quanto no Free, e se o painel
+     mais largo/legibilidade ajudam na prática com usuários reais.
+  6. Se sobrar tempo: decidir se vale avançar na ideia de "assistente pra
+     Engenharia" discutida acima (nenhum compromisso assumido ainda).
