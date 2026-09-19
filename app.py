@@ -2714,6 +2714,35 @@ D) Revisar a QUALIDADE do preenchimento de um indicador JÁ CADASTRADO —
    que falta, nunca invente que foi preenchido. Se não achar nenhum
    indicador com esse nome, diga isso em vez de avaliar algo que não existe.
 
+E) Ajudar a ENGENHARIA a revisar o PIPELINE TÉCNICO de um indicador antes de
+   publicar a Metric View — quando o usuário pedir algo como "confere o
+   pipeline do indicador X", "isso bate com o que o negócio pediu?", "o que
+   falta pra publicar", "sugere a chave de junção entre essas duas tabelas".
+   Fluxo: chame `pipeline_tecnico_indicador` (nome do indicador) e compare o
+   lineage técnico com o que o negócio pediu (também vem nessa mesma
+   resposta): as tabelas/colunas de `dimensao_tabelas`/`metrica_tabelas`
+   fazem sentido pra calcular o que `memoria_calculo`/`decisao_negocio`
+   descrevem? as `dimensoes_negocio` que o negócio pediu têm uma coluna ou
+   uma entrada em `dimensoes_calculadas` correspondente, ou ficaram de
+   fora? as `restricoes` de negócio estão refletidas em `filtro_sql`, ou
+   foram esquecidas? Se faltar ligar duas tabelas e não estiver claro qual
+   coluna usar, chame `sugerir_chave_de_juncao` com as duas tabelas antes de
+   sugerir. Aponte lacunas CONCRETAS (qual tabela/coluna falta, qual
+   restrição não virou filtro) — não diga só "está incompleto". Se
+   `status_publicacao` já for "Publicado", avise que qualquer ajuste exige
+   testar e republicar de novo na tela Indicadores — Engenharia. Você só
+   analisa e sugere — quem aplica a mudança é o engenheiro, na tela.
+
+F) Ajudar a rascunhar um COMENTÁRIO de tabela ou coluna (tela Governança de
+   Dados) — quando o usuário pedir "sugere um comentário pra essa
+   tabela/coluna". Chame `tags_e_comentarios_da_tabela` pra ver o nome, tipo,
+   comentário atual e tags de cada coluna, e proponha um texto objetivo com
+   base nisso (nome, tipo, comentário/tags das colunas vizinhas). NÃO invente
+   significado de negócio que não dá pra inferir dos metadados — se o nome
+   for ambíguo, diga isso em vez de chutar um significado. Deixe claro que é
+   uma sugestão pra revisar e colar na tela de Governança de Dados — você não
+   grava o comentário.
+
 Terminologia: use sempre "dado pessoal" e "dado pessoal sensível" — nunca a
 sigla "PII".
 
@@ -2721,7 +2750,10 @@ Formatação: você responde num painel estreito (chat lateral), não numa
 página larga. Evite tabelas markdown — numa coluna estreita elas ficam
 espremidas e quase ilegíveis. Prefira texto corrido curto ou lista com
 `-`/negrito pra separar campos (ex.: "**Objetivo:** ..." em vez de uma
-linha de tabela). Parágrafos curtos, sem enrolação.
+linha de tabela). Parágrafos curtos, sem enrolação. NUNCA cite o nome
+técnico de uma ferramenta/tool pro usuário (ex.: não diga
+"vou usar sugerir_chave_de_juncao") — fale em linguagem natural do que
+você vai fazer ("posso comparar as colunas dessas duas tabelas...").
 
 Também responde outras perguntas sobre o que está registrado no app.
 
@@ -2836,6 +2868,30 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "sugerir_chave_de_juncao",
+            "description": (
+                "Descoberta: compara as colunas de DUAS tabelas e devolve as que "
+                "têm o MESMO NOME nos dois lados — candidatas a chave de junção "
+                "(USING) pra ligar as duas na Metric View. Só nomes de coluna, "
+                "nunca valores de dado."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "catalog1": {"type": "string"},
+                    "schema1": {"type": "string"},
+                    "table1": {"type": "string"},
+                    "catalog2": {"type": "string"},
+                    "schema2": {"type": "string"},
+                    "table2": {"type": "string"},
+                },
+                "required": ["catalog1", "schema1", "table1", "catalog2", "schema2", "table2"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "tags_governadas_disponiveis",
             "description": "Catálogo de tags governadas (Governed Tags) e seus valores permitidos.",
             "parameters": {"type": "object", "properties": {}},
@@ -2894,6 +2950,28 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "pipeline_tecnico_indicador",
+            "description": (
+                "Para ENGENHARIA: lineage técnico completo de UM indicador já "
+                "cadastrado — tabelas/colunas de dimensão e métrica (join), "
+                "filtro SQL, dimensões calculadas, status de publicação e a "
+                "expressão validada. Use pra conferir se o pipeline técnico bate "
+                "com o que o negócio pediu (memória de cálculo, dimensões, "
+                "restrições) antes de publicar a Metric View. Só indicadores têm "
+                "esses campos — termos de glossário não."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nome": {"type": "string", "description": "Nome do indicador (aceita nome parcial)."},
+                },
+                "required": ["nome"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "backlog_de_aprovacao_de_tags",
             "description": "Itens do backlog de aprovação de tags de dado pessoal.",
             "parameters": {
@@ -2927,15 +3005,17 @@ TOOL_DEFINITIONS = [
 
 
 # Tools que espelham telas GENUINAMENTE restritas do app: o assistente não
-# pode ser um caminho lateral para elas. Só o log de auditoria (histórico de
-# mudanças) e o backlog de aprovação (solicitações + justificativas) entram
-# aqui — o resto (domínios, stewards, dashboards, padrões, glossário, tags
+# pode ser um caminho lateral para elas. Log de auditoria (histórico de
+# mudanças), backlog de aprovação (solicitações + justificativas) e o
+# lineage técnico de indicador (tela Indicadores — Engenharia) entram aqui —
+# o resto (domínios, stewards, dashboards, padrões, glossário, tags
 # governadas, metadados de tabela) é dado de referência/contato, útil para
 # qualquer usuário e já visível de forma equivalente na tela pública de
 # consulta ao glossário e nos contadores da tela de Início.
 _TOOL_REQUIRED_PERM = {
     "backlog_de_aprovacao_de_tags": "aprovador_tags",
     "log_auditoria": "ver_logs",
+    "pipeline_tecnico_indicador": "engenharia",
 }
 
 
@@ -3015,6 +3095,40 @@ def _execute_tool(name: str, args: dict, user: str) -> dict:
             if name == "listar_schemas":
                 return {"schemas": list_schemas(user, catalog)}
             return {"tabelas": list_tables_with_comment(user, catalog, args["schema"])}
+        if name == "sugerir_chave_de_juncao":
+            # Mesmo portão de tags_e_comentarios_da_tabela — mas nas DUAS tabelas.
+            if USE_ON_BEHALF_OF_USER and not _forwarded_user_token():
+                return {"erro": (
+                    "Não consegui confirmar sua identidade (token de usuário "
+                    "ausente) — recarregue o app e aceite o consentimento de "
+                    "acesso antes de consultar metadados de tabela."
+                )}
+            pares = [
+                (args.get("catalog1"), args.get("schema1"), args.get("table1")),
+                (args.get("catalog2"), args.get("schema2"), args.get("table2")),
+            ]
+            for cat, sch, tbl in pares:
+                if not (cat and sch and tbl):
+                    return {"erro": "Informe catalog1/schema1/table1 e catalog2/schema2/table2."}
+                if ALLOWED_CATALOGS and str(cat).lower() not in ALLOWED_CATALOGS:
+                    return {"erro": f"O catálogo '{cat}' não está disponível neste app."}
+                if not user_can_access_table(user, cat, sch, tbl):
+                    return {"erro": f"Você não tem acesso à tabela {cat}.{sch}.{tbl}."}
+            (c1, s1, t1), (c2, s2, t2) = pares
+            cols1 = {c.name for c in get_columns(user, c1, s1, t1)}
+            cols2 = {c.name for c in get_columns(user, c2, s2, t2)}
+            comuns = sorted(cols1 & cols2)
+            return {
+                "tabela_1": f"{c1}.{s1}.{t1}",
+                "tabela_2": f"{c2}.{s2}.{t2}",
+                "colunas_em_comum": comuns,
+                "aviso": None if comuns else (
+                    "Nenhuma coluna com o mesmo nome nos dois lados — não dá pra "
+                    "montar um USING automático; pode ser preciso uma junção por "
+                    "colunas com nomes diferentes (não suportado hoje pelo app) ou "
+                    "renomear/cadastrar a chave em comum antes."
+                ),
+            }
         if name == "tags_governadas_disponiveis":
             return {"tags_governadas": get_governed_tags()}
         if name == "dominios_e_subdominios":
@@ -3030,6 +3144,37 @@ def _execute_tool(name: str, args: dict, user: str) -> dict:
             return {"padroes_de_dado_pessoal": _df_records(list_padroes_dado_pessoal())}
         if name == "termos_de_negocio":
             return {"termos_de_negocio": _df_records(list_termos_negocio())}
+        if name == "pipeline_tecnico_indicador":
+            nome = (args.get("nome") or "").strip()
+            if not nome:
+                return {"erro": "Informe o nome do indicador."}
+            df = list_indicadores()
+            if df.empty:
+                return {"erro": "Nenhum indicador cadastrado ainda."}
+            exact = df[df["nome"].str.lower() == nome.lower()]
+            candidatos = exact if not exact.empty else df[df["nome"].str.contains(nome, case=False, na=False, regex=False)]
+            if candidatos.empty:
+                return {"erro": f"Nenhum indicador encontrado com nome parecido com '{nome}'."}
+            if len(candidatos) > 1:
+                return {
+                    "aviso": "Mais de um indicador combina com esse nome — chame de novo com o nome exato.",
+                    "candidatos": candidatos["nome"].tolist(),
+                }
+            row = candidatos.iloc[0]
+            return {
+                "nome": row["nome"],
+                "status_publicacao": row.get("status_publicacao"),
+                "memoria_calculo": row.get("memoria_calculo"),
+                "decisao_negocio": row.get("decisao_negocio"),
+                "dimensoes_negocio": row.get("dimensoes_negocio"),
+                "restricoes": row.get("restricoes"),
+                "dimensao_tabelas": _parse_tabelas_json(row.get("dimensao_tabelas")),
+                "metrica_tabelas": _parse_tabelas_json(row.get("metrica_tabelas")),
+                "filtro_sql": row.get("filtro_sql"),
+                "dimensoes_calculadas": _parse_tabelas_json(row.get("dimensoes_calculadas")),
+                "expr_validada": row.get("expr_validada"),
+                "metric_view_publicada": row.get("metric_view_publicada"),
+            }
         if name == "backlog_de_aprovacao_de_tags":
             return {"backlog": _df_records(list_tag_backlog(args.get("status")))}
         if name == "log_auditoria":
@@ -3243,7 +3388,7 @@ def render_assistant_panel(user: str) -> None:
             "Quem são os data stewards e de qual domínio cada um cuida?",
             "Revisa a qualidade de preenchimento de um indicador cadastrado",
         ]
-        with st.expander("💡 Sugestões", expanded=True):
+        with st.expander("💡 Sugestões", expanded=False):
             for label in sugestoes:
                 if st.button(label, use_container_width=True, key=f"assist_qp_{label}"):
                     _ask(label)
