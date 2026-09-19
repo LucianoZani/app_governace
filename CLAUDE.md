@@ -1069,3 +1069,33 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     fácil de ler. Commit `f157a2d` em `main`, **e já portado pro bundle
     da Comgás** na mesma branch `feature/metric-view-joins` (commit a
     seguir), ainda sem push/PR/deploy.
+
+- **2026-09-18 (9ª parte)** — Usuário: a "outra página" pendente (item da
+  6ª parte) já foi ajustada em sessão à parte, então a branch
+  `feature/metric-view-joins` está livre pra fechar quando quiser. Nova
+  ideia: já que o assistente ficou bom pra ajudar a *rascunhar* um
+  indicador (7ª parte), será que ele consegue *revisar a qualidade* de um
+  indicador JÁ CADASTRADO contra as mesmas boas práticas?
+  - Descoberta: nenhuma tool nova precisou ser criada — `termos_de_negocio`
+    já devolve TODOS os campos do questionário (via `_GLOSSARIO_COLS_COMUNS`
+    + `_INDICADOR_QUESTIONARIO_COLS`), então virou só mais uma instrução no
+    `ASSISTANT_SYSTEM_PROMPT` (ponto D, novo): buscar o registro pelo nome,
+    avaliar campo a campo contra os padrões da seção A (agora reaproveitada
+    também pra revisão, não só rascunho), separar o que está BOM do que
+    FALTA com sugestão concreta, nunca inventar que campo vazio foi
+    preenchido, e avisar se o indicador não existir.
+  - Ajuste cosmético no caminho: a frase de abertura do prompt dizia
+    "DUAS coisas" mas já tinha 3 pontos (A/B/C) antes desta sessão —
+    corrigido pra "estas coisas" (não numerado), já que agora são 4.
+  - **Testado ao vivo**: perguntou sem nome → assistente pediu o nome do
+    indicador. Respondeu "Margem bruta" → revisão completa e correta:
+    confirmou nome/objetivo/responsáveis/restrição/dimensões preenchidos,
+    apontou `rotulo_privacidade` e as duas justificativas vazias (real —
+    conferido, esses campos nunca foram preenchidos nesse indicador de
+    teste), sugeriu deixar a memória de cálculo mais auditável (fórmula
+    explícita em vez de descrição em prosa) e sugeriu meta quantitativa
+    no resultado esperado. Nenhuma tabela markdown, resposta bem legível
+    com o painel mais largo da 8ª parte. Commit `4fb187e` em `main`.
+  - Pendente: portar esse commit pro bundle da Comgás (mesma branch
+    `feature/metric-view-joins`) — ainda não feito no momento desta
+    entrada; fazer junto com o fechamento da branch.
