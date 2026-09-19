@@ -2699,6 +2699,12 @@ C) Mostrar ONDE há dado governado: "quais tabelas de X têm dado pessoal,
 Terminologia: use sempre "dado pessoal" e "dado pessoal sensível" — nunca a
 sigla "PII".
 
+Formatação: você responde num painel estreito (chat lateral), não numa
+página larga. Evite tabelas markdown — numa coluna estreita elas ficam
+espremidas e quase ilegíveis. Prefira texto corrido curto ou lista com
+`-`/negrito pra separar campos (ex.: "**Objetivo:** ..." em vez de uma
+linha de tabela). Parágrafos curtos, sem enrolação.
+
 Também responde outras perguntas sobre o que está registrado no app.
 
 Limites — LEIA COM ATENÇÃO:
@@ -3085,8 +3091,11 @@ def run_assistant_turn(user_text: str, user: str) -> str:
     )
 
 
-# Largura do painel do assistente ancorado à direita (px).
-_ASSISTANT_DOCK_W = 380
+# Largura do painel do assistente ancorado à direita (px). 380 era estreito
+# demais pra resposta de IA com lista/tabela — texto quebrava em quase toda
+# palavra e forçava rolagem vertical enorme; 460 dá mais espaço sem tomar
+# demais da tela principal (o padding-right do conteúdo já compensa).
+_ASSISTANT_DOCK_W = 460
 
 # O painel é um st.container(key="assistant_dock") reposicionado por CSS para
 # ficar fixo na borda direita, funcionando como uma segunda sidebar. Quando
@@ -3114,8 +3123,24 @@ _ASSISTANT_DOCK_CSS = f"""
     padding-right: {_ASSISTANT_DOCK_W + 48}px !important;
 }}
 @media (max-width: 1100px) {{
-    .st-key-assistant_dock {{ width: 320px; }}
-    [data-testid="stMainBlockContainer"] {{ padding-right: 360px !important; }}
+    .st-key-assistant_dock {{ width: 380px; }}
+    [data-testid="stMainBlockContainer"] {{ padding-right: 420px !important; }}
+}}
+/* Legibilidade da resposta dentro do painel estreito: fonte um pouco menor
+   que o padrão (compensa a largura reduzida), texto com mais respiro entre
+   linhas, e qualquer tabela markdown que a IA gerar rola só ela mesma na
+   horizontal em vez de forçar o painel inteiro a rolar de lado. */
+.st-key-assistant_dock [data-testid="stChatMessageContent"] {{
+    font-size: 0.85rem;
+    line-height: 1.5;
+}}
+.st-key-assistant_dock [data-testid="stChatMessageContent"] table {{
+    display: block;
+    overflow-x: auto;
+    font-size: 0.8rem;
+}}
+.st-key-assistant_dock [data-testid="stChatMessageContent"] p {{
+    margin-bottom: 0.5rem;
 }}
 </style>
 """
@@ -3186,7 +3211,7 @@ def render_assistant_panel(user: str) -> None:
         st.session_state["chat_messages"].append({"role": "assistant", "content": answer})
         st.rerun()
 
-    history_box = st.container(height=420)
+    history_box = st.container(height=520)
     with history_box:
         for m in st.session_state["chat_messages"]:
             with st.chat_message(m["role"]):
