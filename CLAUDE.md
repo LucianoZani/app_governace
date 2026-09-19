@@ -981,3 +981,38 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     ainda falta portar esse mesmo trabalho pro bundle da Comgás
     (`dados-ia-power-steward`) quando for cadastrar o indicador "Desconto
     Total" de verdade lá (ver `Documents/Projetos/Comgas/CLAUDE.md`).
+  - Discussão em aberto registrada com o usuário (sem código, só decisão
+    de arquitetura pra revisitar depois): existe uma alternativa ao
+    `joins:` estruturado — o `source:` da Metric View aceita uma **query
+    SQL inteira** no lugar do nome de tabela (confirmado na doc oficial).
+    Cobriria os 5 joins da query real da Comgás de uma vez, sem precisar
+    generalizar o picker pra `ON`/nomes diferentes — mas **perde o
+    join-elimination automático** que o `joins:` estruturado tem
+    (confirmado também na doc: "unused joins can be automatically
+    eliminated based on what the query actually requires" — com SQL
+    solto no `source:`, os N joins rodam sempre, mesmo se a consulta não
+    precisar de todas as dimensões). Decisão do usuário: **manter o
+    caminho estruturado** por causa dessa vantagem de performance,
+    mesmo que dê mais trabalho de UI depois pra aceitar `ON`. Reanalisando
+    a query real: os 5 joins dela na verdade **usam o mesmo nome de
+    coluna nos dois lados** (só muda maiúscula/minúscula em 2 casos, que o
+    Spark resolve sem diferenciar caixa) — ou seja, o `USING` que já existe
+    hoje deve dar conta dela sem precisar do `ON` ainda, a confirmar
+    quando for testar contra os dados reais na Comgás.
+
+- **2026-09-18 (6ª parte)** — Usuário pediu pra deixar a tela "Indicadores
+  — Engenharia" mais amigável pro engenheiro que for usar de verdade —
+  explicar o papel de cada campo, não só o rótulo curto. Só texto/UX,
+  nenhuma mudança de comportamento: expander "Como isso vira uma Metric
+  View" (modelo mental fonte/join/USING) antes dos pickers; títulos de
+  Dimensão/Métrica reescritos pra descrever o papel ("por quais
+  categorias dá pra analisar" / "de onde vêm os números da fórmula") em
+  vez de só listar campos; `help=` nos multiselects de coluna e de
+  junção explicando o "porquê"; resumo dos 4 passos do pipeline
+  (traduzir → testar → confirmar → copiar DDL) no topo da seção de
+  publicação; diferenciação de quando usar "Traduzir com IA" vs "Criar
+  query sem IA"; aviso quando o valor de teste volta vazio (pode ser
+  divisão por zero ou join sem correspondência, não é erro de sintaxe);
+  lembrete de rodar o DDL de verdade antes de marcar como publicado.
+  Testado visualmente no Free (screenshot do expander aberto, textos
+  legíveis). Commit `b6cdd29` em `main`.
