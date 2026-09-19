@@ -1193,7 +1193,19 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     **colapsado** (`expanded=False`, era `True`) — ganha espaço na
     primeira tela sem perder a descoberta (um clique reabre).
   - Commit `5e8404d` em `main`, pushado.
-  - ⚠️ **Ainda não portado pro bundle da Comgás** — mais um item pra
-    somar à fila de push de amanhã (ver ponto de retomada acima, que já
-    tinha 5 commits acumulados em `feature/metric-view-joins`; esse aqui é
-    trabalho novo, decidir se entra na mesma branch/PR ou vai separado).
+  - **Portado pro bundle da Comgás na mesma sessão** (a pedido do usuário
+    — "se ficou bom pode colocar"): `git apply` do diff, sem conflito,
+    commit `c830454` na branch `feature/metric-view-joins` (mesma branch
+    dos 5 commits de ontem). Ver `Documents/Projetos/Comgas/CLAUDE.md`
+    pro estado completo dessa frente.
+  - **Ajuste de UI no mesmo dia** (pedido do usuário: o cabeçalho do
+    painel do assistente empurrava o campo de pergunta pra fora da tela
+    em telas mais baixas, exigindo rolar o painel inteiro): título +
+    "Nova conversa" passaram a dividir a mesma linha, legenda compacta
+    sem as margens padrão do `st.markdown`/`st.caption`, e os botões
+    "Recolher"/"Nova" perderam o `use_container_width` (ficam do tamanho
+    do texto). Commits `53a5070` + `9ca49e4` em `main`, pushados; portado
+    pro bundle no commit `797410f` (mesma branch). **Branch
+    `feature/metric-view-joins` do bundle agora com 7 commits
+    acumulados, nenhum pushado ainda** — decisão de dar `git push`+abrir
+    PR segue pendente (ver ponto de retomada acima).
