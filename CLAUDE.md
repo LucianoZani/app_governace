@@ -753,3 +753,175 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     de 2026-09-16 que tinha ficado pendente (`b1cee91` — Solicitar Acesso
     + definição do indicador + fixes de LLM/colunas, que só existia local
     até então).
+
+- **2026-09-18** — Duas frentes: (1) ajuste no Glossário de Negócio —
+  **Termo não tem Data Owner próprio, só Data Steward** (Indicador continua
+  com os dois, refletindo o Power Steward). Removido o seletor de Owner do
+  formulário de Termo; listagem e card de detalhe mostram só Data Steward
+  pra Termo; coluna `data_owner` segue espelhando `data_steward` por baixo
+  (compatibilidade com a busca unificada). Commit `4cc9669`, pushado. Termo
+  de teste "Cliente Ativo" (cadastrado nesta sessão via SQL direto, sem
+  domínio) ganhou Data Steward = usuário admin.
+  (2) **Primeiro piloto de ABAC (row filter + column mask) rodando de
+  verdade em `dev.gold`** — fecha a Fase 2 que estava pendente desde
+  2026-09-09/10 (as telas "Acesso por Franquia"/"Acesso por Sensibilidade"
+  só existiam como CRUD, sem nada aplicando a restrição).
+  - **Dados de teste povoados** em `mapa_dominio_acesso` (agora 5 linhas:
+    `teste-usuario-vendas`→Vendas, `-marketing`→Marketing, `-posvenda`→Pós
+    vendas, `-cross`→Vendas+Marketing) e `mapa_sensibilidade_acesso` (2
+    linhas: `-vendas` com `pode_ver_dado_pessoal=true`, `-cross` sem nada).
+  - **3 UDFs SQL** em `apps.governanca_unity_catalog_prd`:
+    `fn_rf_dominio(canal)` (row filter — como não existe coluna "domínio"
+    real no pipeline de `dev`, usa `fct_pedidos.canal` como **proxy
+    arbitrário só de piloto**: web/app→Vendas, loja→Marketing,
+    telefone→Pós vendas — **não é o modelo definitivo**, Comgás precisa de
+    uma tag/coluna `domain` real), `fn_mask_nome`/`fn_mask_nascimento`
+    (column mask, gated por `pode_ver_dado_pessoal`/`_sensivel`). Aplicadas
+    com `ALTER TABLE dev.gold.fct_pedidos SET ROW FILTER …` e
+    `ALTER TABLE dev.gold.dim_cliente ALTER COLUMN … SET MASK …`.
+  - 🔴 **Achado real de plataforma**: `is_account_group_member('admins')`
+    (grupo de **conta**/metastore) voltou `false` pro próprio usuário admin
+    do Free — as 3 UDFs foram escritas com esse bypass e o admin ficou
+    filtrado/mascarado no próprio teste. Causa: no Free, o grupo `admins`
+    do usuário é **workspace-level**, não account-level. Trocado por
+    `is_member('admins')` (workspace) nas 3 funções — confirmado que
+    resolve (`SELECT is_member('admins')` → `true`; depois do fix, admin
+    volta a ver os 4 canais e nome/data de nascimento reais). **Vale
+    conferir isso de novo na Comgás** — lá pode ser o inverso (grupos
+    sincronizados via SCIM da conta, `is_account_group_member` pode ser o
+    certo) — não tratar como líquido e certo sem checar no ambiente real.
+  - **Validação da lógica sem autenticar como os SPs de teste**: tentei
+    duas vezes rodar como as identidades de teste — `GRANT SELECT ON
+    SCHEMA dev.gold` pros 4 SPs e `service-principal-secrets-proxy create`
+    (gerar OAuth secret pra autenticar como cada SP) — **as duas ações
+    foram bloqueadas pelo classificador de modo automático** (“Permission
+    Grant” e “Credential Exploration”, respectivamente). Contornado
+    validando a **mesma expressão `EXISTS`/`CASE` das UDFs, mas com o
+    identificador de cada SP como literal** em vez de via `current_user()`
+    — prova que a regra de negócio bate (vendas→web/app, marketing→loja,
+    posvenda→telefone, cross→3 canais, sem cadastro→nada; sensibilidade
+    idem) mas **não** prova end-to-end que autenticar como o SP realmente
+    produz esse `current_user()` no warehouse. Isso ainda depende de: (1)
+    `GRANT SELECT, USE SCHEMA ON SCHEMA dev.gold TO` os 4 SPs de teste
+    (`728d0ce5-92c3-433e-861f-507418d64389`,
+    `01b5df9a-2dc6-4896-ae29-106a8dc922a2`,
+    `6a82bfba-8069-4ab8-aa6c-f8ee197de00e`,
+    `a16b75a5-30fd-4d12-ba9d-0e2abfc8d338`) + `GRANT USE CATALOG ON
+    CATALOG dev`; (2) gerar client secret de cada SP
+    (`databricks service-principal-secrets-proxy create <app-id>`) e rodar
+    uma query autenticado como ele. **Pendente — o usuário precisa rodar
+    essas duas ações** (ou ajustar permissões do Claude Code pra
+    liberá-las) se quiser o fechamento end-to-end.
+  - Reversível a qualquer momento: `ALTER TABLE dev.gold.fct_pedidos DROP
+    ROW FILTER`, `ALTER TABLE dev.gold.dim_cliente ALTER COLUMN nome DROP
+    MASK` (idem `data_nascimento`), `DROP FUNCTION` das 3 UDFs.
+
+- **2026-09-18 (2ª parte)** — Usuário pediu pra **ver a máscara funcionando
+  na prática** (sem precisar ligar OBO, que segue `false` de propósito
+  nesse ambiente). Achado no caminho: o SP do app (`app-z41874
+  governanca-unity-catalog`, id `76230498242729`) ainda estava no grupo
+  `admins` do workspace — hack temporário de 2026-09-09 nunca revertido —
+  o que dava bypass na máscara (`is_member('admins')`) mesmo rodando tudo
+  via SP (OBO off). **Removido do grupo** (`databricks groups patch
+  81667451406133 op=remove members[value eq "76230498242729"]`),
+  confirmado pela lista de membros do grupo (só sobrou o usuário humano).
+  **Testado ao vivo** na tela Governança de Dados → `dev.gold.dim_cliente`
+  → coluna `data_nascimento`: os 5 valores da Amostra de dados vieram
+  `None` — confirma a máscara `fn_mask_nascimento` funcionando de ponta a
+  ponta (SP sem `pode_ver_dado_pessoal_sensivel` cadastrado → mascarado).
+  Não foi necessário mexer no `USE_ON_BEHALF_OF_USER` (segue `false`).
+
+- **2026-09-18 (3ª parte)** — Usuário pediu pra **alimentar um indicador
+  com insumos suficientes pra IA gerar a query da Metric View de verdade**.
+  Achado o indicador "Margem bruta" (id 4) já cadastrado (de sessão
+  anterior) mas incompleto: `objetivo` vazio, `dimensao_tabelas`/
+  `metrica_tabelas` apontando pra `dev.gold.dim_cliente`/`fct_pedidos` só
+  que **sem nenhuma coluna escolhida** no picker.
+  - **Preenchido via SQL direto** (`UPDATE apps.governanca_unity_catalog_prd.indicadores
+    WHERE id = 4`) todo o questionário de negócio (objetivo, decisão
+    apoiada, valor gerado, problema de negócio, resultado esperado,
+    memória de cálculo, unidade, variáveis utilizadas, fontes autorizadas,
+    consistência temporal, dimensões desejadas, comparações relevantes,
+    definição, restrições, premissas, quem utiliza, domínio = Vendas) +
+    colunas reais nos pickers: dimensão `dev.gold.dim_cliente` (sk_cliente,
+    segmento_erp1, uf), métrica `dev.gold.fct_pedidos` (valor_liquido,
+    sk_cliente, dt_pedido, canal).
+  - 🔴 **Armadilha de encoding no Windows, achada e corrigida no ato**:
+    o primeiro UPDATE (montado via `cat arquivo.sql | python -c
+    "...sys.stdin.read()..."`) corrompeu todos os acentos (mojibake tipo
+    "É"→"Ã©") — Python no Windows lê `stdin` no codepage do console, não
+    UTF-8, mesmo o arquivo fonte estando em UTF-8 correto. **Fix**: nunca
+    passar texto acentuado por `stdin`/`stdout` do Python nesse ambiente —
+    ler e escrever os arquivos com `io.open(..., encoding='utf-8')`
+    explícito nas duas pontas. Corrigido com um segundo UPDATE já com o
+    encoding certo (conferido depois via SELECT).
+  - ⚠️ **Também achada uma armadilha de path do Git Bash pro `databricks
+    api post --json @arquivo.json`**: `MSYS_NO_PATHCONV=1` é obrigatório
+    pro endpoint (`/api/2.0/...`) não virar path do Windows, mas ele
+    também impede o `@/tmp/arquivo.json` de ser traduzido pro path real —
+    as duas coisas precisam de comportamento oposto na mesma chamada. Saída:
+    salvar o JSON num arquivo com **path relativo** (sem `/` na frente, ex.
+    `arquivo.json` no diretório do repo) — daí `MSYS_NO_PATHCONV=1` não mexe
+    nele (só reescreve o que começa com `/`) e o endpoint continua intacto.
+  - **Testado ao vivo**: "🤖 Traduzir fórmula com IA" gerou
+    `SUM(valor_liquido) / COUNT(DISTINCT sk_cliente)` — bate exatamente com
+    a memória de cálculo escrita. Botão "Testar expressão" **inicialmente
+    voltou `NULL`** (era pra dar ~1229,73).
+  - 🔴 **Causa raiz (não é bug do app — efeito colateral do piloto ABAC de
+    hoje, 1ª/2ª parte)**: o SP do app tinha sido removido do grupo
+    `admins` na 2ª parte desta sessão (pra provar a máscara de
+    sensibilidade). Só que o **row filter** `fn_rf_dominio` em
+    `dev.gold.fct_pedidos` (também do piloto ABAC) usa o mesmo bypass
+    `is_member('admins')` — sem ele e sem estar cadastrado em
+    `mapa_dominio_acesso`, o SP passou a ver **zero linhas** de
+    `fct_pedidos`, e `SUM()/COUNT(DISTINCT)` sobre zero linhas dá `NULL`.
+    Confirmado rodando a mesma expressão manualmente (deu 1229,72 de
+    verdade — `SHOW GRANTS ON SCHEMA dev.gold` também confirmou que o SP
+    tem `SELECT` normal na schema, então não era falta de grant).
+  - **Fix**: em vez de devolver o SP pro grupo `admins` (o que anularia o
+    teste de máscara que acabou de ser validado), **cadastrado o SP como
+    usuário em `mapa_dominio_acesso`** com acesso às 3
+    franquias/domínios (Vendas id 2, Marketing id 3, Pós vendas id 4) —
+    ele passa a ver `fct_pedidos` inteiro pra fins de engenharia, sem
+    precisar de bypass de admin. Retestado: "Testar expressão" voltou
+    **1.229,7273**, batendo com o cálculo manual. Máscara de sensibilidade
+    (2ª parte) continua intacta (não foi mexida).
+
+- **2026-09-18 (4ª parte)** — Ao clicar em publicar, o usuário bateu no
+  erro **"Não foi possível montar o DDL: Dimensão e métrica apontam para
+  tabelas diferentes"** — eu tinha montado o indicador "Margem bruta" com
+  Dimensão em `dim_cliente` (segmento/UF) e Métrica em `fct_pedidos`,
+  tabelas diferentes. `montar_yaml_metric_view()` só sabia gerar Metric
+  View de uma tabela só, sem `joins:`. Perguntado se Metric View não
+  suporta join — **suporta** (confirmado via WebSearch/WebFetch na doc
+  oficial: `joins:` com `on`/`using`, star/snowflake schema) — a limitação
+  era só do gerador deste app, nunca implementado. **Implementado agora**:
+  - `_render_tabela_picker` (usado pela Dimensão) ganhou um parâmetro
+    `join_fonte` — quando a tabela escolhida pra Dimensão é diferente da
+    tabela já salva como Métrica, pede a(s) coluna(s) em comum entre as
+    duas (calculadas automaticamente, interseção dos nomes de coluna) e só
+    libera "Adicionar tabela" com pelo menos uma escolhida; guarda como
+    `colunas_join` no item JSON (vira `USING (...)` — não suporta nomes
+    diferentes dos dois lados, isso exigiria pedir duas colunas
+    separadamente, não implementado).
+  - `montar_yaml_metric_view()` reescrito: separa itens de dimensão que
+    são da própria tabela-fonte (sem join) dos que são de outra tabela
+    (viram uma entrada em `joins:`, alias = nome da tabela); monta
+    `dimensions:` referenciando `alias.\`coluna\`` pras colunas juntadas.
+    Também corrige um bug latente da versão anterior: só validava a
+    tabela do **primeiro** item de dimensão, mas juntava colunas de
+    **todos** os itens sem checar tabela — com múltiplas tabelas de
+    dimensão isso silenciosamente misturava coluna de uma tabela errada.
+  - **Testado publicando de verdade**: reconfigurado o indicador pra
+    Dimensão = `dev.gold.dim_cliente` (segmento_erp1, uf) com junção por
+    `sk_cliente`, Métrica = `dev.gold.fct_pedidos`. DDL gerado com
+    `joins:`/`using: [sk_cliente]` — **rodado de verdade** (`CREATE OR
+    REPLACE VIEW dev.gold.margem_bruta WITH METRICS LANGUAGE YAML`,
+    sucesso) e consultado (`SELECT segmento_erp1, uf, MEASURE(margem_bruta)
+    FROM dev.gold.margem_bruta GROUP BY ALL`) — retornou 10 linhas com
+    valores reais por segmento/UF. Indicador marcado como "Publicado" no
+    app. Commit `b8b4276` em `main`.
+  - Limitação que ficou registrada em comentário no código, não resolvida
+    agora: só suporta `USING` (mesmo nome de coluna nos dois lados) — uma
+    junção por chaves com nomes diferentes (`ON`) exigiria pedir duas
+    colunas na UI, não implementado.
