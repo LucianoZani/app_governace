@@ -1151,3 +1151,49 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
      mais largo/legibilidade ajudam na prática com usuários reais.
   6. Se sobrar tempo: decidir se vale avançar na ideia de "assistente pra
      Engenharia" discutida acima (nenhum compromisso assumido ainda).
+
+- **2026-09-19** — Implementada a ideia de "assistente pra Engenharia" que
+  tinha ficado em aberto no fim da sessão anterior (item 6 acima) — duas
+  tools novas no Assistente de Governança:
+  - **`pipeline_tecnico_indicador(nome)`** — lineage técnico completo de UM
+    indicador (`dimensao_tabelas`/`metrica_tabelas` com joins, `filtro_sql`,
+    `dimensoes_calculadas`, `status_publicacao`, `expr_validada`,
+    `metric_view_publicada`), lido de `list_indicadores()` (match exato ou
+    por substring; se ambíguo, devolve a lista de candidatos em vez de
+    chutar). Gated pela flag `engenharia` em `_TOOL_REQUIRED_PERM` — mesma
+    lógica de `backlog_de_aprovacao_de_tags`/`log_auditoria`: espelha uma
+    tela genuinamente restrita (Indicadores — Engenharia), então o
+    assistente não pode ser caminho lateral pra quem não tem a flag.
+  - **`sugerir_chave_de_juncao(catalog1/schema1/table1, catalog2/schema2/table2)`**
+    — interseção de nomes de coluna entre duas tabelas (mesmo cálculo que
+    `_render_tabela_picker` já fazia no picker visual, agora também
+    exposto ao assistente). Sem RBAC extra (é descoberta de metadados,
+    mesma classe de `buscar_colunas`); mesmo portão de OBO fail-closed +
+    `ALLOWED_CATALOGS` + `user_can_access_table` nas DUAS tabelas, igual
+    `tags_e_comentarios_da_tabela`.
+  - Prompt ganhou **seção E** (revisar o pipeline técnico contra o que o
+    negócio pediu — dimensões, restrições, join — antes de publicar) e
+    **seção F** (rascunhar comentário de tabela/coluna pra Governança de
+    Dados, reaproveitando `tags_e_comentarios_da_tabela` já existente, sem
+    tool nova). Também uma linha nova em Formatação: nunca citar o nome
+    técnico de uma tool pro usuário (achado no teste ao vivo — o modelo
+    escreveu literalmente "posso usar sugerir_chave_de_juncao").
+  - **Testado ao vivo no Free** (chat de verdade, function-calling real, não
+    só a query por trás): "Confere o pipeline técnico do indicador Margem
+    bruta" → achou 2 lacunas reais e concretas — a dimensão "Canal do
+    pedido" que `dimensoes_negocio` pede não está em `dimensao_tabelas` nem
+    `dimensoes_calculadas`, e `filtro_sql` não reflete a restrição
+    "excluir pedidos cancelados" — e confirmou corretamente o join
+    (`sk_cliente`) e a `expr_validada`. "Quero ligar fct_pedidos com
+    dim_cliente, qual coluna uso" → respondeu `sk_cliente`, e descartou
+    sozinho a outra coluna em comum (`_flags_origem`) como não sendo uma
+    chave de negócio real.
+  - Ajuste à parte, pedido pelo usuário no meio da sessão: o expander
+    "💡 Sugestões" do chat (só aparece com a conversa vazia) agora nasce
+    **colapsado** (`expanded=False`, era `True`) — ganha espaço na
+    primeira tela sem perder a descoberta (um clique reabre).
+  - Commit `5e8404d` em `main`, pushado.
+  - ⚠️ **Ainda não portado pro bundle da Comgás** — mais um item pra
+    somar à fila de push de amanhã (ver ponto de retomada acima, que já
+    tinha 5 commits acumulados em `feature/metric-view-joins`; esse aqui é
+    trabalho novo, decidir se entra na mesma branch/PR ou vai separado).
