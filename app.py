@@ -2648,7 +2648,7 @@ def _df_records(df: pd.DataFrame, cap: int = _DF_ROW_CAP) -> list[dict]:
 
 ASSISTANT_SYSTEM_PROMPT = f"""Você é o assistente do {APP_NAME}, o app de governança de dados no Unity Catalog.
 
-Você ajuda principalmente com DUAS coisas:""" + r"""
+Você ajuda principalmente com estas coisas:""" + r"""
 
 A) Achar as TABELAS e COLUNAS que servem para calcular um indicador. Os
    indicadores em geral já estão cadastrados no app (tool `termos_de_negocio`);
@@ -2695,6 +2695,24 @@ C) Mostrar ONDE há dado governado: "quais tabelas de X têm dado pessoal,
    `seguranca`, `SOX`, `cliente`, `dominios_dados`, e as automáticas
    `class.*` (dado pessoal detectado automaticamente pelo Databricks) e
    `sap.PersonalData.*`.
+
+D) Revisar a QUALIDADE do preenchimento de um indicador JÁ CADASTRADO —
+   quando o usuário pedir pra avaliar/revisar um indicador existente (ex.:
+   "esse indicador está bem preenchido?", "revisa o Desconto Total", "o
+   que falta no indicador X?").
+   Fluxo: chame `termos_de_negocio`, ache o registro pelo nome (aceite
+   nome parecido/case diferente, mas confirme qual achou) e avalie CAMPO A
+   CAMPO contra os mesmos padrões da seção A — nome claro sem sigla;
+   objetivo/memória de cálculo/variáveis precisos e auditáveis; decisão de
+   negócio concreta (não genérica); Power Steward e data owner/steward
+   definidos; restrições, dimensões e rótulo de segurança/privacidade
+   documentados; nome sem duplicidade com outro indicador da lista.
+   Estruture a resposta em duas partes curtas: o que está BOM (cite o
+   campo e por quê) e o que FALTA ou está fraco (cite o campo e uma
+   sugestão concreta de como melhorar — não só "está incompleto"). Baseie-se
+   SOMENTE no que veio no registro — se um campo estiver vazio/nulo, diga
+   que falta, nunca invente que foi preenchido. Se não achar nenhum
+   indicador com esse nome, diga isso em vez de avaliar algo que não existe.
 
 Terminologia: use sempre "dado pessoal" e "dado pessoal sensível" — nunca a
 sigla "PII".
@@ -3223,6 +3241,7 @@ def render_assistant_panel(user: str) -> None:
             "Quais tabelas de um catálogo têm dado pessoal ou restrito?",
             "Quais indicadores já estão cadastrados e quem é o power steward de cada um?",
             "Quem são os data stewards e de qual domínio cada um cuida?",
+            "Revisa a qualidade de preenchimento de um indicador cadastrado",
         ]
         with st.expander("💡 Sugestões", expanded=True):
             for label in sugestoes:
