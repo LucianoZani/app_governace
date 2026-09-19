@@ -3312,6 +3312,9 @@ def montar_yaml_metric_view(indicador: dict) -> str:
     estruturados do indicador — determinístico, sem IA envolvida. Exige
     lineage de métrica e `expr_validada` já preenchidos (Passo 3 confirmado);
     dimensão é opcional.
+
+    Dimensão de uma tabela diferente da Métrica vira um `joins:` (star
+    schema, `USING` na(s) coluna(s) em comum — ver `_render_tabela_picker`).
     """
     met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
     if not met_items:
@@ -3324,28 +3327,56 @@ def montar_yaml_metric_view(indicador: dict) -> str:
     catalogo, schema, tabela = fonte["catalogo"], fonte["schema"], fonte["tabela"]
 
     dim_items = _parse_tabelas_json(indicador.get("dimensao_tabelas"))
-    if dim_items:
-        fonte_dim = dim_items[0]
-        if (fonte_dim["catalogo"], fonte_dim["schema"], fonte_dim["tabela"]) != (catalogo, schema, tabela):
-            raise ValueError(
-                "Dimensão e métrica apontam para tabelas diferentes — "
-                "ajuste o lineage do indicador antes de publicar."
-            )
 
-    dim_cols: list[str] = []
+    # Dimensões podem vir da própria tabela-fonte (sem join) ou de outra
+    # tabela (star schema — precisa de `joins:` no YAML, ver
+    # `_render_tabela_picker`). Cada tabela de dimensão diferente da fonte
+    # vira UM join (alias = nome da tabela, slugificado); as colunas dela
+    # entram como `dimensions` referenciando esse alias.
+    dim_cols_fonte: list[str] = []
+    joins: list[dict] = []
+    dim_cols_join: list[tuple[str, str]] = []  # (alias, coluna)
     for it in dim_items:
-        for col in it.get("colunas") or []:
-            if col not in dim_cols:
-                dim_cols.append(col)
+        mesma_tabela = (it["catalogo"], it["schema"], it["tabela"]) == (catalogo, schema, tabela)
+        colunas_it = it.get("colunas") or []
+        if mesma_tabela:
+            for col in colunas_it:
+                if col not in dim_cols_fonte:
+                    dim_cols_fonte.append(col)
+            continue
+        colunas_join = it.get("colunas_join") or []
+        if not colunas_join:
+            raise ValueError(
+                f"Dimensão `{it['catalogo']}.{it['schema']}.{it['tabela']}` está numa "
+                "tabela diferente da Métrica e não tem coluna de junção definida — "
+                "refaça o lineage (Dimensão) escolhendo a coluna em comum com a Métrica."
+            )
+        alias = _slugify(it["tabela"])
+        joins.append({
+            "alias": alias, "catalogo": it["catalogo"], "schema": it["schema"],
+            "tabela": it["tabela"], "colunas_join": colunas_join,
+        })
+        for col in colunas_it:
+            dim_cols_join.append((alias, col))
 
     nome_medida = _slugify(indicador["nome"])
     comment = _montar_comentario_metric_view(indicador)
     synonyms = [s.strip() for s in (indicador.get("palavras_chave") or "").split(",") if s.strip()]
 
     linhas = ["version: 1.1", f"source: {catalogo}.{schema}.{tabela}"]
-    if dim_cols:
+    if joins:
+        linhas.append("joins:")
+        for j in joins:
+            linhas.append(f"  - name: {j['alias']}")
+            linhas.append(f"    source: {j['catalogo']}.{j['schema']}.{j['tabela']}")
+            # `using` exige o MESMO nome de coluna dos dois lados — é a única
+            # forma que o picker oferece hoje (ver `_render_tabela_picker`),
+            # porque não pede pro usuário informar dois nomes diferentes.
+            using_fmt = ", ".join(j["colunas_join"])
+            linhas.append(f"    using: [{using_fmt}]")
+    if dim_cols_fonte or dim_cols_join:
         linhas.append("dimensions:")
-        for col in dim_cols:
+        for col in dim_cols_fonte:
             # `name` precisa ser um identificador SQL válido (slugify); `expr`
             # referencia a coluna real, com backtick (sem isso, um nome de
             # coluna com espaço/acento — ex.: "Data da Venda" — quebra o SQL
@@ -3356,6 +3387,11 @@ def montar_yaml_metric_view(indicador: dict) -> str:
             # confirmado: "found character '`' that cannot start any token").
             linhas.append(f"  - name: {_slugify(col)}")
             linhas.append(f'    expr: "`{col}`"')
+        for alias, col in dim_cols_join:
+            # Coluna de uma tabela juntada — referencia pelo alias do join
+            # (ex.: `dim_cliente.\`segmento_erp1\``).
+            linhas.append(f"  - name: {_slugify(col)}")
+            linhas.append(f'    expr: "{alias}.`{col}`"')
     linhas.append("measures:")
     linhas.append(f"  - name: {nome_medida}")
     linhas.append(f"    expr: {expr_validada}")
@@ -4361,10 +4397,17 @@ def _sync_tabela_picker_state(kind: str, record_key: str, initial: list[dict]) -
         st.session_state[marker_key] = record_key
 
 
-def _render_tabela_picker(user: str, kind: str) -> list[dict]:
+def _render_tabela_picker(user: str, kind: str, join_fonte: dict | None = None) -> list[dict]:
     """Picker reativo de tabelas + colunas (multi), no mesmo padrão de
     Catalog → Schema → Table do módulo de Governança/Catalogação. Cada tabela
-    adicionada pode trazer uma ou mais colunas (vazio = tabela inteira)."""
+    adicionada pode trazer uma ou mais colunas (vazio = tabela inteira).
+
+    `join_fonte` (só usado pra `kind == "dim"`) é a tabela da Métrica já
+    salva — quando a tabela de dimensão escolhida é diferente dela, o Metric
+    View precisa de um `joins:` no YAML (ver `montar_yaml_metric_view`), o
+    que exige saber a coluna de junção. Por isso, nesse caso, o picker pede
+    a(s) coluna(s) em comum entre as duas tabelas (vira um `USING (...)` —
+    mesmo nome dos dois lados) antes de liberar "Adicionar tabela"."""
     items_key = f"term_{kind}_items"
     items: list[dict] = st.session_state.setdefault(items_key, [])
     # "Geração" do formulário de adicionar tabela: incrementada a cada tabela
@@ -4376,6 +4419,9 @@ def _render_tabela_picker(user: str, kind: str) -> list[dict]:
     if items:
         for idx, it in enumerate(items):
             cols_txt = ", ".join(it.get("colunas") or []) or "(tabela inteira)"
+            join_cols = it.get("colunas_join") or []
+            if join_cols:
+                cols_txt += f" — junção via `{', '.join(join_cols)}`"
             c1, c2 = st.columns([8, 1])
             with c1:
                 st.caption(f'`{it["catalogo"]}.{it["schema"]}.{it["tabela"]}` — {cols_txt}')
@@ -4428,11 +4474,50 @@ def _render_tabela_picker(user: str, kind: str) -> list[dict]:
                 "Colunas (vazio = tabela inteira)", options=col_names,
                 key=f"term_{kind}_new_cols_{gen}",
             )
-            if st.button("➕ Adicionar tabela", key=f"term_{kind}_add_{gen}"):
-                items.append({
+
+            # Tabela de dimensão diferente da tabela da Métrica -> precisa de
+            # join. `precisa_join` só é False quando é literalmente a mesma
+            # tabela (aí a coluna vira dimensão "local", sem join nenhum).
+            precisa_join = (
+                join_fonte is not None
+                and (catalog, schema, table) != (join_fonte["catalogo"], join_fonte["schema"], join_fonte["tabela"])
+            )
+            colunas_join: list[str] = []
+            pode_adicionar = True
+            if precisa_join:
+                try:
+                    fonte_cols = {
+                        c.name for c in get_columns(
+                            user, join_fonte["catalogo"], join_fonte["schema"], join_fonte["tabela"],
+                        )
+                    }
+                except Exception as exc:
+                    fonte_cols = set()
+                    st.caption(f"⚠️ Sem acesso às colunas da tabela da Métrica pra sugerir a junção: {exc}")
+                comuns = sorted(fonte_cols & set(col_names))
+                if comuns:
+                    colunas_join = st.multiselect(
+                        f"Coluna(s) de junção com `{join_fonte['tabela']}` "
+                        "(mesmo nome dos dois lados — vira `USING`)",
+                        options=comuns, key=f"term_{kind}_new_joincols_{gen}",
+                    )
+                else:
+                    st.warning(
+                        f"`{table}` não tem nenhuma coluna com o mesmo nome de "
+                        f"`{join_fonte['tabela']}` (a Métrica) — não dá pra montar "
+                        "o join automaticamente. Escolha outra tabela ou renomeie/"
+                        "cadastre a chave em comum antes."
+                    )
+                pode_adicionar = bool(colunas_join)
+
+            if st.button("➕ Adicionar tabela", key=f"term_{kind}_add_{gen}", disabled=not pode_adicionar):
+                novo_item = {
                     "catalogo": catalog, "schema": schema, "tabela": table,
                     "colunas": novas_colunas,
-                })
+                }
+                if colunas_join:
+                    novo_item["colunas_join"] = colunas_join
+                items.append(novo_item)
                 st.session_state[f"term_{kind}_gen"] = gen + 1
                 st.rerun()
     return items
@@ -5236,8 +5321,13 @@ def page_indicadores_engenharia() -> None:
     st.divider()
     _sync_tabela_picker_state("dim", rk, _parse_tabelas_json(cur.get("dimensao_tabelas")))
     _sync_tabela_picker_state("met", rk, _parse_tabelas_json(cur.get("metrica_tabelas")))
+    # Tabela da Métrica já salva (se houver) — usada pra pedir a coluna de
+    # junção quando a Dimensão vier de uma tabela diferente (ver
+    # `_render_tabela_picker`). Lida do estado já sincronizado acima, antes
+    # de o picker da Métrica rodar, então reflete o que está salvo agora.
+    met_fonte_atual = next(iter(st.session_state.get("term_met_items") or []), None)
     st.markdown("###### Dimensão — tabelas e colunas que compõem a dimensão")
-    dim_items = _render_tabela_picker(user, "dim")
+    dim_items = _render_tabela_picker(user, "dim", join_fonte=met_fonte_atual)
     st.markdown("###### Métrica — tabelas e colunas que formam a métrica")
     met_items = _render_tabela_picker(user, "met")
 
