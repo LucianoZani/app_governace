@@ -925,3 +925,59 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     agora: só suporta `USING` (mesmo nome de coluna nos dois lados) — uma
     junção por chaves com nomes diferentes (`ON`) exigiria pedir duas
     colunas na UI, não implementado.
+
+- **2026-09-18 (5ª parte)** — Usuário trouxe uma query real de indicador da
+  Comgás ("Desconto Total", `nie_prd_legacy.ref_faturamento.ft_mercado_fatura`
+  com 5 `LEFT JOIN`s) pra validar contra o fix da 4ª parte, e ela expôs 3
+  gaps: (1) medida usando coluna de tabela **juntada só pela Métrica**, não
+  pela Dimensão (`SUM(m.VL_DESCONTO_CLIENTE)`); (2) dimensão como
+  **expressão computada**, não coluna crua (`MONTH(f.DT_PERIODO)`); (3)
+  **filtro de negócio** (`filter:`) pras restrições ("fica fora do conceito
+  de desconto: devolução, multa, consumo zerado com desconto..."). Todos
+  confirmados como suportados pela Metric View de verdade (via
+  WebSearch/WebFetch na doc oficial) — só faltava o gerador do app cobrir.
+  **Implementado**:
+  - Generalizado o join da 4ª parte: antes só a Dimensão pedia coluna de
+    junção contra a Métrica; agora `_render_tabela_picker` pede o mesmo
+    pra **Métrica também** (a partir da 2ª tabela — a 1ª sempre é a
+    fonte). Helper novo `_coletar_joins(fonte, *grupos_itens)` centraliza
+    a montagem de `joins:` a partir de Dimensão + Métrica juntas, sem
+    duplicar quando a mesma tabela aparece nos dois lugares.
+  - `gerar_expr_sql` e `testar_candidato` passaram a operar sobre colunas
+    **qualificadas com o alias do join** (bare pra tabela-fonte, ex.
+    `` `valor_liquido` ``; `alias.\`col\`` pra tabela juntada) — a IA já
+    recebe o hint certo e `testar_candidato` monta o `FROM ... LEFT JOIN
+    ... USING (...)` de verdade (mais `WHERE filtro_sql`, se preenchido)
+    antes de testar, em vez de rodar só contra a tabela-fonte isolada.
+  - 2 colunas novas em `indicadores`: `filtro_sql` (SQL livre, vira
+    `filter:` — não passa por IA, mesmo espírito do "Criar query sem
+    IA") e `dimensoes_calculadas` (JSON `[{"nome","expr"}]`, expressão
+    SQL livre pra dimensão que não é coluna crua). UI: `_render_dims_calculadas`
+    (editor nome+expressão) + `st.text_area` do filtro, ambos na tela
+    Indicadores — Engenharia, salvos junto com o lineage.
+  - 🔴 **Bug achado no primeiro teste, corrigido no ato**: `list_indicadores()`
+    tinha uma lista explícita de colunas no `SELECT` e não incluía as 2
+    novas — os dados salvavam certo no banco (confirmado por SQL) mas a
+    tela/gerador de YAML nunca via, porque liam de volta via essa função.
+    Sintoma: "Dimensões calculadas" voltava vazio na UI e sumia do YAML
+    logo depois de salvo. Adicionadas as 2 colunas no `SELECT`.
+  - **Testado publicando de verdade** um cenário com TUDO junto: Métrica
+    com 2 tabelas (`fct_pedidos` fonte + `map_cliente_fonte` juntada via
+    `sk_cliente`), Dimensão com 1 tabela juntada (`dim_cliente`) + 1
+    dimensão calculada (`mes = MONTH(\`dt_pedido\`)`), e um filtro
+    (`COALESCE(\`valor_liquido\`, 0) > 0`). IA traduziu a fórmula pra
+    `SUM(valor_liquido) / COUNT(DISTINCT map_cliente_fonte.\`id_fonte\`)`
+    — já com o alias certo — e o teste voltou **1.620,1429** (valor real,
+    não NULL). DDL final com `filter:`, os 2 `joins:` e a dimensão `mes`
+    todos presentes; `CREATE OR REPLACE VIEW ... WITH METRICS LANGUAGE
+    YAML` **rodado de verdade**, sucesso. Uma query `SELECT MEASURE(...)
+    GROUP BY ALL` deu `DIVIDE_BY_ZERO` em 2 dos 13 grupos (grupos onde
+    `valor_liquido` é nulo/zero em todas as linhas, então o filtro zera o
+    denominador) — **é uma questão de fórmula de negócio** (precisaria de
+    `NULLIF`/`try_divide` na expressão), não um defeito do join/filtro/
+    dimensão calculada, que geraram e rodaram certo. Commit `4b12ba0` em
+    `main`.
+  - Cobre agora os 3 gaps que a query real da Comgás tinha exposto —
+    ainda falta portar esse mesmo trabalho pro bundle da Comgás
+    (`dados-ia-power-steward`) quando for cadastrar o indicador "Desconto
+    Total" de verdade lá (ver `Documents/Projetos/Comgas/CLAUDE.md`).
