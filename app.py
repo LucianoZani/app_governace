@@ -2660,6 +2660,29 @@ A) Achar as TABELAS e COLUNAS que servem para calcular um indicador. Os
    `tags_e_comentarios_da_tabela` -> proponha dimensão, métrica e a fórmula
    em texto. O cadastro em si ele faz na tela Cadastros → Indicador.
 
+   Sempre que ajudar a RASCUNHAR o texto de um indicador (nome, objetivo,
+   memória de cálculo, decisão apoiada, restrições, dimensões), o texto que
+   você propuser já deve nascer dentro destes padrões — aplique-os no que
+   você escreve, sem citá-los como "regra" ou "boas práticas" pro usuário:
+   - Nome objetivo e direto, sem sigla interna, reconhecível em qualquer
+     domínio da empresa (não só por quem está cadastrando agora).
+   - Objetivo, memória de cálculo e variáveis descritos com precisão,
+     em linguagem que técnico e negócio entendem do mesmo jeito — a
+     fórmula tem que dar pra auditar e reproduzir sem depender de
+     conhecimento tácito de quem criou.
+   - O indicador precisa apoiar uma decisão de negócio concreta — se o
+     usuário não disser qual é, pergunte antes de fechar o texto, não
+     invente uma decisão genérica só pra preencher o campo.
+   - Lembre o usuário de indicar o Power Steward responsável (e o data
+     owner/steward do domínio/sub-domínio, se já existirem) — não
+     invente um nome de pessoa.
+   - Sugira preencher junto restrições, dimensões de análise e rótulo de
+     segurança/privacidade, não só a fórmula.
+   - ANTES de sugerir um nome, confira em `termos_de_negocio` se já existe
+     indicador com nome igual ou muito parecido; se existir, avise o
+     usuário e proponha um nome diferente em vez de deixar passar — nome
+     de indicador é único, não pode repetir nem quase-repetir.
+
 B) Responder QUEM é responsável por quê: o power steward de um indicador
    (campo `power_steward` em `termos_de_negocio`), o data owner/steward de um
    domínio ou sub-domínio (`data_stewards` + `dominios_e_subdominios`).
@@ -5044,6 +5067,34 @@ def _render_glossario_editor(
         "Glossário de termos de negócio: nome, definição, palavras-chave, "
         "domínio e responsáveis (Data Owner / Steward)."
     )
+    if is_indicador:
+        with st.expander("📐 Boas práticas de preenchimento — leia antes de cadastrar"):
+            st.markdown(
+                "**1. Clareza na nomenclatura** — nome objetivo, direto e sem "
+                "ambiguidade, evitando siglas internas. Facilita a busca, evita "
+                "duplicidade entre domínios e garante que o indicador seja "
+                "reconhecido do mesmo jeito em toda a empresa.\n\n"
+                "**2. Descrição técnica e funcional precisa** — objetivo, "
+                "memória de cálculo e variáveis descritos com precisão, em "
+                "linguagem compreensível tanto pra área técnica quanto pra "
+                "negócio. A fórmula precisa ser auditável e reproduzível, sem "
+                "depender do conhecimento tácito de quem criou.\n\n"
+                "**3. Contextualização estratégica** — o indicador precisa "
+                "estar vinculado a uma decisão de negócio concreta. A decisão "
+                "apoiada evidencia sua relevância prática e evita manter "
+                "métricas sem propósito claro ou sem uso efetivo na operação.\n\n"
+                "**4. Governança e responsabilidade** — todo indicador precisa "
+                "de um responsável formal (o Power Steward), além dos donos de "
+                "domínio e sub-domínio quando definidos. Isso garante "
+                "curadoria, validação técnica e revisão periódica.\n\n"
+                "**5. Documentação e classificação corporativa** — restrições, "
+                "dimensões de análise e rótulos de segurança/privacidade "
+                "precisam estar registrados no cadastro. Evita interpretação "
+                "errada, acelera reuso e sustenta a cultura data-driven.\n\n"
+                "**6. Nome único** — não pode haver dois indicadores com nomes "
+                "iguais ou muito parecidos. Confira a lista abaixo antes de "
+                "criar um novo."
+            )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
     user = st.session_state.get("user", "")
