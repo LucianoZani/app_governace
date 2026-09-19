@@ -2033,6 +2033,15 @@ def ensure_cadastro_tables() -> bool:
         ):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS ({col} STRING)")
+        # Suporte a Metric View com joins (star schema) além do caso de
+        # tabela única: `filtro_sql` é o `filter:` de nível de view (SQL
+        # livre, escrito pela Engenharia — não passa por IA, mesmo espírito
+        # de "Criar query sem IA"); `dimensoes_calculadas` são dimensões que
+        # não são uma coluna crua (ex.: `MONTH(\`DT_PERIODO\`)`), guardadas
+        # como JSON `[{"nome":, "expr":}]` — ver `montar_yaml_metric_view`.
+        for col in ("filtro_sql", "dimensoes_calculadas"):
+            if col not in existing_cols:
+                run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS ({col} STRING)")
     except Exception:
         pass
     # Migração da antiga `termos_negocio` (registro único com seletor de tipo)
@@ -2213,7 +2222,7 @@ def list_indicadores() -> pd.DataFrame:
         f"variaveis_utilizadas, memoria_calculo, restricoes, "
         f"dimensoes_negocio, decisao_negocio, {_INDICADOR_QUESTIONARIO_COLS}, "
         f"dimensao_tabelas, metrica_tabelas, status_publicacao, "
-        f"expr_validada, metric_view_publicada "
+        f"expr_validada, metric_view_publicada, filtro_sql, dimensoes_calculadas "
         f"FROM {_cad('indicadores')} ORDER BY nome"
     )
 
@@ -3183,28 +3192,33 @@ def render_assistant_panel(user: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def gerar_expr_sql(formula_texto: str, measures_colunas: list[str]) -> dict:
+def gerar_expr_sql(formula_texto: str, colunas_disponiveis: list[str]) -> dict:
     """Traduz a fórmula de um indicador (linguagem natural) numa expressão SQL
     candidata, via `assistente_governanca` (Unity AI Gateway).
 
-    `measures_colunas` é a lista real de colunas de origem (vinda do lineage
-    em `metrica_tabelas[].colunas`) — o prompt instrui o modelo a usar
-    exclusivamente esses nomes, pra evitar alucinação de coluna inexistente.
+    `colunas_disponiveis` é a lista real de colunas de origem (vinda do
+    lineage em `metrica_tabelas[].colunas`/`dimensao_tabelas[].colunas`), já
+    formatada pra exibir ao modelo — coluna da tabela-fonte vem como
+    `` `col` `` (bare); coluna de tabela juntada via `joins:` vem como
+    `` alias.`col` `` (ver `_render_pipeline_publicacao`). O prompt instrui o
+    modelo a usar exclusivamente essas strings, pra evitar alucinação de
+    coluna/alias inexistente.
 
     Não executa a expressão nem toca em dado real — isso é o Passo 2
-    (`testar_candidato`, ainda não implementado). Retorna
-    ``{"expr_sql": str, "explicacao": str}``. Propaga exceções de conexão/
-    parsing pra quem chamar decidir como exibir o erro.
+    (`testar_candidato`). Retorna ``{"expr_sql": str, "explicacao": str}``.
+    Propaga exceções de conexão/parsing pra quem chamar decidir como exibir
+    o erro.
     """
-    if not measures_colunas:
-        raise ValueError("measures_colunas não pode ser vazio — sem lineage não há o que traduzir.")
+    if not colunas_disponiveis:
+        raise ValueError("colunas_disponiveis não pode ser vazio — sem lineage não há o que traduzir.")
 
-    colunas_fmt = ", ".join(f"`{c}`" for c in measures_colunas)
+    colunas_fmt = ", ".join(colunas_disponiveis)
     prompt = (
         "Você é um tradutor de fórmulas de indicadores de negócio para SQL "
         "(dialeto Databricks/Spark SQL), usado num pipeline de governança de dados.\n\n"
         f"Colunas reais disponíveis — use SOMENTE estas, exatamente como estão "
-        f"escritas, nunca invente nomes de coluna: {colunas_fmt}\n\n"
+        "escritas (algumas já vêm qualificadas com um alias de tabela por causa de "
+        f"join — nesse caso use com o alias e tudo, ex. alias.`coluna`): {colunas_fmt}\n\n"
         f'Fórmula em linguagem natural: "{formula_texto}"\n\n'
         "Responda em JSON puro, sem markdown e sem texto fora do JSON, neste formato exato:\n"
         '{"expr_sql": "<expressão SQL de agregação, ex: SUM(col_a) / SUM(col_b)>", '
@@ -3261,10 +3275,18 @@ def _validar_expr_sql_segura(expr_sql: str) -> None:
         raise ValueError("Expressão candidata contém comando não permitido — revise antes de testar.")
 
 
-def testar_candidato(expr_sql: str, catalogo: str, schema: str, tabela: str) -> float | None:
-    """Executa a expressão candidata como agregação real contra a tabela de
-    origem (Passo 2) e devolve o valor numérico resultante. Não salva nada —
-    é só o "preview" que embasa a confirmação humana do Passo 3.
+def testar_candidato(expr_sql: str, indicador: dict) -> float | None:
+    """Executa a expressão candidata como agregação real (Passo 2) e devolve
+    o valor numérico resultante. Não salva nada — é só o "preview" que
+    embasa a confirmação humana do Passo 3.
+
+    Monta o mesmo `FROM ... LEFT JOIN ... USING (...)` que
+    `montar_yaml_metric_view` vai gerar (via `_coletar_joins`), pra que uma
+    expressão que referencie coluna de tabela juntada (ex.:
+    SUM(margem.`VL_DESCONTO_CLIENTE`)) já teste contra o join de
+    verdade, não só contra a tabela-fonte isolada. Também aplica
+    `filtro_sql`, se preenchido, como `WHERE` — pro valor de teste já
+    refletir as restrições de negócio do indicador.
 
     Roda via `run_query(prefer_user=True)` — com `USE_ON_BEHALF_OF_USER=true`
     isso vira OBO de verdade: precisa que o usuário logado tenha `SELECT`
@@ -3276,8 +3298,22 @@ def testar_candidato(expr_sql: str, catalogo: str, schema: str, tabela: str) -> 
     quando isso for religado, pra não esquecer de novo.
     """
     _validar_expr_sql_segura(expr_sql)
-    tabela_fqn = q_full(catalogo, schema, tabela)
-    df = run_query(f"SELECT {expr_sql} AS resultado FROM {tabela_fqn}", prefer_user=True)
+    catalogo, schema, tabela = _fonte_metrica(indicador)
+    fonte = (catalogo, schema, tabela)
+    met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
+    dim_items = _parse_tabelas_json(indicador.get("dimensao_tabelas"))
+    joins = _coletar_joins(fonte, dim_items, met_items[1:])
+
+    from_sql = f"{q_full(catalogo, schema, tabela)} AS source"
+    for j in joins.values():
+        tabela_join_fqn = q_full(j["catalogo"], j["schema"], j["tabela"])
+        using_fmt = ", ".join(f"`{c}`" for c in j["colunas_join"])
+        from_sql += f" LEFT JOIN {tabela_join_fqn} AS {j['alias']} USING ({using_fmt})"
+
+    filtro_sql = (indicador.get("filtro_sql") or "").strip()
+    where_sql = f" WHERE {filtro_sql}" if filtro_sql else ""
+
+    df = run_query(f"SELECT {expr_sql} AS resultado FROM {from_sql}{where_sql}", prefer_user=True)
     if df.empty:
         raise RuntimeError("A consulta de teste não retornou nenhuma linha.")
     valor = df.iloc[0, 0]
@@ -3307,14 +3343,61 @@ def _montar_comentario_metric_view(indicador: dict) -> str:
     return " — ".join(partes).replace('"', "'").replace("\n", " ").strip()
 
 
+def _fonte_metrica(indicador: dict) -> tuple[str, str, str]:
+    """(catalogo, schema, tabela) da tabela-fonte da Métrica — a primeira
+    tabela cadastrada em `metrica_tabelas` (convenção do app: a métrica
+    principal sempre vive nela; outras tabelas da Métrica/Dimensão viram
+    join contra essa)."""
+    met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
+    if not met_items:
+        raise ValueError("Indicador sem lineage de métrica — cadastre a tabela/colunas antes.")
+    fonte = met_items[0]
+    return fonte["catalogo"], fonte["schema"], fonte["tabela"]
+
+
+def _coletar_joins(fonte: tuple[str, str, str], *grupos_itens: list[dict]) -> dict[tuple, dict]:
+    """Varre itens de tabela/coluna (de Dimensão e/ou Métrica) e monta o
+    dicionário de joins únicos contra `fonte` — chave = (catalogo, schema,
+    tabela), valor = {"alias", "catalogo", "schema", "tabela",
+    "colunas_join"}. A mesma tabela usada tanto na Dimensão quanto na
+    Métrica (ex.: pra puxar mais de uma coluna dela) vira UM join só,
+    reaproveitado. Item cuja tabela é a própria `fonte` não gera join (é
+    "source"). Levanta `ValueError` se algum item de tabela diferente não
+    tiver `colunas_join` (ver `_render_tabela_picker`)."""
+    joins: dict[tuple, dict] = {}
+    for itens in grupos_itens:
+        for it in itens:
+            chave = (it["catalogo"], it["schema"], it["tabela"])
+            if chave == fonte or chave in joins:
+                continue
+            colunas_join = it.get("colunas_join") or []
+            if not colunas_join:
+                raise ValueError(
+                    f"`{it['catalogo']}.{it['schema']}.{it['tabela']}` está numa tabela "
+                    "diferente da Métrica e não tem coluna de junção definida — refaça "
+                    "o lineage escolhendo a coluna em comum com a Métrica."
+                )
+            joins[chave] = {
+                "alias": _slugify(it["tabela"]), "catalogo": it["catalogo"],
+                "schema": it["schema"], "tabela": it["tabela"],
+                "colunas_join": colunas_join,
+            }
+    return joins
+
+
 def montar_yaml_metric_view(indicador: dict) -> str:
     """Monta o YAML da Metric View (Passo 4) só transcrevendo campos já
     estruturados do indicador — determinístico, sem IA envolvida. Exige
     lineage de métrica e `expr_validada` já preenchidos (Passo 3 confirmado);
     dimensão é opcional.
 
-    Dimensão de uma tabela diferente da Métrica vira um `joins:` (star
-    schema, `USING` na(s) coluna(s) em comum — ver `_render_tabela_picker`).
+    Suporta star schema: uma tabela de Dimensão OU de Métrica diferente da
+    tabela-fonte vira um `joins:` (`USING` na(s) coluna(s) em comum — ver
+    `_render_tabela_picker`). `filtro_sql` (SQL livre, escrito pela
+    Engenharia) vira o `filter:` de nível de view; `dimensoes_calculadas`
+    (JSON `[{"nome","expr"}]`, também SQL livre) entram direto em
+    `dimensions:` — pra casos que uma coluna crua não cobre (ex.:
+    MONTH(`DT_PERIODO`)).
     """
     met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
     if not met_items:
@@ -3323,50 +3406,37 @@ def montar_yaml_metric_view(indicador: dict) -> str:
     if not expr_validada:
         raise ValueError("Indicador sem expressão validada — confirme o Passo 3 antes.")
 
-    fonte = met_items[0]
-    catalogo, schema, tabela = fonte["catalogo"], fonte["schema"], fonte["tabela"]
-
+    catalogo, schema, tabela = _fonte_metrica(indicador)
+    fonte = (catalogo, schema, tabela)
     dim_items = _parse_tabelas_json(indicador.get("dimensao_tabelas"))
 
-    # Dimensões podem vir da própria tabela-fonte (sem join) ou de outra
-    # tabela (star schema — precisa de `joins:` no YAML, ver
-    # `_render_tabela_picker`). Cada tabela de dimensão diferente da fonte
-    # vira UM join (alias = nome da tabela, slugificado); as colunas dela
-    # entram como `dimensions` referenciando esse alias.
+    joins = _coletar_joins(fonte, dim_items, met_items[1:])
+
     dim_cols_fonte: list[str] = []
-    joins: list[dict] = []
     dim_cols_join: list[tuple[str, str]] = []  # (alias, coluna)
     for it in dim_items:
-        mesma_tabela = (it["catalogo"], it["schema"], it["tabela"]) == (catalogo, schema, tabela)
-        colunas_it = it.get("colunas") or []
-        if mesma_tabela:
-            for col in colunas_it:
+        chave = (it["catalogo"], it["schema"], it["tabela"])
+        alias = None if chave == fonte else joins[chave]["alias"]
+        for col in it.get("colunas") or []:
+            if alias is None:
                 if col not in dim_cols_fonte:
                     dim_cols_fonte.append(col)
-            continue
-        colunas_join = it.get("colunas_join") or []
-        if not colunas_join:
-            raise ValueError(
-                f"Dimensão `{it['catalogo']}.{it['schema']}.{it['tabela']}` está numa "
-                "tabela diferente da Métrica e não tem coluna de junção definida — "
-                "refaça o lineage (Dimensão) escolhendo a coluna em comum com a Métrica."
-            )
-        alias = _slugify(it["tabela"])
-        joins.append({
-            "alias": alias, "catalogo": it["catalogo"], "schema": it["schema"],
-            "tabela": it["tabela"], "colunas_join": colunas_join,
-        })
-        for col in colunas_it:
-            dim_cols_join.append((alias, col))
+            else:
+                dim_cols_join.append((alias, col))
+
+    dims_calculadas = _parse_tabelas_json(indicador.get("dimensoes_calculadas"))
 
     nome_medida = _slugify(indicador["nome"])
     comment = _montar_comentario_metric_view(indicador)
     synonyms = [s.strip() for s in (indicador.get("palavras_chave") or "").split(",") if s.strip()]
+    filtro_sql = (indicador.get("filtro_sql") or "").strip()
 
     linhas = ["version: 1.1", f"source: {catalogo}.{schema}.{tabela}"]
+    if filtro_sql:
+        linhas.append(f"filter: {filtro_sql}")
     if joins:
         linhas.append("joins:")
-        for j in joins:
+        for j in joins.values():
             linhas.append(f"  - name: {j['alias']}")
             linhas.append(f"    source: {j['catalogo']}.{j['schema']}.{j['tabela']}")
             # `using` exige o MESMO nome de coluna dos dois lados — é a única
@@ -3374,7 +3444,7 @@ def montar_yaml_metric_view(indicador: dict) -> str:
             # porque não pede pro usuário informar dois nomes diferentes.
             using_fmt = ", ".join(j["colunas_join"])
             linhas.append(f"    using: [{using_fmt}]")
-    if dim_cols_fonte or dim_cols_join:
+    if dim_cols_fonte or dim_cols_join or dims_calculadas:
         linhas.append("dimensions:")
         for col in dim_cols_fonte:
             # `name` precisa ser um identificador SQL válido (slugify); `expr`
@@ -3392,6 +3462,17 @@ def montar_yaml_metric_view(indicador: dict) -> str:
             # (ex.: `dim_cliente.\`segmento_erp1\``).
             linhas.append(f"  - name: {_slugify(col)}")
             linhas.append(f'    expr: "{alias}.`{col}`"')
+        for dc in dims_calculadas:
+            # Expressão SQL livre escrita pela Engenharia (ex.:
+            # `MONTH(\`DT_PERIODO\`)`) — não passa por IA nem validação de
+            # coluna, é responsabilidade de quem escreveu (mesmo espírito
+            # do `filtro_sql`).
+            nome_dc = (dc.get("nome") or "").strip()
+            expr_dc = (dc.get("expr") or "").strip()
+            if not nome_dc or not expr_dc:
+                continue
+            linhas.append(f"  - name: {_slugify(nome_dc)}")
+            linhas.append(f'    expr: "{expr_dc}"')
     linhas.append("measures:")
     linhas.append(f"  - name: {nome_medida}")
     linhas.append(f"    expr: {expr_validada}")
@@ -4523,6 +4604,51 @@ def _render_tabela_picker(user: str, kind: str, join_fonte: dict | None = None) 
     return items
 
 
+def _render_dims_calculadas(rk: str, initial: list[dict]) -> list[dict]:
+    """Editor de dimensões calculadas (Passo de lineage do Indicador) —
+    nome + expressão SQL livre (ex.: MONTH(`DT_PERIODO`)), pra quando a
+    dimensão não é uma coluna crua e o picker de tabela (`_render_tabela_picker`)
+    não cobre. Não valida nem qualifica a expressão — responsabilidade de
+    quem escreve (mesmo espírito do `filtro_sql`)."""
+    items_key = f"ind_dimscalc_{rk}"
+    marker_key = f"{items_key}_for"
+    if st.session_state.get(marker_key) != rk:
+        st.session_state[items_key] = [dict(it) for it in initial]
+        st.session_state[marker_key] = rk
+    items: list[dict] = st.session_state[items_key]
+    gen = st.session_state.get(f"{items_key}_gen", 0)
+
+    if items:
+        for idx, it in enumerate(items):
+            c1, c2 = st.columns([8, 1])
+            with c1:
+                st.caption(f'**{it.get("nome")}** — `{it.get("expr")}`')
+            with c2:
+                if st.button("🗑️", key=f"{items_key}_rm_{idx}"):
+                    items.pop(idx)
+                    st.rerun()
+    else:
+        st.caption("Nenhuma dimensão calculada adicionada.")
+
+    with st.container(border=True):
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            nome = st.text_input("Nome", key=f"{items_key}_nome_{gen}", placeholder="ex.: mes")
+        with c2:
+            expr = st.text_input(
+                "Expressão SQL", key=f"{items_key}_expr_{gen}",
+                placeholder="ex.: MONTH(`DT_PERIODO`)",
+            )
+        if st.button("➕ Adicionar dimensão calculada", key=f"{items_key}_add_{gen}"):
+            if nome.strip() and expr.strip():
+                items.append({"nome": nome.strip(), "expr": expr.strip()})
+                st.session_state[f"{items_key}_gen"] = gen + 1
+                st.rerun()
+            else:
+                st.warning("Preencha nome e expressão antes de adicionar.")
+    return items
+
+
 def _select_pessoa_cadastrada(
     label: str, tipo: str, pessoas: list[dict], dom_id, sub_id, cur_value: str, key_prefix: str,
 ) -> str:
@@ -4703,8 +4829,34 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
         return
 
     met_items = _parse_tabelas_json(cur.get("metrica_tabelas"))
-    met_cols = [c for it in met_items for c in (it.get("colunas") or [])]
+    dim_items = _parse_tabelas_json(cur.get("dimensao_tabelas"))
     candidato_key = f"ind_candidato_{rk}"
+
+    def _colunas_disponiveis_fmt() -> list[str]:
+        """Colunas da Métrica + Dimensão pro prompt da IA — bare pra tabela-
+        fonte, alias.`col` pras tabelas juntadas (mesmo alias que
+        `testar_candidato`/`montar_yaml_metric_view` usam de verdade)."""
+        if not met_items:
+            return []
+        fonte = (met_items[0]["catalogo"], met_items[0]["schema"], met_items[0]["tabela"])
+        try:
+            joins = _coletar_joins(fonte, dim_items, met_items[1:])
+        except ValueError:
+            # Falta coluna de junção em algum item — deixa o erro de
+            # verdade aparecer só quando traduzir/testar (aqui é só o hint).
+            joins = {}
+        vistas: set[str] = set()
+        colunas: list[str] = []
+        for it in (*met_items, *dim_items):
+            chave = (it["catalogo"], it["schema"], it["tabela"])
+            alias = None if chave == fonte else joins.get(chave, {}).get("alias")
+            prefixo = "" if alias is None else f"{alias}."
+            for col in it.get("colunas") or []:
+                fmt = f"{prefixo}`{col}`"
+                if fmt not in vistas:
+                    vistas.add(fmt)
+                    colunas.append(fmt)
+        return colunas
 
     if status == "pronto_para_ia":
         c1, c2 = st.columns(2)
@@ -4714,11 +4866,8 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
             elif st.button("🤖 Traduzir fórmula com IA", key=f"ind_traduzir_{rk}"):
                 with st.spinner("Traduzindo a fórmula e testando contra o dado real…"):
                     try:
-                        resultado = gerar_expr_sql(cur.get("memoria_calculo") or "", met_cols)
-                        fonte = met_items[0]
-                        valor = testar_candidato(
-                            resultado["expr_sql"], fonte["catalogo"], fonte["schema"], fonte["tabela"],
-                        )
+                        resultado = gerar_expr_sql(cur.get("memoria_calculo") or "", _colunas_disponiveis_fmt())
+                        valor = testar_candidato(resultado["expr_sql"], cur)
                         st.session_state[candidato_key] = {**resultado, "valor_teste": valor, "testado": True}
                     except Exception as exc:
                         st.error(f"Falha ao traduzir/testar a fórmula: {exc}")
@@ -4762,8 +4911,7 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
                         st.warning("Escreva uma expressão antes de testar.")
                     else:
                         try:
-                            fonte = met_items[0]
-                            valor = testar_candidato(expr_edit, fonte["catalogo"], fonte["schema"], fonte["tabela"])
+                            valor = testar_candidato(expr_edit, cur)
                             st.session_state[candidato_key] = {
                                 "expr_sql": expr_edit, "explicacao": candidato["explicacao"],
                                 "valor_teste": valor, "testado": True,
@@ -5329,7 +5477,28 @@ def page_indicadores_engenharia() -> None:
     st.markdown("###### Dimensão — tabelas e colunas que compõem a dimensão")
     dim_items = _render_tabela_picker(user, "dim", join_fonte=met_fonte_atual)
     st.markdown("###### Métrica — tabelas e colunas que formam a métrica")
-    met_items = _render_tabela_picker(user, "met")
+    # `join_fonte` aqui também: só pede coluna de junção a partir da 2ª
+    # tabela adicionada (a 1ª É a fonte — `met_fonte_atual` só existe depois
+    # dela já estar salva, então a 1ª nunca cai no caminho de pedir join).
+    met_items = _render_tabela_picker(user, "met", join_fonte=met_fonte_atual)
+
+    st.markdown("###### Dimensões calculadas (expressão SQL — quando não é uma coluna crua)")
+    st.caption(
+        "Pra dimensão que precisa de uma função sobre a coluna (ex.: "
+        "`MONTH(\\`DT_PERIODO\\`)`) em vez de só a coluna crua. Escreva já "
+        "com o alias da tabela se a coluna vier de um join (ver aliases nas "
+        "tabelas de Dimensão/Métrica acima) — não passa por IA nem "
+        "validação, é SQL livre sob responsabilidade de quem escreve."
+    )
+    dims_calculadas = _render_dims_calculadas(rk, _parse_tabelas_json(cur.get("dimensoes_calculadas")))
+
+    filtro_sql = st.text_area(
+        "Filtro (SQL, opcional) — vira o `filter:` da Metric View",
+        value=cur.get("filtro_sql") or "", key=f"ind_filtro_{rk}",
+        help="Ex.: COALESCE(`VL_DEVOLUCAO`, 0) = 0 AND COALESCE(`VL_MULTA`, 0) = 0 "
+             "— aplica nas Restrições de negócio do indicador. Escrito à mão pela "
+             "Engenharia, não passa por IA.",
+    )
 
     if st.button("💾 Salvar construção do indicador", type="primary", key=f"eng_save_{rk}"):
         novo_status = _status_publicacao_pos_lineage(
@@ -5339,6 +5508,8 @@ def page_indicadores_engenharia() -> None:
             f"UPDATE {_cad('indicadores')} SET "
             f"dimensao_tabelas = {q_str(_dump_tabelas_json(dim_items))}, "
             f"metrica_tabelas = {q_str(_dump_tabelas_json(met_items))}, "
+            f"dimensoes_calculadas = {q_str(_dump_tabelas_json(dims_calculadas))}, "
+            f"filtro_sql = {q_str(filtro_sql.strip())}, "
             f"status_publicacao = {q_str(novo_status)}, "
             f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
             f"WHERE id = {int(cur['id'])}"
@@ -5346,6 +5517,8 @@ def page_indicadores_engenharia() -> None:
         for kind in ("dim", "met"):
             st.session_state.pop(f"term_{kind}_items", None)
             st.session_state.pop(f"term_{kind}_items_for", None)
+        st.session_state.pop(f"ind_dimscalc_{rk}", None)
+        st.session_state.pop(f"ind_dimscalc_{rk}_for", None)
         _finish_write("Lineage do indicador salvo.")
 
     _render_pipeline_publicacao(cur, rk, user)
