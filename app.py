@@ -4554,6 +4554,10 @@ def _render_tabela_picker(user: str, kind: str, join_fonte: dict | None = None) 
             novas_colunas = st.multiselect(
                 "Colunas (vazio = tabela inteira)", options=col_names,
                 key=f"term_{kind}_new_cols_{gen}",
+                help="Só as colunas marcadas aqui ficam disponíveis pra virar "
+                     "dimensão/entrar na fórmula da métrica mais adiante — "
+                     "escolha as que você sabe que vai usar (dá pra editar "
+                     "depois; não precisa acertar de primeira).",
             )
 
             # Tabela de dimensão diferente da tabela da Métrica -> precisa de
@@ -4578,9 +4582,17 @@ def _render_tabela_picker(user: str, kind: str, join_fonte: dict | None = None) 
                 comuns = sorted(fonte_cols & set(col_names))
                 if comuns:
                     colunas_join = st.multiselect(
-                        f"Coluna(s) de junção com `{join_fonte['tabela']}` "
+                        f"🔗 Coluna(s) de junção com `{join_fonte['tabela']}` "
                         "(mesmo nome dos dois lados — vira `USING`)",
                         options=comuns, key=f"term_{kind}_new_joincols_{gen}",
+                        help="`" + table + "` é uma tabela diferente da tabela-fato "
+                             f"(`{join_fonte['tabela']}`), então a Metric View "
+                             "precisa saber como ligar uma linha de uma tabela a "
+                             "uma linha da outra — é a mesma ideia de uma chave "
+                             "estrangeira. Só aparecem aqui as colunas que EXISTEM "
+                             "com o mesmo nome nas duas tabelas; escolha a(s) que "
+                             "identifica(m) a relação (ex.: o mesmo cliente, o "
+                             "mesmo período) — sem isso o app não sabe montar o join.",
                     )
                 else:
                     st.warning(
@@ -4818,13 +4830,21 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
     salvos (precisa de `cur['id']`)."""
     st.divider()
     st.markdown("#### 🚀 Pipeline de publicação (Metric View)")
+    st.caption(
+        "4 passos, nessa ordem: **1)** traduzir a fórmula de negócio pra SQL "
+        "(com IA ou na mão) **2)** testar contra o dado real **3)** confirmar "
+        "(só libera se o texto testado é o mesmo que vai ser salvo) **4)** "
+        "copiar o DDL final e rodar onde for publicar a Metric View de verdade "
+        "— o app nunca cria a view sozinho."
+    )
     status = cur.get("status_publicacao") or "rascunho"
     st.caption(f"Status: **{_STATUS_PUBLICACAO_LABELS.get(status, status)}**")
 
     if status in ("rascunho", "aguardando_engenharia"):
         st.info(
-            "Escolha as tabelas/colunas de Dimensão e Métrica (acima) e salve "
-            "— só então o indicador fica elegível pra tradução por IA."
+            "Escolha as tabelas/colunas de Dimensão e Métrica (acima) e clique "
+            "em **💾 Salvar construção do indicador** — só depois disso o "
+            "indicador fica elegível pra tradução da fórmula."
         )
         return
 
@@ -4871,6 +4891,12 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
                         st.session_state[candidato_key] = {**resultado, "valor_teste": valor, "testado": True}
                     except Exception as exc:
                         st.error(f"Falha ao traduzir/testar a fórmula: {exc}")
+            st.caption(
+                "A IA lê a \"Memória de cálculo\" (fórmula em português, "
+                "preenchida pelo negócio) e as colunas escolhidas acima, e "
+                "sugere a expressão SQL — você ainda revisa e testa antes de "
+                "confirmar."
+            )
         with c2:
             # Caminho sem IA: a Engenharia já sabe a expressão (ou prefere
             # escrever à mão) — abre o mesmo editor/teste/confirmação abaixo,
@@ -4879,20 +4905,33 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
                 st.session_state[candidato_key] = {
                     "expr_sql": "", "explicacao": "", "valor_teste": None, "testado": False,
                 }
+            st.caption("Pra quando você já sabe a expressão de cor e prefere escrever direto.")
 
         candidato = st.session_state.get(candidato_key)
         if candidato:
-            st.markdown("###### Confirmação humana (obrigatória — a expressão só é salva depois de testada e confirmada aqui)")
+            st.markdown(
+                "###### ✅ Confirmação humana (obrigatória — a expressão só é "
+                "salva depois de testada e confirmada aqui)"
+            )
             st.write(f"**Fórmula original:** {cur.get('memoria_calculo') or '(vazia)'}")
             if candidato.get("explicacao"):
                 st.caption(f"Como a IA entendeu: {candidato['explicacao']}")
             expr_edit = st.text_area(
                 "Expressão SQL de agregação (edite a sugestão da IA, ou escreva a "
-                "sua — ex.: SUM(`Qtd Vendida`), com o nome da coluna entre crases)",
+                "sua — ex.: SUM(`Qtd Vendida`), com o nome da coluna entre crases; "
+                "se a coluna vier de uma tabela juntada, use alias.`coluna`, ex.: "
+                "margem.`VL_DESCONTO_CLIENTE`)",
                 value=candidato["expr_sql"], key=f"ind_expr_edit_{rk}",
             )
             valor_fmt = "—" if candidato["valor_teste"] is None else f"{candidato['valor_teste']:,.4f}"
             st.metric("Valor de teste (contra o dado real, agora)", valor_fmt)
+            if candidato["valor_teste"] is None and candidato.get("testado"):
+                st.caption(
+                    "⚠️ Veio vazio — pode ser divisão por zero, join sem "
+                    "correspondência pra esse filtro, ou a expressão não bater "
+                    "com nenhuma linha. Não é erro de sintaxe (isso apareceria "
+                    "como mensagem de erro acima); revise a fórmula/filtro."
+                )
 
             # "Confirmar e validar" só libera se o texto atual da caixa é
             # exatamente o que passou no último teste bem-sucedido — editar
@@ -4954,6 +4993,11 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
             fqn_final = st.text_input(
                 "Nome final da view (ajuste se rodou em outro catálogo/schema)",
                 value=view_fqn_sugerido, key=f"ind_fqn_{rk}",
+            )
+            st.caption(
+                "Só clique em \"Marcar como publicado\" **depois** de rodar o "
+                "DDL acima de verdade — o app não confere se a view existe, "
+                "só guarda o nome que você confirmar aqui."
             )
             if st.button("✅ Marcar como publicado", key=f"ind_marcar_pub_{rk}", type="primary"):
                 run_exec(
@@ -5467,6 +5511,23 @@ def page_indicadores_engenharia() -> None:
                 st.write(cur[campo])
 
     st.divider()
+    st.markdown("##### 🗂️ Origem dos dados (Dimensão e Métrica)")
+    with st.expander("❓ Como isso vira uma Metric View — leia antes se for a 1ª vez"):
+        st.markdown(
+            "- A **primeira tabela que você adicionar em Métrica** é a "
+            "**tabela-fato**: a base de tudo (uma Metric View só tem UMA fonte).\n"
+            "- Qualquer OUTRA tabela — seja adicionada em Dimensão ou em Métrica "
+            "— vira uma **junção automática** contra essa fonte. O app "
+            "descobre sozinho quais colunas têm o mesmo nome nas duas tabelas "
+            "e te deixa escolher qual usar como chave (isso é o `USING` do SQL "
+            "— **as duas colunas precisam ter exatamente o mesmo nome**; se não "
+            "tiverem, não dá pra montar o join por aqui).\n"
+            "- **Dimensão** = por quais categorias dá pra fatiar o indicador "
+            "depois (mês, região, segmento…). **Métrica** = de onde vêm os "
+            "números que a fórmula usa pra calcular o valor.\n"
+            "- Cada tabela nova gasta uma junção a mais na consulta — só "
+            "adicione a que a fórmula ou a análise realmente precisam."
+        )
     _sync_tabela_picker_state("dim", rk, _parse_tabelas_json(cur.get("dimensao_tabelas")))
     _sync_tabela_picker_state("met", rk, _parse_tabelas_json(cur.get("metrica_tabelas")))
     # Tabela da Métrica já salva (se houver) — usada pra pedir a coluna de
@@ -5474,30 +5535,40 @@ def page_indicadores_engenharia() -> None:
     # `_render_tabela_picker`). Lida do estado já sincronizado acima, antes
     # de o picker da Métrica rodar, então reflete o que está salvo agora.
     met_fonte_atual = next(iter(st.session_state.get("term_met_items") or []), None)
-    st.markdown("###### Dimensão — tabelas e colunas que compõem a dimensão")
+    st.markdown("###### 🧭 Dimensão — por quais categorias dá pra analisar o indicador")
+    st.caption("Ex.: mês, região, segmento de cliente. Colunas que viram filtro/agrupamento.")
     dim_items = _render_tabela_picker(user, "dim", join_fonte=met_fonte_atual)
-    st.markdown("###### Métrica — tabelas e colunas que formam a métrica")
+    st.markdown("###### 🧮 Métrica — de onde vêm os números da fórmula")
+    st.caption(
+        "A 1ª tabela adicionada aqui é a tabela-fato (a fonte da Metric View). "
+        "Só adicione mais tabelas se a fórmula precisar de coluna de outro lugar."
+    )
     # `join_fonte` aqui também: só pede coluna de junção a partir da 2ª
     # tabela adicionada (a 1ª É a fonte — `met_fonte_atual` só existe depois
     # dela já estar salva, então a 1ª nunca cai no caminho de pedir join).
     met_items = _render_tabela_picker(user, "met", join_fonte=met_fonte_atual)
 
-    st.markdown("###### Dimensões calculadas (expressão SQL — quando não é uma coluna crua)")
+    st.markdown("###### 🧩 Dimensões calculadas (opcional — expressão SQL, não uma coluna crua)")
     st.caption(
-        "Pra dimensão que precisa de uma função sobre a coluna (ex.: "
-        "`MONTH(\\`DT_PERIODO\\`)`) em vez de só a coluna crua. Escreva já "
-        "com o alias da tabela se a coluna vier de um join (ver aliases nas "
-        "tabelas de Dimensão/Métrica acima) — não passa por IA nem "
-        "validação, é SQL livre sob responsabilidade de quem escreve."
+        "Use quando a dimensão precisa de uma função sobre a coluna em vez de "
+        "só a coluna crua — ex.: nome `mes`, expressão `MONTH(\\`dt_pedido\\`)` "
+        "pra agrupar por mês em vez de por data exata. Se a coluna vier de uma "
+        "tabela juntada (não a tabela-fato), escreva com o alias dela na "
+        "frente — o alias é o nome da tabela que aparece na lista acima (ex.: "
+        "`dim_cliente.\\`segmento_erp1\\``). Texto livre: não passa por IA nem "
+        "validação, é responsabilidade de quem escreve."
     )
     dims_calculadas = _render_dims_calculadas(rk, _parse_tabelas_json(cur.get("dimensoes_calculadas")))
 
     filtro_sql = st.text_area(
-        "Filtro (SQL, opcional) — vira o `filter:` da Metric View",
+        "🔎 Filtro de negócio (opcional, SQL) — vira o `filter:` da Metric View",
         value=cur.get("filtro_sql") or "", key=f"ind_filtro_{rk}",
-        help="Ex.: COALESCE(`VL_DEVOLUCAO`, 0) = 0 AND COALESCE(`VL_MULTA`, 0) = 0 "
-             "— aplica nas Restrições de negócio do indicador. Escrito à mão pela "
-             "Engenharia, não passa por IA.",
+        help="Regra que vale pra TODA consulta feita nessa Metric View depois de "
+             "publicada — o mesmo tipo de condição que você colocaria num WHERE, "
+             "só que embutida no indicador em vez de repetida em cada relatório. "
+             "Ex.: COALESCE(`VL_DEVOLUCAO`, 0) = 0 AND COALESCE(`VL_MULTA`, 0) = 0 "
+             "— aplica as Restrições de negócio já descritas no questionário acima. "
+             "Escrito à mão pela Engenharia, não passa por IA.",
     )
 
     if st.button("💾 Salvar construção do indicador", type="primary", key=f"eng_save_{rk}"):
