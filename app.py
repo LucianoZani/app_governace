@@ -3350,16 +3350,34 @@ def render_assistant_dock(user: str) -> None:
 
 
 def render_assistant_panel(user: str) -> None:
-    st.markdown("### 🤖 Assistente de Governança")
+    # Cabeçalho compacto (título + legenda em HTML próprio, sem os
+    # espaçamentos padrão do st.markdown/st.caption) dividindo a linha com
+    # "Nova conversa" — pedido do usuário: o cabeçalho estava empurrando o
+    # campo de pergunta pra fora da tela, exigindo rolar o painel inteiro
+    # só pra digitar.
+    head_col, btn_col = st.columns([5, 2])
+    with head_col:
+        st.markdown(
+            "<div style='font-size:1.05rem;font-weight:600;line-height:1.2;"
+            "margin-bottom:0.1rem;'>🤖 Assistente de Governança</div>",
+            unsafe_allow_html=True,
+        )
     if not LLM_ENABLED or not LLM_ENDPOINT:
         st.info("Assistente de IA não configurado (`LLM_ENABLED`/`LLM_ENDPOINT`).")
         return
-    st.caption("Respostas geradas por IA — confira antes de agir. Só consulta; não aplica tag/comentário.")
+    with btn_col:
+        nova_conversa = st.button("🧹 Nova", use_container_width=True, key="assistant_nova_btn")
+    st.markdown(
+        "<div style='font-size:0.75rem;color:rgba(49,51,63,0.6);line-height:1.3;"
+        "margin-bottom:0.5rem;'>Respostas geradas por IA — confira antes de agir. "
+        "Só consulta; não aplica tag/comentário.</div>",
+        unsafe_allow_html=True,
+    )
 
     if "chat_messages" not in st.session_state:
         st.session_state["chat_messages"] = []
 
-    if st.button("🧹 Nova conversa", use_container_width=True):
+    if nova_conversa:
         st.session_state["chat_messages"] = []
         st.rerun()
 
