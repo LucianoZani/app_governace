@@ -2723,6 +2723,10 @@ D) Revisar a QUALIDADE do preenchimento de um indicador JÁ CADASTRADO —
    na lista de valores válidos daquela chave antes de comentar sobre eles
    — só questione o valor atual ou sugira outro se ele realmente não
    estiver nessa lista; nunca proponha um rótulo que não veio dessa tool.
+   `dimensao_tabelas`/`metrica_tabelas` vazios NÃO são falha do cadastro
+   de negócio — é etapa seguinte, da Engenharia. Não liste como "falta";
+   cite à parte, neutro (ex.: "falta só a etapa técnica da Engenharia
+   mapear tabela/coluna").
    Estruture a resposta em duas partes curtas: o que está BOM (cite o
    campo e por quê) e o que FALTA ou está fraco (cite o campo e uma
    sugestão concreta de como melhorar — não só "está incompleto"). Baseie-se
