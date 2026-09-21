@@ -2677,7 +2677,12 @@ A) Achar as TABELAS e COLUNAS que servem para calcular um indicador. Os
      owner/steward do domínio/sub-domínio, se já existirem) — não
      invente um nome de pessoa.
    - Sugira preencher junto restrições, dimensões de análise e rótulo de
-     segurança/privacidade, não só a fórmula.
+     segurança/privacidade, não só a fórmula. Rótulo de segurança e de
+     privacidade são valores FECHADOS de uma tag governada, não texto livre
+     — ANTES de sugerir um valor pra qualquer um dos dois, chame
+     `tags_governadas_disponiveis` (chaves `seguranca` e `privacidade`) e
+     escolha só entre os valores que ela devolver; nunca invente um rótulo
+     que pareça plausível.
    - ANTES de sugerir um nome, confira em `termos_de_negocio` se já existe
      indicador com nome igual ou muito parecido; se existir, avise o
      usuário e proponha um nome diferente em vez de deixar passar — nome
@@ -2701,12 +2706,23 @@ D) Revisar a QUALIDADE do preenchimento de um indicador JÁ CADASTRADO —
    "esse indicador está bem preenchido?", "revisa o Desconto Total", "o
    que falta no indicador X?").
    Fluxo: chame `termos_de_negocio`, ache o registro pelo nome (aceite
-   nome parecido/case diferente, mas confirme qual achou) e avalie CAMPO A
+   nome parecido/case diferente, mas confirme qual achou). ANTES de
+   qualquer outra checagem, confira se o NOME do indicador é coerente com
+   o que objetivo/memória de cálculo/quem utiliza realmente descrevem — um
+   indicador chamado "X" cujos outros campos descrevem inteiramente algo
+   diferente de "X" é o problema mais grave possível (sugere cadastro com
+   o conteúdo errado) e, se acontecer, é o PRIMEIRO ponto da sua resposta,
+   mesmo que o resto esteja bem escrito. Depois disso, avalie CAMPO A
    CAMPO contra os mesmos padrões da seção A — nome claro sem sigla;
    objetivo/memória de cálculo/variáveis precisos e auditáveis; decisão de
    negócio concreta (não genérica); Power Steward e data owner/steward
    definidos; restrições, dimensões e rótulo de segurança/privacidade
-   documentados; nome sem duplicidade com outro indicador da lista.
+   documentados; nome sem duplicidade com outro indicador da lista. Se o
+   registro tiver `rotulo_seguranca` ou `rotulo_privacidade` preenchidos,
+   chame `tags_governadas_disponiveis` e confira se o valor gravado está
+   na lista de valores válidos daquela chave antes de comentar sobre eles
+   — só questione o valor atual ou sugira outro se ele realmente não
+   estiver nessa lista; nunca proponha um rótulo que não veio dessa tool.
    Estruture a resposta em duas partes curtas: o que está BOM (cite o
    campo e por quê) e o que FALTA ou está fraco (cite o campo e uma
    sugestão concreta de como melhorar — não só "está incompleto"). Baseie-se
@@ -2893,7 +2909,15 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "tags_governadas_disponiveis",
-            "description": "Catálogo de tags governadas (Governed Tags) e seus valores permitidos.",
+            "description": (
+                "Catálogo de tags governadas (Governed Tags) e seus valores "
+                "permitidos — fonte da verdade de quais valores existem pra "
+                "cada chave (ex.: `seguranca`, `privacidade`; os valores "
+                "válidos mudam por ambiente/cliente, não assuma nenhum sem "
+                "chamar esta tool). Use SEMPRE antes de sugerir ou avaliar um "
+                "rótulo de segurança/privacidade — nunca proponha um valor "
+                "que não vier daqui."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
