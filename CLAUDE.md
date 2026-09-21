@@ -1296,3 +1296,45 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     `workspace export` que o `app.py` publicado já tem os dois trechos do
     fix. **Ninguém corrigiu o script do pipeline ainda** — o checklist
     manual pós-merge continua obrigatório em todo merge futuro.
+
+- **2026-09-21 (2ª parte)** — Usuário pediu pra revisar ao vivo a resposta
+  do assistente sobre a qualidade do indicador real **"Clientes Totais"**
+  (Comgás dev) — sessão de perguntas/respostas que revelou **3 achados
+  novos**, todos aplicados só no bundle (são específicos da Comgás; o
+  produto principal não tem esses campos/rótulos):
+  1. **`dimensao_tabelas`/`metrica_tabelas` tratados como falha de
+     negócio** — são preenchidos pela Engenharia numa etapa seguinte, mas
+     o assistente listava junto com pendências reais do cadastro
+     (`variaveis_utilizadas`, domínio). Fix genérico, **portado pros dois
+     repos**: reenquadrar como aviso neutro à parte. Testado 3x no
+     principal antes de portar — 3-em-3 válidas mantiveram nome×conteúdo
+     e reframe corretos (1 timeout de rede, infra, não prompt).
+  2. **Bloco "Alinhamento corporativo" nunca mencionado** — campos reais
+     e preenchidos (`areas_afetadas`/`quem_consultar`/`quem_comunicar`,
+     da PR !57362) que a checklist do prompt nunca cobria, então ficavam
+     ignorados (nem elogiados, nem cobrados). Só existe no bundle — o
+     principal não tem esses campos.
+  3. **"Macroprocesso" em vez de "Franquia"** — usuário confirmou que
+     "macroprocesso" não é mais usado (2026-09-01, relabel só de UI antes;
+     agora terminologia mesmo). Tentativa 1 (instrução de prompt "nunca
+     diga macroprocesso") **não bastou** — o modelo ecoava o termo mesmo
+     assim (a própria instrução ensinava a palavra). Fix de verdade: **a
+     chave é renomeada em código** (`_execute_tool`, dispatch de
+     `termos_de_negocio`: `r["franquia"] = r.pop("macroprocesso")`) — o
+     modelo nunca vê a palavra "macroprocesso" no payload. Confirmado por
+     teste: 0 ocorrências em 4 rodadas depois do fix de código (vs. 2 de 3
+     com só a instrução de prompt). Lição: pra terminologia específica de
+     instalação, não dá pra confiar só em "nunca diga X" — se o dado bruto
+     tem X, o modelo tende a citar; a chave tem que já vir traduzida.
+  - Commit `22a8ab6` (item 1) no principal, pushado, deployado no Free.
+    Commit `adb8d12` (itens 1+2+3) no bundle, branch
+    `feature/assistente-franquia-alinhamento-corporativo`.
+  - **PR !57770 criada (API REST), work item 218352 linkada, aprovada e
+    mesclada com auto-complete** (`f6eba3cc`) — mesmo fluxo da !57755.
+  - 🔴 **Bug 2 do pipeline de novo, confirmado pelo próprio usuário**
+    ("sempre precisa fazer o redeploy") — não vale mais nem checar, é
+    certo que vai precisar do redeploy manual (`databricks apps deploy
+    power-steward --source-code-path .../dev/files/src/power-steward -p
+    comgas-nie-dev`) depois de todo merge. Feito, deployment
+    `01f1b5dd...`, confirmado com `workspace export` que os 3 fixes estão
+    no ar.
