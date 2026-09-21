@@ -1229,3 +1229,56 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     login --profile comgas-nie-dev` em background; completou sozinho
     reaproveitando a sessão SSO do Chrome já logada (sem precisar de MFA
     manual dessa vez).
+
+- **2026-09-21** — Usuário pediu pra revisar a resposta do Assistente de
+  Governança à pergunta "avalie a qualidade do preenchimento do indicador
+  Clientes Totais" (indicador real da Comgás, `comgas_dev.dp_power_steward.ps_indicadores`
+  id 2) — queria saber se a tool precisava melhorar. Achado real, confirmado
+  contra a política de tag oficial da Comgás
+  (`databricks tag-policies list-tag-policies -p comgas-nie-dev`): o
+  assistente sugeriu **"dados_pessoais_corporativos"** como valor pro
+  `rotulo_privacidade` — esse valor **não existe**; a chave `privacidade`
+  só aceita `dados_pessoais`/`dados_pessoais_sensiveis`, e o valor já
+  gravado (`dados_pessoais`) estava correto. Causa raiz: a tool
+  `tags_governadas_disponiveis` (`get_governed_tags()`) já existia no app
+  mas nunca era referenciada no `ASSISTANT_SYSTEM_PROMPT` — o assistente
+  "revisava" rótulo de segurança/privacidade sem ferramenta nenhuma pra
+  saber quais valores são válidos.
+  - Fix: seção A (rascunhar) e D (revisar) do prompt passaram a exigir
+    chamar `tags_governadas_disponiveis` antes de sugerir/avaliar
+    `rotulo_seguranca`/`rotulo_privacidade`; descrição da tool reforçada
+    pra deixar isso explícito.
+  - **Validação por A/B testado ao vivo** (sem Chrome disponível na sessão
+    — reproduzido o loop de tool-calling do `run_assistant_turn` fora do
+    Streamlit, com `requests` direto contra
+    `https://adb-1034226648554058.18.azuredatabricks.net/serving-endpoints/chat/completions`,
+    modelo `databricks-gpt-oss-120b`, usando o dado REAL do indicador —
+    script descartável em scratchpad, não versionado): 3 rodadas com o
+    prompt antigo vs. 3 com o fix. Achado no meio do caminho — a 1ª versão
+    do fix corrigia a alucinação da tag, mas **derrubava de 3-em-3 pra
+    0-em-3** a detecção do problema mais grave do registro (o NOME
+    "Clientes Totais" não bate com nada do conteúdo, que é inteiramente
+    sobre "KM Assentado"/expansão de rede) — era comportamento emergente
+    do modelo, nunca tinha sido uma instrução explícita, e o prompt maior
+    deslocou a atenção do modelo pra longe dela. Corrigido tornando essa checagem
+    explícita e o PRIMEIRO ponto da revisão (seção D). Retestado: 3-em-3
+    rodadas pegando os dois problemas juntos, sem alucinar tag.
+  - Commit `d750106` em `main` (pushado). **Deployado no Free Edition**
+    (`workspace import` do `app.py` + `apps deploy`; o app tinha escalado
+    a zero, precisou `apps start` primeiro) — confirmado no ar com o fix
+    (`grep` no `app.py` exportado do Workspace).
+  - **Portado pro bundle da Comgás**: clone novo em
+    `C:\Users\Luciano.Zani\_pswork\dados-ia-power-steward` (o clone de
+    sessões anteriores, em `scratchpad`, não existia mais — e o path do
+    `scratchpad` desta sessão era longo demais pro clone do Azure DevOps
+    dar certo no Windows, `Filename too long`; `core.longpaths=true` +
+    path curto resolveu). Branch `feature/assistente-checa-tags-governadas`
+    a partir de `origin/dev`, `git apply` do diff sem conflito, commit
+    `608852f`, pushado. **PR ainda não aberta** — sem Chrome conectado
+    nesta sessão pra abrir/clicar "Create", link de criação passado pro
+    usuário:
+    `https://dev.azure.com/ComgasIT/Dados%20e%20Analytics/_git/dados-ia-power-steward/pullrequestcreate?sourceRef=feature/assistente-checa-tags-governadas&targetRef=dev`.
+  - ⚠️ Pendente pra próxima sessão: confirmar se o usuário abriu/mesclou
+    essa PR; se sim, aplicar o **checklist manual pós-merge** (Bug 2 do
+    pipeline, `active_deployment.update_time`) documentado nas sessões de
+    2026-09-17/18/19 antes de considerar o fix realmente ativo na Comgás.
