@@ -1338,3 +1338,55 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     comgas-nie-dev`) depois de todo merge. Feito, deployment
     `01f1b5dd...`, confirmado com `workspace export` que os 3 fixes estão
     no ar.
+
+- **2026-09-22** — Levantamento da linhagem real do indicador **"Desconto
+  Total"** (`comgas_dev.dp_power_steward.ps_indicadores`, id 1, cadastrado
+  em 19/09) pra montar um prompt de **qualidade de dados** (completude +
+  unicidade) a pedido do usuário, pra ele colar num Genie Space e pedir um
+  notebook + dashboard. Trabalho só de consulta/análise, sem código no app.
+  - **Consultado direto o registro real** (não confiei na memória de 19/09,
+    que tinha uma nota dizendo que `ft_margem` teria sido removido do
+    lineage — a consulta mostrou que **`ft_margem` continua no
+    `metrica_tabelas`**, só não é usado na expressão `desconto_total`;
+    o registro anterior estava impreciso ou foi revertido em algum
+    momento não documentado). Lineage completo extraído: fato
+    `nie_prd_legacy.ref_faturamento.ft_mercado_fatura`; dimensões
+    `dm_endereco_instalacao` (`CD_ENDERECO`), `tb_seed_depara_segmento_mercado`
+    (`sk_segmento_mercado`), `dm_segmentacao` (`CD_SEGMENTACAO`),
+    `tb_int_tipo_desconto` (`cd_instalacao`+`dt_periodo`); tabela juntada
+    mas não usada na fórmula `ft_margem` (`SK_CLIENTE`+`DT_PERIODO_FISCAL`
+    — a chave com fan-out conhecido desde 19/09).
+  - **Cruzado contra `information_schema.columns`** das duas tabelas fato
+    (`ft_mercado_fatura` 146 colunas, `ft_margem`) pra achar candidatas a
+    chave de negócio da fato (`CD_DOCUMENTO_IMPRESSAO` e
+    `(SK_CLIENTE, SK_CONTRATO_FORNECIMENTO, DT_PERIODO)` — nenhuma
+    confirmada como PK real, só candidatas pro Genie testar).
+  - **Usuário colou a DDL real da Metric View** (`CREATE OR REPLACE VIEW
+    nie_prd_legacy.ref_faturamento.desconto_total WITH METRICS LANGUAGE
+    YAML`, ainda não rodada — `status_publicacao='validado'`,
+    `metric_view_publicada=null`) — bateu 100% com o que eu tinha
+    levantado da tabela (fonte, filtro, 4 joins de dimensão + `ft_margem`,
+    7 dimensions, expressão de `desconto_total`). Confirma que
+    `ps_indicadores` é a fonte de verdade correta (não existe outro
+    artefato publicado pra cruzar, já que a view nunca rodou).
+  - **Ajuste pedido pelo usuário**: escopar as checagens de qualidade da
+    tabela fato só pro recorte `VL_DESCONTO != 0` (não a tabela inteira) —
+    motivo: a coluna tem valores negativos (desconto real), zero (maioria,
+    ~93,7% em 19/09) e positivo (~0,01%, provável ajuste/estorno); o
+    recorte relevante pro indicador é qualquer valor diferente de zero.
+    **Importante**: essa é só a população da ANÁLISE DE QUALIDADE — o
+    `filtro_sql`/DDL oficial do indicador continua com `VL_DESCONTO < 0`
+    (usuário confirmou explicitamente que não é pra mudar a lógica do
+    indicador, só o recorte do prompt de qualidade).
+  - **Prompt final** (6 blocos — fato + 4 dimensões + `ft_margem`, cada um
+    com completude por coluna e unicidade por chave de join, com destaque
+    pro `ft_margem` por já ter fan-out conhecido) — entregue ao usuário
+    pronto pra colar no Genie, sem publicar em lugar nenhum (só texto na
+    conversa). Ver `Documents/Projetos/Comgas/CLAUDE.md`, sessão de hoje,
+    pra o resto do que essa sessão tratou (bundle da Comgás, Genie Space
+    sharing pro pessoal de negócio, etc. — sessão híbrida entre os dois
+    repos).
+  - Também rascunhado (a pedido do usuário) um texto de instruções pra um
+    Genie Space aplicar as 6 boas práticas de preenchimento de indicador
+    (já usadas no `ASSISTANT_SYSTEM_PROMPT` do app desde 18/09) sem citá-
+    las explicitamente — ainda não colado em nenhum Genie Space real.
