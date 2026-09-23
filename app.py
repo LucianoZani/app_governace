@@ -4546,9 +4546,10 @@ def page_dashboards() -> None:
         "Cadastro de dashboards AI/BI (Lakeview) publicados. Cada um pertence à "
         "árvore **Franquia › Domínio** (sub-domínio opcional). Tipo **Governança**: "
         "aparece no menu Governança para **admin** ou **Data Steward/Owner** daquele "
-        "domínio/sub-domínio. Tipo **Qualidade de dados**: aparece no menu "
-        "**Engenharia**, para quem tem a permissão Engenharia. Vincular a um "
-        "indicador (opcional) mostra o link também na tela Indicadores — Engenharia."
+        "domínio/sub-domínio. Tipo **Qualidade de dados**: aparece na seção "
+        "**Dashboards** do menu, para quem tem Engenharia, Power Steward ou "
+        "Cadastros. Vincular a um indicador (opcional) mostra o link também nas "
+        "telas do indicador (Indicador, Glossário e Indicadores — Engenharia)."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
@@ -7041,7 +7042,7 @@ def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
     dash = list_dashboards()
     if dash.empty:
         return []
-    # Dashboards de qualidade vão pro menu Engenharia (`dashboards_qualidade`).
+    # Dashboards de qualidade vão pra seção Dashboards (`dashboards_qualidade`).
     ativos = [
         r for r in dash.to_dict("records")
         if r.get("ativo", True) and r.get("categoria") != "qualidade"
@@ -7065,7 +7066,7 @@ def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
 
 
 def dashboards_qualidade(indicador_id: int | None = None) -> list[dict]:
-    """Dashboards ativos de qualidade de dados (menu Engenharia). Com
+    """Dashboards ativos de qualidade de dados (seção Dashboards do menu). Com
     `indicador_id`, devolve os dashboards ativos vinculados àquele indicador,
     de qualquer tipo (link na tela Indicadores — Engenharia). Quem já entrou
     no menu Engenharia vê todos — não filtra por domínio/steward."""
@@ -7621,18 +7622,24 @@ def main() -> None:
     if is_admin or perms["engenharia"]:
         pg_indicadores_eng = st.Page(page_indicadores_engenharia, title="Indicadores — Engenharia", icon="🛠️")
         nav_pages["indicadores_engenharia"] = pg_indicadores_eng
-        engenharia = [pg_indicadores_eng]
+        pages["Engenharia"] = [pg_indicadores_eng]
+    # Dashboards de qualidade de dados: seção própria, comum à Engenharia e ao
+    # negócio dos indicadores (Power Steward / Cadastros). Só aparece se houver
+    # algum dashboard do tipo Qualidade cadastrado e ativo.
+    if is_admin or perms["engenharia"] or perms["power_steward"] or perms["ver_cadastros"]:
         try:
-            for row in dashboards_qualidade():
-                engenharia.append(
-                    st.Page(
-                        make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
-                        url_path=f"dashboard-{int(row['id'])}",
-                    )
+            dash_pages = [
+                st.Page(
+                    make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
+                    url_path=f"dashboard-{int(row['id'])}",
                 )
+                for row in dashboards_qualidade()
+            ]
         except Exception as exc:
+            dash_pages = []
             st.session_state.setdefault("cad_bootstrap_error", str(exc))
-        pages["Engenharia"] = engenharia
+        if dash_pages:
+            pages["Dashboards"] = dash_pages
     st.session_state["_nav_pages"] = nav_pages
     nav = st.navigation(pages)
 
