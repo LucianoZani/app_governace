@@ -1435,3 +1435,11 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   SUCCEEDED, snapshot só com os arquivos de runtime. `FINOPS_SNAPSHOT_TABLE` saiu do
   "workspace-only" e foi pro `app.yaml` do repo (com bundle, o repo é a única fonte da
   config). Seção "Deploy" deste arquivo reescrita.
+
+  **▶️ PONTO DE RETOMADA (2026-09-23, fim do dia):**
+  1. Deploy no Free = `bundle deploy -t free` + `bundle run governanca_unity_catalog -t free`.
+  2. Bug do `q_str` (escape `''` some com as aspas — usar `\'`): corrigir aqui e portar pro bundle Comgás.
+  3. Guia/Runbook republicados (versões 4 e 12) — PDFs `16-`/`18-*.pdf` desatualizados.
+  4. Pendências Comgás (Desconto Total/ft_margem, warehouse `Can use` pra `users`,
+     SP do App na automação de grants): ver `Documents/Projetos/Comgas/CLAUDE.md`.
+
