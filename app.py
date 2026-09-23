@@ -4572,7 +4572,7 @@ def page_dashboards() -> None:
             lambda i: ind_nome.get(int(i), f"id {int(i)}") if pd.notna(i) else "—"
         )
         show["Franquia"] = show["dominio_id"].map(_fr_de_dom)
-        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
+        show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i) if pd.notna(i) else "—")
         show["Sub-domínio"] = show["subdominio_id"].map(
             lambda i: sub_nome.get(i, "(todos)") if pd.notna(i) else "(todos)"
         )
@@ -4589,8 +4589,10 @@ def page_dashboards() -> None:
         st.info("Seu perfil é **leitor** — visualização apenas.")
         return
     if not doms:
-        st.warning("Cadastre um **Domínio** primeiro.")
-        return
+        st.caption(
+            "Nenhum **Domínio** cadastrado ainda — por enquanto só dá pra cadastrar "
+            "dashboards do tipo **Qualidade de dados** (domínio opcional)."
+        )
 
     recs = dash.to_dict("records")
     opts = ["(novo)"] + [f'{r["nome"]} (id {r["id"]})' for r in recs]
@@ -4607,8 +4609,12 @@ def page_dashboards() -> None:
         }
     )
 
-    dom_ids = [d["id"] for d in doms]
-    dom_idx = dom_ids.index(cur["dominio_id"]) if editing and cur["dominio_id"] in dom_ids else 0
+    # Domínio é obrigatório só para o tipo Governança (é ele que decide quem vê
+    # o dashboard no menu Governança); para Qualidade de dados é opcional.
+    dom_ids = [None] + [d["id"] for d in doms]
+    cur_dom = cur.get("dominio_id")
+    cur_dom = cur_dom if cur_dom is not None and pd.notna(cur_dom) else None
+    dom_idx = dom_ids.index(cur_dom) if cur_dom in dom_ids else (1 if len(dom_ids) > 1 and not editing else 0)
     with st.form("form_dash"):
         nome = st.text_input("Nome *", value=cur["nome"] or "")
         url = st.text_input("URL do dashboard publicado *", value=cur.get("url") or "")
@@ -4629,10 +4635,10 @@ def page_dashboards() -> None:
                  "junto do indicador escolhido aqui.",
         )
         dom_id = st.selectbox(
-            "Domínio *", options=dom_ids, index=dom_idx,
-            format_func=lambda i: f'{_fr_de_dom(i)} › {dom_nome.get(i, i)}',
+            "Domínio (obrigatório para o tipo Governança)", options=dom_ids, index=dom_idx,
+            format_func=lambda i: "(sem domínio)" if i is None else f'{_fr_de_dom(i)} › {dom_nome.get(i, i)}',
         )
-        sub_ids_all = [s["id"] for s in subs if s["dominio_id"] == dom_id]
+        sub_ids_all = [s["id"] for s in subs if dom_id is not None and s["dominio_id"] == dom_id]
         sub_options = [None] + sub_ids_all
         cur_sub = cur.get("subdominio_id")
         sub_idx = sub_options.index(cur_sub) if editing and cur_sub in sub_options else 0
@@ -4658,11 +4664,15 @@ def page_dashboards() -> None:
         if not (url.startswith("http://") or url.startswith("https://")):
             st.warning("A URL deve começar com http:// ou https://.")
             return
-        sub_sql = "NULL" if sub_id is None else str(int(sub_id))
+        if dom_id is None and categoria != "qualidade":
+            st.warning("Dashboards do tipo **Governança** precisam de um domínio.")
+            return
+        dom_sql = "NULL" if dom_id is None else str(int(dom_id))
+        sub_sql = "NULL" if sub_id is None or dom_id is None else str(int(sub_id))
         ind_sql = "NULL" if indicador_id is None else str(int(indicador_id))
         if editing:
             run_exec(
-                f"UPDATE {_cad('dashboards')} SET dominio_id = {int(dom_id)}, "
+                f"UPDATE {_cad('dashboards')} SET dominio_id = {dom_sql}, "
                 f"subdominio_id = {sub_sql}, nome = {q_str(nome)}, descricao = {q_str(desc)}, "
                 f"url = {q_str(url)}, icone = {q_str(icone or '📊')}, ativo = {str(bool(ativo)).lower()}, "
                 f"categoria = {q_str(categoria)}, indicador_id = {ind_sql}, "
@@ -4674,7 +4684,7 @@ def page_dashboards() -> None:
                 f"INSERT INTO {_cad('dashboards')} "
                 f"(dominio_id, subdominio_id, nome, descricao, url, icone, ativo, categoria, indicador_id, "
                 f"criado_em, criado_por) "
-                f"VALUES ({int(dom_id)}, {sub_sql}, {q_str(nome)}, {q_str(desc)}, {q_str(url)}, "
+                f"VALUES ({dom_sql}, {sub_sql}, {q_str(nome)}, {q_str(desc)}, {q_str(url)}, "
                 f"{q_str(icone or '📊')}, {str(bool(ativo)).lower()}, {q_str(categoria)}, {ind_sql}, "
                 f"current_timestamp(), {q_str(user)})"
             )
@@ -5453,6 +5463,8 @@ def _render_glossario_editor(
     record_key = str(cur.get("id")) if editing else "novo"
     rk = record_key
     _sync_keywords_state(kp, record_key, cur.get("palavras_chave") or "")
+    if is_indicador and editing:
+        _render_dashboards_do_indicador(cur.get("id"))
 
     # Todos os widgets ficam fora de st.form por causa do picker de tabelas/
     # colunas do indicador, que precisa recarregar a cada escolha de
@@ -5831,17 +5843,7 @@ def page_indicadores_engenharia() -> None:
     if cur.get("restricoes"):
         st.caption(f"Restrições: {cur['restricoes']}")
 
-    try:
-        dash_ind = dashboards_qualidade(int(cur["id"]))
-    except Exception:
-        dash_ind = []
-    if dash_ind:
-        st.markdown("**📊 Dashboards vinculados a este indicador**")
-        cols = st.columns(min(len(dash_ind), 3))
-        for i, d in enumerate(dash_ind):
-            cols[i % len(cols)].link_button(
-                f"{d.get('icone') or '📊'} {d['nome']}", d["url"], use_container_width=True,
-            )
+    _render_dashboards_do_indicador(cur["id"])
 
     with st.expander("Ver questionário completo do negócio"):
         for titulo, campo in (
@@ -5964,6 +5966,8 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
     else:
         c1.markdown(f"**Data Steward**\n\n{cur.get('data_steward') or '—'}")
         c2.markdown(f"**Franquia**\n\n{cur.get('macroprocesso') or '—'}")
+    if is_indicador:
+        _render_dashboards_do_indicador(cur.get("id"))
     if is_indicador and cur.get("definicao"):
         st.markdown("**Definição do indicador**")
         st.write(cur["definicao"])
@@ -7075,6 +7079,26 @@ def dashboards_qualidade(indicador_id: int | None = None) -> list[dict]:
         r for r in ativos
         if pd.notna(r.get("indicador_id")) and int(r["indicador_id"]) == int(indicador_id)
     ]
+
+
+def _render_dashboards_do_indicador(indicador_id) -> None:
+    """Botões dos dashboards ativos vinculados a um indicador — usado nas telas
+    Indicador (negócio), consulta do Glossário e Indicadores — Engenharia. Não
+    renderiza nada se não houver vínculo (ou se a leitura falhar)."""
+    if indicador_id is None or pd.isna(indicador_id):
+        return
+    try:
+        dash_ind = dashboards_qualidade(int(indicador_id))
+    except Exception:
+        return
+    if not dash_ind:
+        return
+    st.markdown("**📊 Dashboards vinculados a este indicador**")
+    cols = st.columns(min(len(dash_ind), 3))
+    for i, d in enumerate(dash_ind):
+        cols[i % len(cols)].link_button(
+            f"{d.get('icone') or '📊'} {d['nome']}", d["url"], use_container_width=True,
+        )
 
 
 # ---------------------------------------------------------------------------
