@@ -1390,3 +1390,28 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     Genie Space aplicar as 6 boas práticas de preenchimento de indicador
     (já usadas no `ASSISTANT_SYSTEM_PROMPT` do app desde 18/09) sem citá-
     las explicitamente — ainda não colado em nenhum Genie Space real.
+
+- **2026-09-23** — **Dashboards de qualidade de dados** (pedido do usuário:
+  dashboards de Qualidade criados no Databricks acessíveis à Engenharia e ao
+  negócio dos indicadores). 3 commits em `main` (`9f73f71`, `5119d35`,
+  `1e78075`), portados pro bundle Comgás (PRs !58094, !58151 e a 3ª, todas
+  mescladas e deployadas lá). Não testado no Free (Chrome desconectado; o
+  usuário pediu pra ir direto pra Comgás) — só o 1º commit foi deployado no
+  Free.
+  - `dashboards` ganhou `categoria` (`governanca` default / `qualidade`) e
+    `indicador_id` (migração idempotente em `ensure_cadastro_tables`).
+    `list_dashboards` devolve os dois; `_DASH_CATEGORIAS`.
+  - Tipo **Qualidade**: fora do menu Governança (`user_visible_dashboards`
+    filtra), em seção própria **"Dashboards"** no menu, visível pra admin +
+    flags `engenharia`/`power_steward`/`ver_cadastros` (`dashboards_qualidade()`).
+    Domínio opcional só pra Qualidade (Governança continua exigindo — é o
+    filtro de visibilidade); tela não bloqueia mais sem domínio cadastrado.
+  - `_render_dashboards_do_indicador(id)`: botões dos dashboards vinculados,
+    nas telas Indicador (negócio, só em edição), card do Glossário (só
+    `tipo == Indicador` — ids de glossário/indicador colidem na UNION) e
+    Indicadores — Engenharia.
+  - 🔴 Bug achado (não corrigido): `q_str` escapa aspa com `''`, que o
+    warehouse trata como concatenação — aspas somem. Usar `\'`. Ver
+    `Documents/Projetos/Comgas/CLAUDE.md` 2026-09-23 pro resto da sessão
+    (Desconto Total com a query nova, ft_margem, tipo de desconto, Tiago/
+    warehouse).
