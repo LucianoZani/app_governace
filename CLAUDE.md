@@ -32,19 +32,28 @@ Glossário: schema `ontologia_<env>` (fixo em código, `ONTOLOGIA_SCHEMA`).
 - Source do app no Workspace: `/Workspace/Users/lucianozaniengenheirodedados@gmail.com/apps/governanca-unity-catalog`
 - SQL Warehouse: `20dfe5c08c3fa359` · `ENVIRONMENT=prd` (sem dev/prd separado nesta conta)
 
-## Deploy (manual, fora de CI)
+## Deploy (Asset Bundle, target `free`) — desde 2026-09-23
 
 ```bash
 cd <este repo>
-MSYS_NO_PATHCONV=1 databricks sync . "/Workspace/Users/lucianozaniengenheirodedados@gmail.com/apps/governanca-unity-catalog" --full -p governanca-free
-MSYS_NO_PATHCONV=1 databricks apps deploy governanca-unity-catalog --source-code-path "/Workspace/Users/lucianozaniengenheirodedados@gmail.com/apps/governanca-unity-catalog" -p governanca-free
+databricks bundle deploy -t free --auto-approve              # sobe arquivos + config do app
+databricks bundle run governanca_unity_catalog -t free       # cria o deployment (troca a versão)
 ```
 
-- `MSYS_NO_PATHCONV=1` é obrigatório no Git Bash (senão `/Workspace/...` vira `C:/Program Files/Git/Workspace/...`).
-- Só `app.py`, `app.yaml`, `requirements.txt` afetam o runtime (`command: streamlit run app.py`).
-- Deploy é SNAPSHOT: copia a pasta do Workspace e reinicia o app.
+- O app existente foi **vinculado** ao bundle (`bundle deployment bind`) — mesmo nome,
+  SP (`8d194e53…`), URL e dados. `prevent_destroy: true` no recurso.
+- Source do app agora é `/Workspace/Users/lucianozaniengenheirodedados@gmail.com/.bundle/governanca-unity-catalog/free/files`.
+  A pasta antiga (`.../apps/governanca-unity-catalog`) não é mais usada.
+- **O `app.yaml` do repo é a config do Free** (inclui `FINOPS_SNAPSHOT_TABLE`) — não
+  existe mais config "só no Workspace". Mudou env var → commit + `bundle deploy`.
+- `sync.exclude` no `databricks.yml` deixa de fora `*.json`, `*.sql`, `*.md`, `docs/`,
+  `docs-produto/` (+ o que o `.gitignore` já ignora). Só `app.py`, `app.yaml`,
+  `requirements.txt`, `finops_dados_demo.xlsx` importam em runtime.
+- `bundle deploy` sozinho **não** troca a versão do app — sempre rodar o `bundle run`.
 - Migrações de schema ficam em `ensure_cadastro_tables()` (`@st.cache_resource`)
   e só rodam quando **alguém abre o app** depois do deploy — abra a URL para disparar.
+- Fluxo antigo (histórico, não usar): `databricks sync` / `workspace import` + `apps deploy`
+  na pasta `.../apps/governanca-unity-catalog`.
 
 ## Login do Databricks CLI
 
@@ -1415,3 +1424,14 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     `Documents/Projetos/Comgas/CLAUDE.md` 2026-09-23 pro resto da sessão
     (Desconto Total com a query nova, ft_margem, tipo de desconto, Tiago/
     warehouse).
+
+- **2026-09-23 (2ª parte)** — **Asset Bundle configurado no Free.** Target `free` no
+  `databricks.yml` (host + profile `governanca-free`, `compute_size: LARGE`,
+  `user_api_scopes: [sql]` — declarados pra o deploy não alterar o app;
+  `lifecycle.prevent_destroy: true`; `sync.exclude` de docs/rascunhos). App existente
+  vinculado via `databricks bundle deployment bind governanca_unity_catalog
+  governanca-unity-catalog -t free` → plano "0 add, 1 change, 0 delete". `bundle deploy`
+  + `bundle run` OK: mesmo SP/URL, escopo `sql` preservado, deployment `01f1b797…`
+  SUCCEEDED, snapshot só com os arquivos de runtime. `FINOPS_SNAPSHOT_TABLE` saiu do
+  "workspace-only" e foi pro `app.yaml` do repo (com bundle, o repo é a única fonte da
+  config). Seção "Deploy" deste arquivo reescrita.

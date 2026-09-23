@@ -2,17 +2,21 @@
 #
 # Uso:
 #   databricks bundle validate -t <target>
-#   databricks bundle deploy   -t <target>
+#   databricks bundle deploy   -t <target>   # sobe os arquivos + config do app
+#   databricks bundle run governanca_unity_catalog -t <target>
+#                                            # cria o deployment (o app só troca
+#                                            # de versão com este passo)
 #
 # Isso substitui o fluxo manual (`databricks apps create` + `databricks sync`
-# + `databricks apps deploy`, ver docs-produto/04-instalacao.md) por um único
-# comando. As variáveis de ambiente do app continuam vindo do `app.yaml` —
-# ajuste-o pro workspace de destino antes de rodar `bundle deploy`, exatamente
-# como no fluxo manual. O bundle não substitui essa etapa, só empacota os
-# comandos de deploy.
+# + `databricks apps deploy`, ver docs-produto/04-instalacao.md). As variáveis
+# de ambiente do app continuam vindo do `app.yaml` — ajuste-o pro workspace de
+# destino antes de rodar `bundle deploy`, exatamente como no fluxo manual.
 #
-# Edite os hosts em `targets` (abaixo) pro workspace de cada instalação antes
-# de usar.
+# Target `free` = ambiente pessoal (Databricks Free Edition), já em uso: o app
+# existente foi VINCULADO ao bundle (`databricks bundle deployment bind
+# governanca_unity_catalog governanca-unity-catalog -t free`) — mesmo nome, SP,
+# URL e dados. Os targets `dev`/`prd` são modelo pra outras instalações: edite
+# os hosts antes de usar.
 
 bundle:
   name: governanca-unity-catalog
@@ -22,17 +26,46 @@ variables:
     description: "Nome do Databricks App"
     default: governanca-unity-catalog
 
+# Só o que o app precisa em runtime vai pro Workspace. O resto do repo
+# (documentação, rascunhos de consulta, contexto do Claude) fica de fora.
+# PDFs/planilhas já são ignorados pelo .gitignore.
+sync:
+  exclude:
+    - "*.json"
+    - "*.sql"
+    - "*.md"
+    - "docs/**"
+    - "docs-produto/**"
+
 resources:
   apps:
     governanca_unity_catalog:
       name: ${var.app_name}
       description: "Governança & Cadastros — Unity Catalog"
       source_code_path: .
+      # Escopo OAuth do usuário (OBO). Precisa estar declarado: sem isso, o
+      # deploy remove o escopo do app.
+      user_api_scopes:
+        - sql
+      # O app guarda os cadastros e o histórico — `bundle destroy` não deve
+      # apagá-lo.
+      lifecycle:
+        prevent_destroy: true
 
 targets:
+  free:
+    default: true
+    workspace:
+      host: https://dbc-7b532bee-e109.cloud.databricks.com
+      profile: governanca-free
+    resources:
+      apps:
+        governanca_unity_catalog:
+          # Tamanho atual do app no Free — declarado pra o deploy não alterá-lo.
+          compute_size: LARGE
+
   dev:
     mode: development
-    default: true
     workspace:
       host: https://<workspace-dev>.azuredatabricks.net
 

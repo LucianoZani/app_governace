@@ -58,3 +58,11 @@ env:
   # Nome completo (catalog.schema.name) do model service no AI Gateway.
   - name: LLM_ENDPOINT
     value: "apps.governanca_unity_catalog_prd.assistente_governanca"
+
+  # FinOps: o SP não tem acesso a system.billing (schema RESERVED, só account
+  # admin). Snapshot mantido pelo job `governanca_finops_snapshot` (roda como o
+  # usuário, que tem account-admin no Free), que grava aqui e concede SELECT ao
+  # SP do app. Veio do app.yaml do Workspace para o repo quando o deploy passou
+  # a ser via Asset Bundle (target `free`): o repo virou a única fonte da config.
+  - name: FINOPS_SNAPSHOT_TABLE
+    value: "governance.finops.custo_snapshot"
