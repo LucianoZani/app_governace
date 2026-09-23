@@ -1394,7 +1394,7 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
 - **2026-09-23** — **Dashboards de qualidade de dados** (pedido do usuário:
   dashboards de Qualidade criados no Databricks acessíveis à Engenharia e ao
   negócio dos indicadores). 3 commits em `main` (`9f73f71`, `5119d35`,
-  `1e78075`), portados pro bundle Comgás (PRs !58094, !58151 e a 3ª, todas
+  `1e78075`), portados pro bundle Comgás (PRs !58094, !58151 e !58155, todas
   mescladas e deployadas lá). Não testado no Free (Chrome desconectado; o
   usuário pediu pra ir direto pra Comgás) — só o 1º commit foi deployado no
   Free.
