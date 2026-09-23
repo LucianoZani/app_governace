@@ -1955,6 +1955,23 @@ def ensure_cadastro_tables() -> bool:
             run_exec(f"ALTER TABLE {_cad('dominios')} ADD COLUMNS (franquia_id BIGINT)")
     except Exception:
         pass
+    # Colunas `categoria` e `indicador_id` em `dashboards` (idempotente).
+    # `categoria = 'qualidade'` tira o dashboard do menu Governança e o põe no
+    # menu Engenharia; `indicador_id` (opcional) mostra o link direto na tela
+    # Indicadores — Engenharia. NULL em ambos = comportamento antigo.
+    try:
+        cols_df = run_query(
+            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+            f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'dashboards')}"
+        )
+        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
+        if "categoria" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('dashboards')} ADD COLUMNS (categoria STRING)")
+        if "indicador_id" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('dashboards')} ADD COLUMNS (indicador_id BIGINT)")
+    except Exception:
+        pass
     # Coluna `power_steward` em `indicadores` (idempotente p/ a tabela já
     # existente). Guarda o e-mail do Power Steward escolhido — a lista vem de
     # `permissoes` (flag `power_steward`).
@@ -2184,7 +2201,8 @@ def list_stewards() -> pd.DataFrame:
 def list_dashboards() -> pd.DataFrame:
     return run_query(
         f"SELECT id, dominio_id, subdominio_id, nome, descricao, url, icone, "
-        f"coalesce(ativo,true) AS ativo FROM {_cad('dashboards')} ORDER BY nome"
+        f"coalesce(ativo,true) AS ativo, coalesce(categoria,'governanca') AS categoria, "
+        f"indicador_id FROM {_cad('dashboards')} ORDER BY nome"
     )
 
 
@@ -4517,13 +4535,20 @@ def page_stewards() -> None:
             _finish_write("Registro excluído.")
 
 
+# Tipos de dashboard (coluna `dashboards.categoria`). Governança = menu
+# Governança (steward do domínio); Qualidade = menu Engenharia.
+_DASH_CATEGORIAS = {"governanca": "Governança", "qualidade": "Qualidade de dados"}
+
+
 def page_dashboards() -> None:
     st.title("📊 Dashboards")
     st.caption(
         "Cadastro de dashboards AI/BI (Lakeview) publicados. Cada um pertence à "
-        "árvore **Franquia › Domínio** (sub-domínio opcional) — quem enxerga o link "
-        "no menu Governança é quem for **admin** ou **Data Steward/Owner** daquele "
-        "domínio/sub-domínio."
+        "árvore **Franquia › Domínio** (sub-domínio opcional). Tipo **Governança**: "
+        "aparece no menu Governança para **admin** ou **Data Steward/Owner** daquele "
+        "domínio/sub-domínio. Tipo **Qualidade de dados**: aparece no menu "
+        "**Engenharia**, para quem tem a permissão Engenharia. Vincular a um "
+        "indicador (opcional) mostra o link também na tela Indicadores — Engenharia."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
@@ -4537,9 +4562,15 @@ def page_dashboards() -> None:
     dom_fr = {d["id"]: _hier_franquia_id(d) for d in doms}
     sub_nome = {s["id"]: s["nome"] for s in subs}
     _fr_de_dom = lambda i: fr_nome.get(dom_fr.get(i) or -1, "—")
+    inds = list_indicadores()
+    ind_nome = {int(r["id"]): r["nome"] for r in inds.to_dict("records")} if not inds.empty else {}
     dash = list_dashboards()
     show = dash.copy()
     if not show.empty:
+        show["Tipo"] = show["categoria"].map(lambda c: _DASH_CATEGORIAS.get(c, c))
+        show["Indicador"] = show["indicador_id"].map(
+            lambda i: ind_nome.get(int(i), f"id {int(i)}") if pd.notna(i) else "—"
+        )
         show["Franquia"] = show["dominio_id"].map(_fr_de_dom)
         show["Domínio"] = show["dominio_id"].map(lambda i: dom_nome.get(i, i))
         show["Sub-domínio"] = show["subdominio_id"].map(
@@ -4549,7 +4580,7 @@ def page_dashboards() -> None:
         (show.rename(columns={
             "nome": "Nome", "descricao": "Descrição", "url": "URL",
             "icone": "Ícone", "ativo": "Ativo",
-        })[["Nome", "Franquia", "Domínio", "Sub-domínio", "URL", "Ícone", "Ativo", "Descrição"]]
+        })[["Nome", "Tipo", "Indicador", "Franquia", "Domínio", "Sub-domínio", "URL", "Ícone", "Ativo", "Descrição"]]
          if not show.empty else show),
         use_container_width=True, hide_index=True,
     )
@@ -4572,6 +4603,7 @@ def page_dashboards() -> None:
         else {
             "id": None, "dominio_id": None, "subdominio_id": None, "nome": "",
             "descricao": "", "url": "", "icone": "📊", "ativo": True,
+            "categoria": "governanca", "indicador_id": None,
         }
     )
 
@@ -4580,6 +4612,22 @@ def page_dashboards() -> None:
     with st.form("form_dash"):
         nome = st.text_input("Nome *", value=cur["nome"] or "")
         url = st.text_input("URL do dashboard publicado *", value=cur.get("url") or "")
+        cat_keys = list(_DASH_CATEGORIAS)
+        cur_cat = cur.get("categoria") or "governanca"
+        categoria = st.radio(
+            "Tipo *", options=cat_keys, index=cat_keys.index(cur_cat) if cur_cat in cat_keys else 0,
+            format_func=lambda c: _DASH_CATEGORIAS[c], horizontal=True,
+        )
+        ind_options = [None] + list(ind_nome)
+        cur_ind = cur.get("indicador_id")
+        cur_ind = int(cur_ind) if cur_ind is not None and pd.notna(cur_ind) else None
+        indicador_id = st.selectbox(
+            "Indicador vinculado (opcional)", options=ind_options,
+            index=ind_options.index(cur_ind) if cur_ind in ind_options else 0,
+            format_func=lambda i: "(nenhum)" if i is None else ind_nome.get(i, i),
+            help="O link do dashboard aparece na tela Indicadores — Engenharia, "
+                 "junto do indicador escolhido aqui.",
+        )
         dom_id = st.selectbox(
             "Domínio *", options=dom_ids, index=dom_idx,
             format_func=lambda i: f'{_fr_de_dom(i)} › {dom_nome.get(i, i)}',
@@ -4611,20 +4659,24 @@ def page_dashboards() -> None:
             st.warning("A URL deve começar com http:// ou https://.")
             return
         sub_sql = "NULL" if sub_id is None else str(int(sub_id))
+        ind_sql = "NULL" if indicador_id is None else str(int(indicador_id))
         if editing:
             run_exec(
                 f"UPDATE {_cad('dashboards')} SET dominio_id = {int(dom_id)}, "
                 f"subdominio_id = {sub_sql}, nome = {q_str(nome)}, descricao = {q_str(desc)}, "
                 f"url = {q_str(url)}, icone = {q_str(icone or '📊')}, ativo = {str(bool(ativo)).lower()}, "
+                f"categoria = {q_str(categoria)}, indicador_id = {ind_sql}, "
                 f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
                 f"WHERE id = {int(cur['id'])}"
             )
         else:
             run_exec(
                 f"INSERT INTO {_cad('dashboards')} "
-                f"(dominio_id, subdominio_id, nome, descricao, url, icone, ativo, criado_em, criado_por) "
+                f"(dominio_id, subdominio_id, nome, descricao, url, icone, ativo, categoria, indicador_id, "
+                f"criado_em, criado_por) "
                 f"VALUES ({int(dom_id)}, {sub_sql}, {q_str(nome)}, {q_str(desc)}, {q_str(url)}, "
-                f"{q_str(icone or '📊')}, {str(bool(ativo)).lower()}, current_timestamp(), {q_str(user)})"
+                f"{q_str(icone or '📊')}, {str(bool(ativo)).lower()}, {q_str(categoria)}, {ind_sql}, "
+                f"current_timestamp(), {q_str(user)})"
             )
         _finish_write("Dashboard salvo.")
 
@@ -5778,6 +5830,18 @@ def page_indicadores_engenharia() -> None:
         st.caption(f"Variáveis utilizadas: {cur['variaveis_utilizadas']}")
     if cur.get("restricoes"):
         st.caption(f"Restrições: {cur['restricoes']}")
+
+    try:
+        dash_ind = dashboards_qualidade(int(cur["id"]))
+    except Exception:
+        dash_ind = []
+    if dash_ind:
+        st.markdown("**📊 Dashboards vinculados a este indicador**")
+        cols = st.columns(min(len(dash_ind), 3))
+        for i, d in enumerate(dash_ind):
+            cols[i % len(cols)].link_button(
+                f"{d.get('icone') or '📊'} {d['nome']}", d["url"], use_container_width=True,
+            )
 
     with st.expander("Ver questionário completo do negócio"):
         for titulo, campo in (
@@ -6973,7 +7037,11 @@ def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
     dash = list_dashboards()
     if dash.empty:
         return []
-    ativos = [r for r in dash.to_dict("records") if r.get("ativo", True)]
+    # Dashboards de qualidade vão pro menu Engenharia (`dashboards_qualidade`).
+    ativos = [
+        r for r in dash.to_dict("records")
+        if r.get("ativo", True) and r.get("categoria") != "qualidade"
+    ]
     if is_admin:
         return ativos
     stw = list_stewards()
@@ -6990,6 +7058,23 @@ def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
                 continue
         visiveis.append(r)
     return visiveis
+
+
+def dashboards_qualidade(indicador_id: int | None = None) -> list[dict]:
+    """Dashboards ativos de qualidade de dados (menu Engenharia). Com
+    `indicador_id`, devolve os dashboards ativos vinculados àquele indicador,
+    de qualquer tipo (link na tela Indicadores — Engenharia). Quem já entrou
+    no menu Engenharia vê todos — não filtra por domínio/steward."""
+    dash = list_dashboards()
+    if dash.empty:
+        return []
+    ativos = [r for r in dash.to_dict("records") if r.get("ativo", True)]
+    if indicador_id is None:
+        return [r for r in ativos if r.get("categoria") == "qualidade"]
+    return [
+        r for r in ativos
+        if pd.notna(r.get("indicador_id")) and int(r["indicador_id"]) == int(indicador_id)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -7512,7 +7597,18 @@ def main() -> None:
     if is_admin or perms["engenharia"]:
         pg_indicadores_eng = st.Page(page_indicadores_engenharia, title="Indicadores — Engenharia", icon="🛠️")
         nav_pages["indicadores_engenharia"] = pg_indicadores_eng
-        pages["Engenharia"] = [pg_indicadores_eng]
+        engenharia = [pg_indicadores_eng]
+        try:
+            for row in dashboards_qualidade():
+                engenharia.append(
+                    st.Page(
+                        make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
+                        url_path=f"dashboard-{int(row['id'])}",
+                    )
+                )
+        except Exception as exc:
+            st.session_state.setdefault("cad_bootstrap_error", str(exc))
+        pages["Engenharia"] = engenharia
     st.session_state["_nav_pages"] = nav_pages
     nav = st.navigation(pages)
 
