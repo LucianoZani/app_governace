@@ -3798,6 +3798,7 @@ def montar_ddl_metric_view(
     indicador: dict,
     view_existente: str | None = None,
     comentarios: dict[str, str] | None = None,
+    destino: str | None = None,
 ) -> tuple[str, str]:
     """Monta o DDL completo da Metric View do indicador (Passo 5) — só transcreve/monta texto,
     **não executa nada**. Decisão de arquitetura: publicar (rodar o DDL de
@@ -3818,7 +3819,8 @@ def montar_ddl_metric_view(
     de dimensão/medida vêm do YAML, por isso ``comentarios`` (os atuais da
     view) são reinjetados nele. Sem ``OR REPLACE`` de propósito: se a view
     existe mas não foi detectada, o ``CREATE`` falha em vez de apagar o
-    tagueamento em silêncio.
+    tagueamento em silêncio. ``destino`` (catalogo.schema.nome) define onde
+    a view é criada; vazio = padrão (`_view_fqn_sugerido`).
 
     Retorna ``(ddl_sql, view_fqn)`` — o DDL pronto pra copiar e o nome
     totalmente qualificado (sem quoting) da view.
@@ -3837,7 +3839,7 @@ def montar_ddl_metric_view(
             raise ValueError(f"Nome de view inválido: `{view_existente}` (esperado catalogo.schema.view).")
         ddl_sql = f"ALTER VIEW {q_full(*partes)} AS $$\n{yaml_txt}\n$$"
         return ddl_sql, view_existente
-    catalogo, schema, nome_view = _view_fqn_sugerido(indicador)
+    catalogo, schema, nome_view = _split_fqn(destino or "") or _view_fqn_sugerido(indicador)
     view_fqn = q_full(catalogo, schema, nome_view)
     ddl_sql = f"CREATE VIEW {view_fqn} WITH METRICS LANGUAGE YAML AS $$\n{yaml_txt}\n$$"
     return ddl_sql, f"{catalogo}.{schema}.{nome_view}"
@@ -5390,35 +5392,46 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
 
     elif status == "validado":
         st.success(f"Expressão validada: `{cur.get('expr_validada')}`")
-        # Republicação? Se a view já existe (nome gravado na publicação
-        # anterior ou o nome padrão), o DDL vira ALTER VIEW e reaproveita os
-        # comentários atuais — preserva o tagueamento do Power Steward.
-        view_existente, comentarios_atuais = None, None
+        # Destino da Metric View (catalogo.schema.nome). Padrão: o nome já
+        # gravado (republicação) ou o sugerido (catálogo/schema da tabela-fonte
+        # + slug do indicador). Cada instalação tem seu lugar certo pra
+        # publicar — a Engenharia ajusta aqui ANTES de copiar o DDL, e o DDL
+        # e o nome gravado saem do mesmo valor.
         try:
-            candidatos = [cur.get("metric_view_publicada") or "", ".".join(_view_fqn_sugerido(cur))]
+            sugerido = ".".join(_view_fqn_sugerido(cur))
         except Exception:
-            candidatos = [cur.get("metric_view_publicada") or ""]
-        for cand in candidatos:
-            cols_mv = describe_metric_view(user, cand.strip()) if cand.strip() else None
-            if cols_mv is not None:
-                view_existente = cand.strip()
-                comentarios_atuais = {c["nome"]: c["comentario"] for c in cols_mv if c["comentario"]}
-                break
+            sugerido = ""
+        destino = st.text_input(
+            "Onde a Metric View fica (catálogo.schema.nome)",
+            value=(cur.get("metric_view_publicada") or sugerido), key=f"ind_fqn_{rk}",
+            help="Ajuste para o catálogo/schema onde a Engenharia publica Metric Views "
+                 "nesta instalação. O SQL abaixo é gerado com este destino.",
+        ).strip()
+        # Republicação? Se a view já existe no destino, o DDL vira ALTER VIEW
+        # e reaproveita os comentários atuais — preserva o tagueamento do
+        # Power Steward.
+        view_existente, comentarios_atuais = None, None
+        cols_mv = describe_metric_view(user, destino) if destino else None
+        if cols_mv is not None:
+            view_existente = destino
+            comentarios_atuais = {c["nome"]: c["comentario"] for c in cols_mv if c["comentario"]}
         try:
-            ddl_sql, view_fqn_sugerido = montar_ddl_metric_view(
+            if not _split_fqn(destino):
+                raise ValueError("informe o destino no formato catalogo.schema.nome.")
+            ddl_sql, fqn_final = montar_ddl_metric_view(
                 cur, view_existente=view_existente, comentarios=comentarios_atuais,
+                destino=destino,
             )
         except Exception as exc:
             st.error(f"Não foi possível montar o DDL: {exc}")
-            ddl_sql = view_fqn_sugerido = None
+            ddl_sql = fqn_final = None
 
         if ddl_sql:
-            st.markdown("###### 📋 Query final — copie e crie a Metric View onde preferir")
+            st.markdown("###### 📋 Query final — copie e rode no SQL Editor/notebook")
             st.caption(
                 "O app não cria a Metric View — só monta o SQL a partir do "
-                "que foi validado acima. Rode num SQL Editor/notebook com "
-                "`CREATE` no schema de destino (não precisa ser o Service "
-                "Principal do app, nem este workspace)."
+                "que foi validado acima. Rode com `CREATE` no schema de destino "
+                "(não precisa ser o Service Principal do app, nem este workspace)."
             )
             if view_existente:
                 st.info(
@@ -5429,23 +5442,25 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
                     "Não troque por `CREATE OR REPLACE` — ele apaga todo o tagueamento."
                 )
             st.code(ddl_sql, language="sql")
-            fqn_final = st.text_input(
-                "Nome final da view (ajuste se rodou em outro catálogo/schema)",
-                value=view_fqn_sugerido, key=f"ind_fqn_{rk}",
-            )
             st.caption(
                 "Só clique em \"Marcar como publicado\" **depois** de rodar o "
-                "DDL acima de verdade — o app não confere se a view existe, "
-                "só guarda o nome que você confirmar aqui."
+                "SQL acima — o app confere se a view existe no destino."
             )
             if st.button("✅ Marcar como publicado", key=f"ind_marcar_pub_{rk}", type="primary"):
-                run_exec(
-                    f"UPDATE {_cad('indicadores')} SET status_publicacao = 'publicado', "
-                    f"metric_view_publicada = {q_str(fqn_final)}, "
-                    f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
-                    f"WHERE id = {int(cur['id'])}"
-                )
-                _finish_write(f"Indicador marcado como publicado: `{fqn_final}`.")
+                describe_metric_view.clear()
+                if describe_metric_view(user, fqn_final) is None:
+                    st.error(
+                        f"Não encontrei a Metric View `{fqn_final}` (ou você não tem acesso). "
+                        "Rode o SQL acima antes, ou ajuste o destino."
+                    )
+                else:
+                    run_exec(
+                        f"UPDATE {_cad('indicadores')} SET status_publicacao = 'publicado', "
+                        f"metric_view_publicada = {q_str(fqn_final)}, "
+                        f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                        f"WHERE id = {int(cur['id'])}"
+                    )
+                    _finish_write(f"Indicador marcado como publicado: `{fqn_final}`.")
 
         if st.button("↩️ Refazer tradução", key=f"ind_refazer_{rk}"):
             run_exec(
@@ -5455,8 +5470,33 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
             _finish_write("Voltou pra pronto_para_ia — pode traduzir de novo.")
 
     elif status == "publicado":
-        st.success(f"✅ Marcado como publicado: `{cur.get('metric_view_publicada')}`")
-        st.caption("Autoinformado pela Engenharia — o app não verifica se a view existe de fato.")
+        fqn_atual = (cur.get("metric_view_publicada") or "").strip()
+        existe = describe_metric_view(user, fqn_atual) is not None if fqn_atual else False
+        if existe:
+            st.success(f"✅ Publicado: `{fqn_atual}`")
+        else:
+            st.warning(
+                f"Marcado como publicado em `{fqn_atual or '—'}`, mas a Metric View não foi "
+                "encontrada nesse caminho (ou você não tem acesso). Corrija o caminho abaixo."
+            )
+        with st.expander("✏️ Corrigir o caminho da Metric View", expanded=not existe):
+            novo = st.text_input(
+                "Caminho da Metric View (catálogo.schema.nome)", value=fqn_atual,
+                key=f"ind_fqn_fix_{rk}",
+            ).strip()
+            if st.button("💾 Salvar caminho", key=f"ind_fqn_fix_btn_{rk}"):
+                describe_metric_view.clear()
+                if not _split_fqn(novo):
+                    st.error("Informe no formato catalogo.schema.nome.")
+                elif describe_metric_view(user, novo) is None:
+                    st.error(f"Não encontrei a Metric View `{novo}` (ou você não tem acesso a ela).")
+                else:
+                    run_exec(
+                        f"UPDATE {_cad('indicadores')} SET metric_view_publicada = {q_str(novo)}, "
+                        f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                        f"WHERE id = {int(cur['id'])}"
+                    )
+                    _finish_write(f"Caminho da Metric View atualizado: `{novo}`.")
         if st.button("↩️ Refazer tradução (marca de novo no fim)", key=f"ind_refazer_pub_{rk}"):
             run_exec(
                 f"UPDATE {_cad('indicadores')} SET status_publicacao = 'pronto_para_ia', "
@@ -5993,7 +6033,8 @@ def page_metric_view() -> None:
     if not partes or cols_mv is None:
         st.warning(
             f"Não foi possível abrir `{fqn}`: a view não existe (o nome gravado na "
-            "publicação pode estar errado) ou você não tem acesso a ela no Unity Catalog."
+            "publicação pode estar errado) ou você não tem acesso a ela no Unity Catalog. "
+            "A Engenharia corrige o caminho em **Indicadores — Engenharia**."
         )
         return
     catalog, schema, view = partes
