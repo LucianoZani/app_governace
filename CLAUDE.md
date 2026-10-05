@@ -1462,3 +1462,25 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     Metric View — 5 perguntas validadas pela API. Horário do dado está em UTC.
   - ⚠️ Armadilha Windows de novo: ler JSON da API via `stdin` do Python corrompe acento —
     ler a resposta como bytes e `decode('utf-8')`.
+
+- **2026-10-05 (2ª parte)** — Mais três mudanças, todas no Free e portadas para a Comgás
+  (ver `Documents/Projetos/Comgas/CLAUDE.md`, PRs !59196/!59235/!59239):
+  - `3e08e2e` — campo **Restrições de acesso** (`restricoes_acesso`) no bloco 5 do
+    Indicador; aparece no questionário completo (Engenharia) e no card da consulta.
+  - `d431ac5` — destino da Metric View editável: no estado `validado` o campo
+    "Onde a Metric View fica (catálogo.schema.nome)" vem antes do SQL e o DDL usa esse
+    destino (`montar_ddl_metric_view(..., destino=)`); "Marcar como publicado" confere
+    se a view existe. No estado `publicado`, "Corrigir o caminho da Metric View".
+  - `f8fcef5` — `get_governed_tags()` ignora as policies do Databricks (sem
+    `create_time`; prefixos `class`/`system`/`ai`/`sap` em `_TAG_PREFIXOS_SISTEMA`).
+    Free fica com 5 tags, Comgás com 6.
+  - **Demo Honda (DAMA Brasil)** — além do descrito na 1ª parte: dashboard AI/BI
+    "Receita de Vendas — Padarias" (`01f1c0ef251b15b593fef003369738f3`, publicado) sobre a
+    Metric View; roteiro "um número, três consumos" (Genie, SQL, dashboard — Japão =
+    US$ 21.591, total US$ 66.471). Começar pelo Genie, depois a esteira, voltar ao Genie
+    mostrando o `MEASURE()`. Evitar: pergunta de horário (dado em UTC), tela Usuários
+    (e-mail `@comgas.com.br` de teste), indicador "Margem bruta" (nome não bate com o cálculo).
+  - Discutido e adiado: o assistente do app ler dados. Hoje só metadados. Se for feito,
+    só via `MEASURE()` em Metric Views publicadas, exigindo OBO (fail-closed), ou
+    embutindo o Genie pela API de conversa. No Free o OBO está desligado.
+  - Pendente: bug do `q_str` (escape `''` some com o apóstrofo — usar `\'`).
