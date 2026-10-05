@@ -2057,6 +2057,7 @@ def ensure_cadastro_tables() -> bool:
             "fontes_autorizadas", "consistencia_temporal",
             "comparacoes_relevantes", "definicao", "premissas",
             "quem_utiliza", "privacidade_justificativa", "seguranca_justificativa",
+            "restricoes_acesso",
         ):
             if col not in existing_cols:
                 run_exec(f"ALTER TABLE {_cad('indicadores')} ADD COLUMNS ({col} STRING)")
@@ -2232,7 +2233,8 @@ _GLOSSARIO_COLS_COMUNS = (
 _INDICADOR_QUESTIONARIO_COLS = (
     "valor_gerado, problema_negocio, resultado_esperado, fontes_autorizadas, "
     "consistencia_temporal, comparacoes_relevantes, definicao, premissas, "
-    "quem_utiliza, privacidade_justificativa, seguranca_justificativa"
+    "quem_utiliza, privacidade_justificativa, seguranca_justificativa, "
+    "restricoes_acesso"
 )
 
 
@@ -5568,6 +5570,7 @@ def _render_glossario_editor(
         "fontes_autorizadas": "", "consistencia_temporal": "", "comparacoes_relevantes": "",
         "definicao": "", "premissas": "", "quem_utiliza": "",
         "privacidade_justificativa": "", "seguranca_justificativa": "",
+        "restricoes_acesso": "",
         "dimensao_tabelas": "[]", "metrica_tabelas": "[]",
         "status_publicacao": "rascunho",
     }
@@ -5650,7 +5653,7 @@ def _render_glossario_editor(
     dimensoes_negocio = decisao_negocio = ""
     valor_gerado = problema_negocio = resultado_esperado = ""
     fontes_autorizadas = consistencia_temporal = comparacoes_relevantes = ""
-    premissas = quem_utiliza = ""
+    premissas = quem_utiliza = restricoes_acesso = ""
     privacidade_justificativa = seguranca_justificativa = ""
 
     if not is_indicador:
@@ -5779,6 +5782,12 @@ def _render_glossario_editor(
                      "Presidência: presidente acompanha indicador no nível "
                      "macro e região para entender tendências futuras.",
             )
+            restricoes_acesso = st.text_area(
+                "Restrições de acesso", value=cur.get("restricoes_acesso") or "",
+                key=f"term_restracesso_{rk}",
+                help="Exemplos: apenas a própria regional, CPF oculto ou "
+                     "somente dados agregados corporativos.",
+            )
             c3, c4 = st.columns(2)
             with c3:
                 rotulo_seguranca = st.selectbox(
@@ -5840,6 +5849,7 @@ def _render_glossario_editor(
                 resultado_esperado=resultado_esperado, fontes_autorizadas=fontes_autorizadas,
                 consistencia_temporal=consistencia_temporal, comparacoes_relevantes=comparacoes_relevantes,
                 definicao=definicao, premissas=premissas, quem_utiliza=quem_utiliza,
+                restricoes_acesso=restricoes_acesso,
                 privacidade_justificativa=privacidade_justificativa,
                 seguranca_justificativa=seguranca_justificativa,
             )
@@ -5878,7 +5888,7 @@ def _render_glossario_editor(
                          "term_nivel", "term_vars", "term_restr", "term_memoria",
                          "term_dimneg", "term_decisao", "term_valor", "term_problema",
                          "term_resultado", "term_fontes", "term_consist", "term_comp",
-                         "term_signif", "term_premissas", "term_quemutiliza",
+                         "term_signif", "term_premissas", "term_quemutiliza", "term_restracesso",
                          "term_segjust", "term_privjust"):
                 st.session_state.pop(f"{base}_novo", None)
         _finish_write(f"{'Indicador' if is_indicador else 'Termo de negócio'} salvo.")
@@ -6135,6 +6145,7 @@ def page_indicadores_engenharia() -> None:
             ("3 · Como analisar — Comparações relevantes", "comparacoes_relevantes"),
             ("4 · Premissas", "premissas"),
             ("5 · Quem utiliza", "quem_utiliza"),
+            ("5 · Quem utiliza — Restrições de acesso", "restricoes_acesso"),
             ("5 · Quem utiliza — Justificativa de segurança", "seguranca_justificativa"),
             ("5 · Quem utiliza — Justificativa de privacidade", "privacidade_justificativa"),
         ):
@@ -6300,6 +6311,7 @@ def _render_termo_detalhe(cur: dict, dom_nome: dict, sub_nome: dict) -> None:
                 ("3 · Comparações relevantes", "comparacoes_relevantes"),
                 ("4 · Premissas", "premissas"),
                 ("5 · Quem utiliza", "quem_utiliza"),
+                ("5 · Restrições de acesso", "restricoes_acesso"),
                 ("5 · Justificativa de segurança", "seguranca_justificativa"),
                 ("5 · Justificativa de privacidade", "privacidade_justificativa"),
             ):
