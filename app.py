@@ -708,18 +708,30 @@ def user_can_access_table(user: str, catalog: str, schema: str, table: str) -> b
 # ---------------------------------------------------------------------------
 
 
+# Prefixos das tag policies provisionadas pela plataforma (não pela empresa).
+_TAG_PREFIXOS_SISTEMA = {"class", "system", "ai", "sap"}
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def get_governed_tags() -> dict[str, list[str]]:
     """Lista o catálogo oficial de tags governadas e seus valores permitidos.
 
     Retorna ``{tag_key: [valores_permitidos]}``. Uma lista vazia de valores
     significa que a policy não restringe valores (texto livre permitido).
+
+    Só as tags criadas pela empresa: as policies que o próprio Databricks
+    provisiona (``class.*``, ``system.*``, ``ai.*``, ``sap.*`` — 100+ itens,
+    aplicadas automaticamente pela plataforma) vêm sem ``create_time`` e
+    ficam de fora, para a lista não ficar enorme. O prefixo é a rede de
+    segurança caso a API passe a preencher a data delas.
     """
     w = get_client()
     tags: dict[str, list[str]] = {}
     for policy in w.tag_policies.list_tag_policies():
         key = policy.tag_key
         if not key:
+            continue
+        if not getattr(policy, "create_time", None) or key.split(".")[0] in _TAG_PREFIXOS_SISTEMA:
             continue
         values = [v.name for v in (policy.values or []) if v.name]
         tags[key] = sorted(values)
