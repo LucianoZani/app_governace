@@ -1443,3 +1443,22 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   4. Pendências Comgás (Desconto Total/ft_margem, warehouse `Can use` pra `users`,
      SP do App na automação de grants): ver `Documents/Projetos/Comgas/CLAUDE.md`.
 
+
+- **2026-10-05** — Página **Metric View** (commit `afa40a0`) + preparação de demo.
+  - Página "📐 Metric View" (Cadastros, admin + Power Steward): consulta a view com
+    `MEASURE()` (OBO, sob demanda) e documenta (comentário/tags) dimensões e medida,
+    reaproveitando o editor da Governança de Dados. Edição só do PS do indicador ou admin.
+  - Republicação: DDL agora é `CREATE VIEW` na 1ª vez e `ALTER VIEW … AS` depois —
+    testado: `CREATE OR REPLACE` APAGA tags e comentários; `ALTER VIEW AS` preserva tags
+    (coluna e objeto) e o comentário do objeto; comentários de dimensão/medida vêm do YAML,
+    por isso o app reinjeta os atuais. Portado pro bundle Comgás: PR !59196 (aberta).
+  - Comgás: PR !59171 mesclada (`comgas_prd` no `ALLOWED_CATALOGS`); falta `GRANT MODIFY
+    ON CATALOG comgas_prd` pro SP `235ed718…` (usuário roda) + redeploy manual.
+  - **Demo (apresentação Honda/DAMA)** no Free: schema `dev.vendas_demo` (`vendas` 3.333
+    linhas, `franquias` 48 — cópia de `samples.bakehouse` em português, sem nº de cartão);
+    indicadores **Receita de Vendas** (id 6, publicado → `dev.vendas_demo.receita_de_vendas`,
+    comentários nas 9 colunas) e **Ticket Médio** (id 7, `pronto_para_ia`, para demo ao vivo
+    da tradução por IA). Genie Space "Receita de Vendas — Padarias" (`01f1c0ebfd651c55a3de1ef123fcc815`) sobre a
+    Metric View — 5 perguntas validadas pela API. Horário do dado está em UTC.
+  - ⚠️ Armadilha Windows de novo: ler JSON da API via `stdin` do Python corrompe acento —
+    ler a resposta como bytes e `decode('utf-8')`.
