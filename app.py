@@ -31,7 +31,7 @@ Princípios de design
   são gravados pelo SP — não são tabelas do catálogo de negócio, então esta
   invariante não se aplica a eles.
 - **Publicação de Metric View (indicador) = Service Principal** — outra exceção
-  documentada: ``CREATE OR REPLACE VIEW … WITH METRICS`` roda com o SP (blueprint
+  documentada: ``CREATE VIEW``/``ALTER VIEW … WITH METRICS`` roda com o SP (blueprint
   seção 5, Passo 5), porque cria um objeto novo no catálogo/schema alvo — exige
   ``CREATE VIEW`` no schema, grant que o usuário de negócio comum não tem. A
   fórmula (linguagem natural → SQL) passa por confirmação humana obrigatória
@@ -867,7 +867,11 @@ def render_editor(
     applied_tags: dict[str, dict[str, str]],
     governed_tags: dict[str, list[str]],
     visible_column_names: list[str],
+    show_sample: bool = True,
 ) -> None:
+    """Editor de comentário + tags de UMA coluna. `show_sample=False` esconde a
+    amostra de dados — usado na Metric View, onde `SELECT <medida>` sem
+    `MEASURE()` não é válido."""
     st.markdown("### ✏️ Editar coluna")
 
     if not visible_column_names:
@@ -885,13 +889,15 @@ def render_editor(
 
     # ---- Amostra de dados (contexto para o usuário de negócio) ----
     with left:
-        st.markdown("**Amostra de dados**")
+        if show_sample:
+            st.markdown("**Amostra de dados**")
         st.caption(f"Tipo: `{col_meta.data_type}`")
-        try:
-            sample = get_column_sample(user, catalog, schema, table, col_name)
-            st.dataframe(sample, use_container_width=True, hide_index=True)
-        except Exception as exc:
-            st.warning(f"Não foi possível carregar a amostra: {exc}")
+        if show_sample:
+            try:
+                sample = get_column_sample(user, catalog, schema, table, col_name)
+                st.dataframe(sample, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.warning(f"Não foi possível carregar a amostra: {exc}")
 
         if current_tags:
             st.markdown("**Tags atuais nesta coluna**")
@@ -1279,6 +1285,7 @@ def apply_changes(
         get_columns.clear()
         get_applied_column_tags.clear()
         get_column_sample.clear()
+        describe_metric_view.clear()
     st.rerun()
 
 
@@ -1318,6 +1325,7 @@ def apply_table_comment(
         run_exec(sql)  # SP (acesso do usuário já validado acima)
         st.session_state["save_feedback"] = [("success", f"✅ {desc}")]
         get_table_comment.clear()
+        describe_metric_view.clear()
         # Auditoria: registra quem (usuário logado) alterou o comentário.
         _log_comment_change(
             user, "tabela", catalog, schema, table, None,
@@ -1328,9 +1336,11 @@ def apply_table_comment(
     st.rerun()
 
 
-def render_table_comment_editor(user: str, catalog: str, schema: str, table: str) -> None:
+def render_table_comment_editor(
+    user: str, catalog: str, schema: str, table: str, titulo: str = "📝 Comentário da tabela",
+) -> None:
     """Seção para adicionar/editar/remover o comentário da tabela."""
-    st.markdown("### 📝 Comentário da tabela")
+    st.markdown(f"### {titulo}")
     try:
         current = get_table_comment(user, catalog, schema, table)
     except Exception as exc:
@@ -3661,7 +3671,14 @@ def _coletar_joins(fonte: tuple[str, str, str], *grupos_itens: list[dict]) -> di
     return joins
 
 
-def montar_yaml_metric_view(indicador: dict) -> str:
+def _yaml_comment(txt: str) -> str:
+    """Comentário pronto pra uma linha `comment: "..."` do YAML (sem aspas
+    duplas nem quebra de linha — mesmo tratamento de
+    `_montar_comentario_metric_view`)."""
+    return (txt or "").replace('"', "'").replace("\n", " ").strip()
+
+
+def montar_yaml_metric_view(indicador: dict, comentarios: dict[str, str] | None = None) -> str:
     """Monta o YAML da Metric View (Passo 4) só transcrevendo campos já
     estruturados do indicador — determinístico, sem IA envolvida. Exige
     lineage de métrica e `expr_validada` já preenchidos (Passo 3 confirmado);
@@ -3674,7 +3691,14 @@ def montar_yaml_metric_view(indicador: dict) -> str:
     (JSON `[{"nome","expr"}]`, também SQL livre) entram direto em
     `dimensions:` — pra casos que uma coluna crua não cobre (ex.:
     MONTH(`DT_PERIODO`)).
+
+    `comentarios` (``{nome_da_coluna: comentário}``) são os comentários que a
+    Metric View JÁ PUBLICADA tem hoje (escritos pelo Power Steward na tela
+    Metric View). Numa republicação, os comentários de dimensão/medida vêm
+    do YAML — sem reinjetá-los aqui, eles se perderiam. O comentário atual da
+    medida tem prioridade sobre o gerado de Objetivo + Decisão apoiada.
     """
+    comentarios = comentarios or {}
     met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
     if not met_items:
         raise ValueError("Indicador sem lineage de métrica — cadastre a tabela/colunas antes.")
@@ -3703,11 +3727,16 @@ def montar_yaml_metric_view(indicador: dict) -> str:
     dims_calculadas = _parse_tabelas_json(indicador.get("dimensoes_calculadas"))
 
     nome_medida = _slugify(indicador["nome"])
-    comment = _montar_comentario_metric_view(indicador)
+    comment = _yaml_comment(comentarios.get(nome_medida, "")) or _montar_comentario_metric_view(indicador)
     synonyms = [s.strip() for s in (indicador.get("palavras_chave") or "").split(",") if s.strip()]
     filtro_sql = (indicador.get("filtro_sql") or "").strip()
 
     linhas = ["version: 1.1", f"source: {catalogo}.{schema}.{tabela}"]
+
+    def _dim_comment(nome_dim: str) -> None:
+        c = _yaml_comment(comentarios.get(nome_dim, ""))
+        if c:
+            linhas.append(f'    comment: "{c}"')
     if filtro_sql:
         linhas.append(f"filter: {filtro_sql}")
     if joins:
@@ -3733,11 +3762,13 @@ def montar_yaml_metric_view(indicador: dict) -> str:
             # confirmado: "found character '`' that cannot start any token").
             linhas.append(f"  - name: {_slugify(col)}")
             linhas.append(f'    expr: "`{col}`"')
+            _dim_comment(_slugify(col))
         for alias, col in dim_cols_join:
             # Coluna de uma tabela juntada — referencia pelo alias do join
             # (ex.: `dim_cliente.\`segmento_erp1\``).
             linhas.append(f"  - name: {_slugify(col)}")
             linhas.append(f'    expr: "{alias}.`{col}`"')
+            _dim_comment(_slugify(col))
         for dc in dims_calculadas:
             # Expressão SQL livre escrita pela Engenharia (ex.:
             # `MONTH(\`DT_PERIODO\`)`) — não passa por IA nem validação de
@@ -3749,6 +3780,7 @@ def montar_yaml_metric_view(indicador: dict) -> str:
                 continue
             linhas.append(f"  - name: {_slugify(nome_dc)}")
             linhas.append(f'    expr: "{expr_dc}"')
+            _dim_comment(_slugify(nome_dc))
     linhas.append("measures:")
     linhas.append(f"  - name: {nome_medida}")
     linhas.append(f"    expr: {expr_validada}")
@@ -3760,9 +3792,12 @@ def montar_yaml_metric_view(indicador: dict) -> str:
     return "\n".join(linhas)
 
 
-def montar_ddl_metric_view(indicador: dict) -> tuple[str, str]:
-    """Monta o DDL completo (`CREATE OR REPLACE VIEW ... WITH METRICS
-    LANGUAGE YAML`) do indicador (Passo 5) — só transcreve/monta texto,
+def montar_ddl_metric_view(
+    indicador: dict,
+    view_existente: str | None = None,
+    comentarios: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Monta o DDL completo da Metric View do indicador (Passo 5) — só transcreve/monta texto,
     **não executa nada**. Decisão de arquitetura: publicar (rodar o DDL de
     verdade) é ação de quem tem `CREATE`/`MODIFY` no schema de destino, não
     do Service Principal do app — a Engenharia copia o SQL daqui e roda onde
@@ -3773,23 +3808,79 @@ def montar_ddl_metric_view(indicador: dict) -> tuple[str, str]:
     Só exige ``status_publicacao == 'validado'`` — quem chama é responsável
     por já ter checado isso (a UI do Passo 4 só mostra o DDL nesse estado).
 
+    Primeira publicação → ``CREATE VIEW ... WITH METRICS LANGUAGE YAML``.
+    Republicação (``view_existente`` = FQN da view que já existe) →
+    ``ALTER VIEW ... AS $$yaml$$``: preserva as TAGS (de coluna e do objeto)
+    e o comentário do objeto aplicados pelo Power Steward — um
+    ``CREATE OR REPLACE`` apagaria tudo (testado 2026-10-05). Os comentários
+    de dimensão/medida vêm do YAML, por isso ``comentarios`` (os atuais da
+    view) são reinjetados nele. Sem ``OR REPLACE`` de propósito: se a view
+    existe mas não foi detectada, o ``CREATE`` falha em vez de apagar o
+    tagueamento em silêncio.
+
     Retorna ``(ddl_sql, view_fqn)`` — o DDL pronto pra copiar e o nome
-    totalmente qualificado (sem quoting) sugerido pra view.
+    totalmente qualificado (sem quoting) da view.
     """
     if indicador.get("status_publicacao") != "validado":
         raise ValueError("Indicador precisa estar com status 'validado' antes de gerar o DDL.")
-    yaml_txt = montar_yaml_metric_view(indicador)
+    yaml_txt = montar_yaml_metric_view(indicador, comentarios)
     if "$$" in yaml_txt:
         # Delimitador do CREATE VIEW ... AS $$...$$ — não deveria acontecer
         # (nome/objetivo/synonyms não deveriam conter isso), mas confere
         # antes de montar o DDL em vez de deixar o Spark SQL falhar feio.
         raise ValueError("YAML gerado contém '$$', incompatível com o delimitador do CREATE VIEW.")
-    met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
-    catalogo, schema = met_items[0]["catalogo"], met_items[0]["schema"]
-    nome_view = _slugify(indicador["nome"])
+    if view_existente:
+        partes = _split_fqn(view_existente)
+        if not partes:
+            raise ValueError(f"Nome de view inválido: `{view_existente}` (esperado catalogo.schema.view).")
+        ddl_sql = f"ALTER VIEW {q_full(*partes)} AS $$\n{yaml_txt}\n$$"
+        return ddl_sql, view_existente
+    catalogo, schema, nome_view = _view_fqn_sugerido(indicador)
     view_fqn = q_full(catalogo, schema, nome_view)
-    ddl_sql = f"CREATE OR REPLACE VIEW {view_fqn} WITH METRICS LANGUAGE YAML AS $$\n{yaml_txt}\n$$"
+    ddl_sql = f"CREATE VIEW {view_fqn} WITH METRICS LANGUAGE YAML AS $$\n{yaml_txt}\n$$"
     return ddl_sql, f"{catalogo}.{schema}.{nome_view}"
+
+
+def _view_fqn_sugerido(indicador: dict) -> tuple[str, str, str]:
+    """(catalogo, schema, view) padrão da Metric View: mesmo catálogo/schema
+    da tabela-fonte da Métrica, nome = slug do indicador."""
+    met_items = _parse_tabelas_json(indicador.get("metrica_tabelas"))
+    if not met_items:
+        raise ValueError("Indicador sem lineage de métrica — cadastre a tabela/colunas antes.")
+    return met_items[0]["catalogo"], met_items[0]["schema"], _slugify(indicador["nome"])
+
+
+def _split_fqn(fqn: str) -> tuple[str, str, str] | None:
+    """'catalogo.schema.view' → tupla; None se não tiver exatamente 3 partes."""
+    partes = (fqn or "").strip().split(".")
+    return tuple(partes) if len(partes) == 3 and all(partes) else None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def describe_metric_view(user: str, fqn: str) -> list[dict] | None:
+    """Colunas da Metric View (OBO): ``[{nome, tipo, comentario, medida}]``.
+    ``None`` se a view não existe ou o usuário não a enxerga. A medida é
+    reconhecida pelo sufixo `` measure`` no tipo do ``DESCRIBE TABLE``."""
+    partes = _split_fqn(fqn)
+    if not partes:
+        return None
+    try:
+        df = run_query(f"DESCRIBE TABLE {q_full(*partes)}", prefer_user=True)
+    except Exception:
+        return None
+    out: list[dict] = []
+    for _, r in df.iterrows():
+        nome = str(r.iloc[0] or "").strip()
+        if not nome or nome.startswith("#"):
+            break  # fim das colunas (seções de detalhe do DESCRIBE)
+        tipo = str(r.iloc[1] or "")
+        out.append({
+            "nome": nome,
+            "tipo": tipo.removesuffix(" measure"),
+            "comentario": r.iloc[2] if isinstance(r.iloc[2], str) else "",
+            "medida": tipo.endswith(" measure"),
+        })
+    return out or None
 
 
 # ---------------------------------------------------------------------------
@@ -5125,6 +5216,7 @@ def _render_handoff_engenharia(cur: dict, rk: str, user: str) -> None:
         st.success(f"Status: **{_STATUS_PUBLICACAO_LABELS.get(status, status)}**")
         if status == "publicado" and cur.get("metric_view_publicada"):
             st.caption(f"Metric View: `{cur['metric_view_publicada']}`")
+            _ir_para_metric_view(cur.get("id"), key=f"ind_ir_mv_{rk}", label="📐 Consultar e documentar a Metric View")
 
 
 def _status_publicacao_pos_lineage(status_atual: str | None, tem_lineage: bool) -> str:
@@ -5296,8 +5388,24 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
 
     elif status == "validado":
         st.success(f"Expressão validada: `{cur.get('expr_validada')}`")
+        # Republicação? Se a view já existe (nome gravado na publicação
+        # anterior ou o nome padrão), o DDL vira ALTER VIEW e reaproveita os
+        # comentários atuais — preserva o tagueamento do Power Steward.
+        view_existente, comentarios_atuais = None, None
         try:
-            ddl_sql, view_fqn_sugerido = montar_ddl_metric_view(cur)
+            candidatos = [cur.get("metric_view_publicada") or "", ".".join(_view_fqn_sugerido(cur))]
+        except Exception:
+            candidatos = [cur.get("metric_view_publicada") or ""]
+        for cand in candidatos:
+            cols_mv = describe_metric_view(user, cand.strip()) if cand.strip() else None
+            if cols_mv is not None:
+                view_existente = cand.strip()
+                comentarios_atuais = {c["nome"]: c["comentario"] for c in cols_mv if c["comentario"]}
+                break
+        try:
+            ddl_sql, view_fqn_sugerido = montar_ddl_metric_view(
+                cur, view_existente=view_existente, comentarios=comentarios_atuais,
+            )
         except Exception as exc:
             st.error(f"Não foi possível montar o DDL: {exc}")
             ddl_sql = view_fqn_sugerido = None
@@ -5310,6 +5418,14 @@ def _render_pipeline_publicacao(cur: dict, rk: str, user: str) -> None:
                 "`CREATE` no schema de destino (não precisa ser o Service "
                 "Principal do app, nem este workspace)."
             )
+            if view_existente:
+                st.info(
+                    f"A Metric View `{view_existente}` **já existe** — por isso o SQL é um "
+                    "`ALTER VIEW`, que atualiza a definição **sem apagar** as tags e os "
+                    "comentários aplicados pelo Power Steward (os comentários atuais das "
+                    "dimensões e da medida já foram copiados para o YAML abaixo). "
+                    "Não troque por `CREATE OR REPLACE` — ele apaga todo o tagueamento."
+                )
             st.code(ddl_sql, language="sql")
             fqn_final = st.text_input(
                 "Nome final da view (ajuste se rodou em outro catálogo/schema)",
@@ -5790,6 +5906,169 @@ def page_indicadores() -> None:
         is_indicador=True, ont_table="indicadores",
         list_fn=list_indicadores, titulo="Indicador", icone="📈",
     )
+
+
+def _ir_para_metric_view(indicador_id, key: str, label: str = "📐 Abrir a Metric View") -> None:
+    """Botão que abre a página Metric View já com o indicador escolhido
+    (preset one-shot em `_mv_preset`). Só aparece se a página existe pro
+    papel atual."""
+    pg = st.session_state.get("_nav_pages", {}).get("metric_view")
+    if pg is None or indicador_id is None:
+        return
+    if st.button(label, key=key):
+        st.session_state["_mv_preset"] = int(indicador_id)
+        st.switch_page(pg)
+
+
+def page_metric_view() -> None:
+    """Metric View de um indicador publicado: o Power Steward do indicador
+    (ou admin) consulta a view e aplica comentários e tags governadas nas
+    dimensões/medida. Reaproveita o editor da Governança de Dados — mesma
+    invariante de identidade: leitura e tags OBO, comentário via SP com o
+    portão `user_can_access_table`, auditoria nos logs de sempre."""
+    st.title("📐 Metric View do indicador")
+    st.caption(
+        "Consulte a Metric View publicada de um indicador e documente-a: "
+        "comentários e tags governadas nas dimensões e na medida. Quem edita "
+        "é o **Power Steward** do indicador (ou um admin)."
+    )
+    user = st.session_state.get("user") or current_username()
+    is_admin = st.session_state.get("role") == "admin"
+
+    _feedback = st.session_state.pop("save_feedback", None)
+    if _feedback:
+        _kind_fn = {"success": st.success, "warning": st.warning, "error": st.error}
+        for _kind, _msg in _feedback:
+            _kind_fn.get(_kind, st.error)(_msg)
+
+    ind = list_indicadores()
+    pub = ind[
+        (ind["status_publicacao"].fillna("") == "publicado")
+        & ind["metric_view_publicada"].fillna("").str.strip().ne("")
+    ] if not ind.empty else ind
+    if pub.empty:
+        st.info(
+            "Nenhum indicador publicado como Metric View ainda. A publicação é "
+            "feita pela Engenharia (tela **Indicadores — Engenharia**)."
+        )
+        return
+
+    recs = pub.to_dict("records")
+    meus = {r["id"] for r in recs if str(r.get("power_steward") or "").lower() == (user or "").lower()}
+    # Os do próprio Power Steward primeiro.
+    recs.sort(key=lambda r: (r["id"] not in meus, str(r["nome"]).lower()))
+    ids = [r["id"] for r in recs]
+    preset = st.session_state.pop("_mv_preset", None)
+    if preset in ids:
+        st.session_state["mv_sel"] = preset
+    if st.session_state.get("mv_sel") not in ids:
+        st.session_state.pop("mv_sel", None)
+    sel_id = st.selectbox(
+        "Indicador", options=ids, key="mv_sel",
+        format_func=lambda i: next(
+            f'{r["nome"]}{"  · seu" if i in meus else ""}' for r in recs if r["id"] == i
+        ),
+    )
+    cur = next(r for r in recs if r["id"] == sel_id)
+    fqn = str(cur["metric_view_publicada"]).strip()
+    pode_editar = is_admin or sel_id in meus
+
+    c1, c2 = st.columns(2)
+    c1.markdown(f"**Metric View**\n\n`{fqn}`")
+    c2.markdown(f"**Power Steward**\n\n{cur.get('power_steward') or '—'}")
+    _render_dashboards_do_indicador(cur["id"])
+
+    partes = _split_fqn(fqn)
+    cols_mv = describe_metric_view(user, fqn)
+    if not partes or cols_mv is None:
+        st.warning(
+            f"Não foi possível abrir `{fqn}`: a view não existe (o nome gravado na "
+            "publicação pode estar errado) ou você não tem acesso a ela no Unity Catalog."
+        )
+        return
+    catalog, schema, view = partes
+    dims = [c["nome"] for c in cols_mv if not c["medida"]]
+    medidas = [c["nome"] for c in cols_mv if c["medida"]]
+
+    try:
+        applied_tags = get_applied_column_tags(user, catalog, schema, view)
+    except Exception:
+        applied_tags = {}
+
+    tab_doc, tab_consulta = st.tabs(["🏷️ Documentar", "🔎 Consultar"])
+
+    with tab_consulta:
+        st.caption(
+            "Escolha as dimensões para quebrar o resultado. A consulta roda com a "
+            "**sua** permissão e só quando você clicar — Metric Views grandes podem "
+            "demorar."
+        )
+        dims_sel = st.multiselect("Quebrar por", options=dims, key=f"mv_dims_{sel_id}")
+        meds_sel = st.multiselect(
+            "Medida(s)", options=medidas, default=medidas[:1], key=f"mv_meds_{sel_id}",
+        )
+        if st.button("▶️ Consultar", key=f"mv_run_{sel_id}", disabled=not meds_sel):
+            sel_cols = [q_ident(d) for d in dims_sel] + [
+                f"MEASURE({q_ident(m)}) AS {q_ident(m)}" for m in meds_sel
+            ]
+            sql = f"SELECT {', '.join(sel_cols)} FROM {q_full(catalog, schema, view)}"
+            if dims_sel:
+                sql += " GROUP BY ALL ORDER BY " + ", ".join(str(i + 1) for i in range(len(dims_sel)))
+            sql += " LIMIT 200"
+            with st.spinner("Consultando a Metric View…"):
+                try:
+                    st.session_state[f"mv_res_{sel_id}"] = run_query(sql, prefer_user=True)
+                except Exception as exc:
+                    st.session_state[f"mv_res_{sel_id}"] = None
+                    st.error(f"Falha na consulta: {exc}")
+        res = st.session_state.get(f"mv_res_{sel_id}")
+        if res is not None:
+            st.dataframe(res, use_container_width=True, hide_index=True)
+            st.caption(f"{len(res)} linha(s) — limite de 200.")
+
+    with tab_doc:
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Coluna": c["nome"],
+                    "Papel": "Medida" if c["medida"] else "Dimensão",
+                    "Tipo": c["tipo"],
+                    "Comentário": c["comentario"],
+                    "Tags": "; ".join(f"{k}={v}" for k, v in applied_tags.get(c["nome"], {}).items()),
+                }
+                for c in cols_mv
+            ]),
+            use_container_width=True, hide_index=True,
+        )
+        if not pode_editar:
+            st.info(
+                "Só o **Power Steward** deste indicador (ou um admin) edita a "
+                "documentação da Metric View — você está vendo em modo leitura."
+            )
+            return
+        st.caption(
+            "As tags e comentários ficam na própria Metric View, no Unity Catalog. "
+            "Quando a Engenharia republicar o indicador, o app gera um `ALTER VIEW` "
+            "que preserva esse trabalho."
+        )
+        try:
+            governed_tags = get_governed_tags()
+        except Exception as exc:
+            governed_tags = {}
+            st.warning(f"Não foi possível carregar as tags governadas: {exc}")
+        st.divider()
+        render_table_comment_editor(
+            user, catalog, schema, view, titulo="📝 Comentário da Metric View",
+        )
+        st.divider()
+        columns = [
+            ColumnMeta(name=c["nome"], data_type=c["tipo"], comment=c["comentario"], position=i)
+            for i, c in enumerate(cols_mv)
+        ]
+        render_editor(
+            user, catalog, schema, view, columns, applied_tags, governed_tags,
+            [c["nome"] for c in cols_mv], show_sample=False,
+        )
 
 
 def page_indicadores_engenharia() -> None:
@@ -7404,6 +7683,8 @@ def page_inicio() -> None:
                     dm = dom_nome.get(r.get("dominio_id"), "—")
                     niv = r.get("nivel_apuracao") or "—"
                     st.markdown(f"**{r['nome']}** · {dm} · {niv}")
+                    if r.get("status_publicacao") == "publicado" and r.get("metric_view_publicada"):
+                        _ir_para_metric_view(r.get("id"), key=f"inicio_mv_{r['id']}", label="📐 Metric View")
             _atalho("indicadores", "Abrir Indicadores", "📈")
 
     # ---- Atividade recente ----
@@ -7537,7 +7818,9 @@ def main() -> None:
         if cadastro_completo:
             pg_indicadores = st.Page(page_indicadores, title="Indicador", icon="📈")
             nav_pages["indicadores"] = pg_indicadores
-            cadastros.append(pg_indicadores)
+            pg_metric_view = st.Page(page_metric_view, title="Metric View", icon="📐")
+            nav_pages["metric_view"] = pg_metric_view
+            cadastros += [pg_indicadores, pg_metric_view]
         pages["Cadastros"] = cadastros
 
     # Usuários (antiga "Usuários & Permissões") — sempre admin-only, agora num
