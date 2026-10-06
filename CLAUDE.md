@@ -1601,3 +1601,27 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     (`cg-prd-dbw-nie-001`); a Comgás tem 2 workspaces de PRD. Deployer = SP `-exp`
     (`spn-dados-ia-dbx-apps-exp`). O App do Power Steward vai para o exploratório (ok pelo
     usuário). Guilherme "esbarrou" em permissão do SP `-exp` ao subir a catalogação.
+  - 🔴 **Warehouse `6b64172bcbc6c3c3` também está sob a automação de ACL do `spn-prd-nie`**
+    (dono dele) — achado no `system.access.audit` (`service_name='databrickssql'`,
+    `action_name='changeEndpointAcls'`, filtro por `6b64172bcbc6c3c3` em `request_params`):
+    01/09 Felipe deu `Use` ao SP do app antigo `governanca-uc-comgas` → removido 02/09;
+    15/09 Felipe deu `Use` a `spn-dados-ia-pwsteward-prd` e `spn-dados-ia-catalogacao-prd`
+    → removidos 17/09. Estado atual: `spn-prd-nie` Owner, `cloud-nie-adm` Manage,
+    `GRP-DADOS-IA-SDX-GOVERNANCA-DADOS` Use (o usuário está nele). **O `-exp` nunca teve nada.**
+    Consequências: (1) a criação do App em PRD deve falhar no warehouse; (2) mesmo criado, o
+    `Can Use` do SP do App seria removido na próxima varredura; (3) com OBO, só quem está no
+    `GRP-DADOS-IA-SDX-GOVERNANCA-DADOS` usaria o app. IDs internos → nomes: listar
+    `service-principals list`/`groups list` e casar por `id` (GET por id falha p/ não-admin).
+  - **Decisão do usuário: seguir sem o Gregory**; acioná-lo só se der erro (o provável é o
+    deploy de PRD falhar na criação do App → pedir pra incluir na automação do `spn-prd-nie`:
+    `-exp` Can Manage, `users` Can Use e o SP do App Can Use — ou um warehouse dedicado fora
+    da automação). Felipe/Gregory são do grupo Deployers (obrigatório no `main`).
+  - Script da migração pronto: `Documents/Projetos/Comgas/migracao-power-steward-prd.sql`
+    (16 tabelas — sem `ps_finops_snapshot`; grant temporário comentado → `CREATE OR REPLACE
+    … DEEP CLONE` → `ALTER TABLE … OWNER TO <SP_DO_APP>` → conferência).
+
+  **▶️ PONTO DE RETOMADA:** esperar a !59329 (Guilherme) ser mesclada → acompanhar o
+  `power-steward-deploy` de PRD → se falhar no warehouse, mensagem pro Gregory com o erro + o
+  histórico do audit → com o App criado: `databricks apps get power-steward -p comgas` (SP do
+  App), rodar o script de migração, abrir o app, ajustar dados dev-específicos (URLs de
+  dashboards, Desconto Total/`nie_dev`).
