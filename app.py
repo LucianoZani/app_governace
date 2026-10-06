@@ -1948,6 +1948,20 @@ def ensure_cadastro_tables() -> bool:
             run_exec(f"ALTER TABLE {_cad('permissoes')} ADD COLUMNS (nome STRING)")
     except Exception:
         pass
+    # `indicador_id` em `solicitacoes_acesso`: pedido de consulta à Metric View
+    # de um indicador de outro Power Steward. Aprovado = libera a consulta
+    # (só consulta) na página Metric View; ver `_mv_consulta_liberada`.
+    try:
+        cols_df = run_query(
+            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+            f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'solicitacoes_acesso')}"
+        )
+        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
+        if "indicador_id" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('solicitacoes_acesso')} ADD COLUMNS (indicador_id BIGINT)")
+    except Exception:
+        pass
     # Coluna `tipo` em `data_stewards` (idempotente p/ tabelas já existentes,
     # criadas antes de unificar Owner e Steward no mesmo cadastro). Registros
     # antigos (sem tipo) eram todos stewards.
@@ -2329,19 +2343,40 @@ def list_solicitacoes_acesso(status: str | None = None) -> pd.DataFrame:
     where = f"WHERE status = {q_str(status)}" if status else ""
     return run_query(
         f"SELECT id, usuario, nome, o_que_precisa, motivo, status, decidido_por, "
-        f"decidido_em, comentario_decisao, criado_em "
+        f"decidido_em, comentario_decisao, criado_em, indicador_id "
         f"FROM {_cad('solicitacoes_acesso')} {where} ORDER BY criado_em DESC"
     )
 
 
-def _registrar_solicitacao_acesso(usuario: str, nome: str, o_que_precisa: str, motivo: str) -> None:
+def _registrar_solicitacao_acesso(
+    usuario: str, nome: str, o_que_precisa: str, motivo: str, indicador_id: int | None = None,
+) -> None:
+    ind_sql = "NULL" if indicador_id is None else str(int(indicador_id))
     run_exec(
         f"INSERT INTO {_cad('solicitacoes_acesso')} "
-        "(usuario, nome, o_que_precisa, motivo, status, criado_em) VALUES ("
+        "(usuario, nome, o_que_precisa, motivo, status, criado_em, indicador_id) VALUES ("
         f"{q_str(usuario)}, {_qn(nome)}, {q_str(o_que_precisa)}, {_qn(motivo)}, "
-        "'pendente', current_timestamp())"
+        f"'pendente', current_timestamp(), {ind_sql})"
     )
     list_solicitacoes_acesso.clear()
+
+
+def _mv_solicitacoes(usuario: str) -> dict[int, str]:
+    """{indicador_id: status} dos pedidos de consulta a Metric View feitos por
+    `usuario` — vale o mais recente de cada indicador (lista vem em
+    `criado_em DESC`). Status 'aprovado' = consulta liberada; 'revogado' =
+    o admin tirou depois."""
+    try:
+        df = list_solicitacoes_acesso()
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    df = df[df["indicador_id"].notna() & (df["usuario"].fillna("").str.lower() == (usuario or "").lower())]
+    out: dict[int, str] = {}
+    for r in df.to_dict("records"):
+        out.setdefault(int(r["indicador_id"]), r["status"])
+    return out
 
 
 def _decidir_solicitacao_acesso(item: dict, status: str, aprovador: str, comentario: str) -> None:
@@ -5982,6 +6017,83 @@ def _ir_para_metric_view(indicador_id, key: str, label: str = "📐 Abrir a Metr
         st.switch_page(pg)
 
 
+def _render_pedido_consulta_mv(user: str, outros: list[dict], pedidos: dict[int, str]) -> None:
+    """Expander "Consultar a Metric View de outro indicador": o PS escolhe um
+    indicador publicado que não é dele e envia um pedido (cai em Solicitações
+    de Acesso, com `indicador_id`). Aprovado, o indicador passa a aparecer na
+    página — só para consulta."""
+    pendentes = [r for r in outros if pedidos.get(r["id"]) == "pendente"]
+    pediveis = [r for r in outros if pedidos.get(r["id"]) != "pendente"]
+    with st.expander("🔑 Consultar a Metric View de outro indicador", expanded=False):
+        st.caption(
+            "Cada Power Steward vê só as Metric Views dos seus indicadores. Para "
+            "consultar a de outro indicador, peça acesso — um admin decide. O acesso "
+            "liberado é **só para consulta**; a documentação continua com o Power "
+            "Steward do indicador."
+        )
+        if pendentes:
+            st.markdown(
+                "**Aguardando decisão:** " + ", ".join(r["nome"] for r in pendentes)
+            )
+        if not pediveis:
+            st.caption("Não há outros indicadores publicados para pedir.")
+            return
+        ids = [r["id"] for r in pediveis]
+        sel = st.selectbox(
+            "Indicador", options=ids, key="mv_pedido_sel",
+            format_func=lambda i: next(
+                f'{r["nome"]}{"  (negado antes)" if pedidos.get(i) == "negado" else ""}'
+                for r in pediveis if r["id"] == i
+            ),
+        )
+        motivo = st.text_area("Por que você precisa consultar?", key="mv_pedido_motivo")
+        if st.button("Enviar pedido", key="mv_pedido_btn", type="primary"):
+            if not motivo.strip():
+                st.warning("Conte por que você precisa — ajuda o admin a decidir.")
+                return
+            nome_ind = next(r["nome"] for r in pediveis if r["id"] == sel)
+            perms = st.session_state.get("perms", {}) or {}
+            try:
+                _registrar_solicitacao_acesso(
+                    user, str(perms.get("nome") or ""),
+                    f"Consulta à Metric View do indicador {nome_ind}",
+                    motivo.strip(), indicador_id=sel,
+                )
+                st.session_state["save_feedback"] = [
+                    ("success", "✅ Pedido enviado. Um admin vai revisar.")
+                ]
+            except Exception as exc:
+                st.session_state["save_feedback"] = [("error", f"Falha ao enviar: {exc}")]
+            st.rerun()
+
+
+def _render_consultas_liberadas_mv(cur: dict) -> None:
+    """Admin: quem tem consulta liberada (pedido aprovado) a esta Metric View,
+    com opção de revogar."""
+    try:
+        df = list_solicitacoes_acesso("aprovado")
+    except Exception:
+        return
+    if df.empty:
+        return
+    df = df[pd.to_numeric(df["indicador_id"], errors="coerce") == int(cur["id"])]
+    if df.empty:
+        return
+    with st.expander(f"👥 Consulta liberada para {len(df)} pessoa(s)"):
+        for r in df.to_dict("records"):
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"{r.get('nome') or r['usuario']} · `{r['usuario']}`")
+            if c2.button("Revogar", key=f"mv_revogar_{r['id']}"):
+                run_exec(
+                    f"UPDATE {_cad('solicitacoes_acesso')} SET status = 'revogado', "
+                    f"decidido_por = {q_str(st.session_state.get('user') or '')}, "
+                    f"decidido_em = current_timestamp() WHERE id = {int(r['id'])}"
+                )
+                list_solicitacoes_acesso.clear()
+                st.session_state["save_feedback"] = [("success", "Acesso revogado.")]
+                st.rerun()
+
+
 def page_metric_view() -> None:
     """Metric View de um indicador publicado: o Power Steward do indicador
     (ou admin) consulta a view e aplica comentários e tags governadas nas
@@ -5991,8 +6103,9 @@ def page_metric_view() -> None:
     st.title("📐 Metric View do indicador")
     st.caption(
         "Consulte a Metric View publicada de um indicador e documente-a: "
-        "comentários e tags governadas nas dimensões e na medida. Quem edita "
-        "é o **Power Steward** do indicador (ou um admin)."
+        "comentários e tags governadas nas dimensões e na medida. Cada Power "
+        "Steward vê só os seus indicadores; os de outro PS ficam disponíveis "
+        "para consulta depois de um pedido aprovado."
     )
     user = st.session_state.get("user") or current_username()
     is_admin = st.session_state.get("role") == "admin"
@@ -6015,8 +6128,25 @@ def page_metric_view() -> None:
         )
         return
 
-    recs = pub.to_dict("records")
-    meus = {r["id"] for r in recs if str(r.get("power_steward") or "").lower() == (user or "").lower()}
+    todos = pub.to_dict("records")
+    meus = {r["id"] for r in todos if str(r.get("power_steward") or "").lower() == (user or "").lower()}
+    # Cada Power Steward vê só os indicadores dele. Os de outro PS só aparecem
+    # depois de um pedido aprovado em Solicitações de Acesso — e aí só para
+    # consulta (documentar continua sendo do PS do indicador). Admin vê todos.
+    pedidos = _mv_solicitacoes(user)
+    liberados = {i for i, s in pedidos.items() if s == "aprovado"}
+    recs = todos if is_admin else [r for r in todos if r["id"] in meus or r["id"] in liberados]
+    outros = [r for r in todos if r["id"] not in meus and r["id"] not in liberados]
+
+    if not is_admin:
+        _render_pedido_consulta_mv(user, outros, pedidos)
+    if not recs:
+        st.info(
+            "Você ainda não é o Power Steward de nenhum indicador publicado. "
+            "Para consultar a Metric View de outro indicador, peça acesso acima."
+        )
+        return
+
     # Os do próprio Power Steward primeiro.
     recs.sort(key=lambda r: (r["id"] not in meus, str(r["nome"]).lower()))
     ids = [r["id"] for r in recs]
@@ -6028,7 +6158,8 @@ def page_metric_view() -> None:
     sel_id = st.selectbox(
         "Indicador", options=ids, key="mv_sel",
         format_func=lambda i: next(
-            f'{r["nome"]}{"  · seu" if i in meus else ""}' for r in recs if r["id"] == i
+            f'{r["nome"]}{"  · seu" if i in meus else ("  · só consulta" if i in liberados and not is_admin else "")}'
+            for r in recs if r["id"] == i
         ),
     )
     cur = next(r for r in recs if r["id"] == sel_id)
@@ -6039,6 +6170,8 @@ def page_metric_view() -> None:
     c1.markdown(f"**Metric View**\n\n`{fqn}`")
     c2.markdown(f"**Power Steward**\n\n{cur.get('power_steward') or '—'}")
     _render_dashboards_do_indicador(cur["id"])
+    if is_admin:
+        _render_consultas_liberadas_mv(cur)
 
     partes = _split_fqn(fqn)
     cols_mv = describe_metric_view(user, fqn)
@@ -7296,7 +7429,9 @@ def page_solicitacoes_acesso() -> None:
     st.caption(
         "Pedidos enviados por usuários na tela **Solicitar Acesso**. Aprovar/negar "
         "aqui só registra a decisão — quem de fato concede o acesso é você, à mão, "
-        "marcando as flags certas em **Usuários**."
+        "marcando as flags certas em **Usuários**. Exceção: pedidos de **consulta "
+        "à Metric View** de um indicador (feitos na página Metric View) liberam a "
+        "consulta no app assim que aprovados — revogue na própria página Metric View."
     )
     _show_cad_feedback()
     user = st.session_state.get("user", "")
