@@ -1586,3 +1586,14 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   → abrir o app (seed/migrações) → ajustar dados dev-específicos.
   Pendente à parte: FinOps multi-warehouse (cadastro `finops_warehouses` warehouse→domínio,
   já que não dá pra taguear warehouses) — proposto, aguardando o ok do usuário.
+  - **Atualização (mesma sessão):** Felipe autorizou o App em PRD "pela mesma esteira de
+    dev". **!59318 aprovada (a pedido explícito do usuário) e mesclada em `dev`** (`f5812778`).
+    O Guilherme já tinha aberto a **PR !59329** (`dev → main`, "Promote Catalogação IA
+    Hardening e Publisher para PRD") — por ter `dev` como origem, ela **carrega também o App
+    do Power Steward** (+ !59251/!59196/!59235/!59239/!59171). Decisão do usuário: **promover
+    junto nela**, sem PR separada. Pendente: avisar Guilherme/Felipe que o App vai junto e
+    que o pré-requisito do warehouse (`Can Manage` p/ `spn-dados-ia-dbx-apps-exp`, `Can Use`
+    p/ `users` no `6b64172bcbc6c3c3`) precisa estar ok antes de aprovar — senão o deploy de
+    PRD fica vermelho na criação do App. Depois do merge em `main`: conferir App criado em
+    `cg-prd-dbw-nie-001` (+ redeploy manual se preciso), pegar o SP do App, migrar as 17
+    tabelas (CREATE TABLE temporário + DEEP CLONE + OWNER TO <SP do app>).
