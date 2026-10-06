@@ -1540,3 +1540,49 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     deployment `01f1c1a6…`, RUNNING. Falta: abrir o app (migração `indicador_id`) e testar.
     Dica: `git credential fill` trava sem `GCM_INTERACTIVE=never` + `path=` do repo; o token
     não lê pipelines (`_apis/build` volta vazio) — confira o deploy pelo `app.py` do Workspace.
+
+- **2026-10-06 (3ª parte)** — **Início da ida do Power Steward para PRD** (bundle
+  `dados-ia-power-steward`). ⚠️ Corrige o que estava registrado antes:
+  - O target `prd` aponta para **`cg-prd-dbw-nie-001`** (`adb-6448854079193408.8`, o
+    mesmo workspace do app antigo `governanca-uc-comgas`, hoje **STOPPED** — fica como
+    está). Não é mais o `adb-5107964081269564.4`.
+  - **`main` já recebe promoções** `dev → main` (PRs 58675, 58797, 59057 — catalogação
+    do Guilherme). O deploy de prd usa a service connection **`arm-dados-ia-dbx-apps-exp`**
+    (SP `spn-dados-ia-dbx-apps-exp`, `beb6fc7a…`); os jobs `wf_power-steward_catalogacao_ia_*`
+    já existem em prd. O App não existia em prd porque o recurso era só `targets.dev`.
+  - `config/prd.yml` já tem `runner_spn_id` = `spn-dados-ia-pwsteward-prd` (`24b97d36…`).
+  - Schema **`comgas_prd.dp_power_steward`** já existe (dono `spn-prd-nie`, a automação de
+    ACL de prd); só tem tabelas `catalogacao_ia_*`. `pwsteward-prd` tem CREATE_TABLE+MODIFY.
+  - **`nie_dev` não está vinculado ao workspace de prd** → Desconto Total (usa
+    `nie_dev.dp_pricing.tb_int_tipo_desconto`) quebra em prd até a tabela existir em `nie_prd`.
+  - Único warehouse de governança visível em prd: `dbsql_sdx_dados_ia_governanca_dados`
+    (`6b64172bcbc6c3c3`, 2X-Small/1 cluster, do piloto). Endpoint `databricks-gpt-oss-120b` existe.
+  - **PR !59318** (`feature/power-steward-app-prd → dev`, commit `b8502ea`, work item
+    218352) — **ABERTA, não mesclar ainda**: cria `targets.prd.resources.apps.power_steward`
+    com esse warehouse, `user_api_scopes: [sql]`, `users` CAN_USE, `cloud-nie-governanca`
+    CAN_MANAGE (no recurso, não no target — no target colidia com a permissão dos jobs) e
+    **`config` com a lista COMPLETA de env de prd** (cadastros `comgas_prd.dp_power_steward`
+    prefixo `ps_`, `ALLOWED_CATALOGS=nie_prd,nie_prd_legacy,comgas_prd`, sem
+    `FINOPS_SNAPSHOT_TABLE`, OBO e LLM on). Doc: `config` do bundle sobrepõe o `app.yaml`
+    (não diz se mescla ou substitui — por isso a lista completa). DEV inalterado.
+    `bundle validate -t prd` OK (só falha o `Manage` pessoal na pasta de prd; o pipeline usa o SP).
+  - **Mensagem ao Gregory redigida** (usuário envia): (1) `spn-dados-ia-dbx-apps-exp` com
+    Can Manage no warehouse; (2) `users` Can Use no warehouse; (3) após criar o App, incluir
+    o **SP do App** (novo, não o pwsteward) na automação de ACL do schema; + CREATE TABLE
+    temporário pra migração; + pergunta se prefere outro warehouse (dedicado/maior).
+  - **Migração dos dados (decisão do usuário: migrar tudo de dev)**: 17 tabelas `ps_*` em
+    `comgas_dev.dp_power_steward`. Teste de `DEEP CLONE` falhou (sem CREATE TABLE em prd).
+    Plano: depois do App criado → `DEEP CLONE` das 17 (pular `ps_finops_snapshot`) → `ALTER
+    TABLE … OWNER TO <SP do app>`. Ajustar depois: URLs de dashboards (workspace dev),
+    indicadores com `nie_dev`/MV em `comgas_dev`.
+  - App de dev **não** é apagado (pedido do usuário).
+  - Dicas: login de profile no CLI com `BROWSER=<wrapper do Chrome>` completa sozinho; PR via
+    API: gravar o JSON com `encoding='utf-8'`/`ensure_ascii` (cp1252 quebra o payload).
+
+  **▶️ PONTO DE RETOMADA:** resposta do Gregory (warehouse definitivo — se mudar, trocar o ID
+  nos 2 lugares do `power-steward.app.yml`; grants 1 e 2) → mesclar !59318 → PR `dev → main`
+  (Tech Reviewers; leva junto o que estiver em dev) → conferir App criado em prd + redeploy
+  manual se preciso → pegar o SP do App → Gregory: automação (item 3) → migração das tabelas
+  → abrir o app (seed/migrações) → ajustar dados dev-específicos.
+  Pendente à parte: FinOps multi-warehouse (cadastro `finops_warehouses` warehouse→domínio,
+  já que não dá pra taguear warehouses) — proposto, aguardando o ok do usuário.
