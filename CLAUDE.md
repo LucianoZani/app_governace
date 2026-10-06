@@ -1597,3 +1597,7 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     PRD fica vermelho na criação do App. Depois do merge em `main`: conferir App criado em
     `cg-prd-dbw-nie-001` (+ redeploy manual se preciso), pegar o SP do App, migrar as 17
     tabelas (CREATE TABLE temporário + DEEP CLONE + OWNER TO <SP do app>).
+  - **Confirmado pelo Guilherme:** o target `prd` do bundle = **"prd exploratório"**
+    (`cg-prd-dbw-nie-001`); a Comgás tem 2 workspaces de PRD. Deployer = SP `-exp`
+    (`spn-dados-ia-dbx-apps-exp`). O App do Power Steward vai para o exploratório (ok pelo
+    usuário). Guilherme "esbarrou" em permissão do SP `-exp` ao subir a catalogação.
