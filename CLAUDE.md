@@ -1519,3 +1519,19 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   4. Gregory: schema dedicado às MVs + `SELECT`/`APPLY TAG` por PS (sem isso o PS não
      aplica tag e a restrição não vale fora do app). Pendências antigas seguem
      (CAN USE `users` no warehouse, SP `235ed718…` na automação, bug do `q_str`).
+
+- **2026-10-06 (2ª parte)** — **Dashboard tipo Analítico (Metric View).** Nova
+  categoria `analitico` em `dashboards.categoria` (sem migração — coluna já existia).
+  Indicador vinculado **obrigatório**; domínio opcional. Visibilidade = regra da página
+  Metric View: admin, PS do indicador ou pedido de consulta aprovado (revogar tira).
+  Aparece na seção **Dashboards** do menu (junto dos de Qualidade — vale até pra quem
+  não tem flag) e nos botões das telas do indicador. Helpers `_indicadores_mv_liberados`,
+  `_pode_ver_dashboard`, `dashboards_secao`. Commit `6143930` (pushado, deployado no
+  Free via bundle, não clicado/testado). Bundle Comgás: commit `b1a229f` na mesma branch
+  da **PR !59251** (que segue aberta — agora com os 2 commits). ⚠️ Controle só no app: o
+  dashboard abre no Databricks, onde vale o compartilhamento dele + `SELECT` na MV.
+  Também: erro "Unauthorized network access to workspace 1034226648554058" no dev da
+  Comgás = acesso fora do Private Link (VPN/DNS); resolveu sozinho.
+
+  **▶️ PONTO DE RETOMADA:** aprovar/mesclar a !59251 (2 commits) → redeploy manual
+  (Bug 2) → abrir o app (migração `indicador_id`) → testar MV por PS + dashboard analítico.
