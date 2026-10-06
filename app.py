@@ -4678,8 +4678,15 @@ def page_stewards() -> None:
 
 
 # Tipos de dashboard (coluna `dashboards.categoria`). Governança = menu
-# Governança (steward do domínio); Qualidade = menu Engenharia.
-_DASH_CATEGORIAS = {"governanca": "Governança", "qualidade": "Qualidade de dados"}
+# Governança (steward do domínio); Qualidade = seção Dashboards (Engenharia,
+# Power Steward, Cadastros); Analítico = feito sobre a Metric View de um
+# indicador, seção Dashboards com a mesma regra da página Metric View (admin,
+# PS do indicador ou pedido de consulta aprovado).
+_DASH_CATEGORIAS = {
+    "governanca": "Governança",
+    "qualidade": "Qualidade de dados",
+    "analitico": "Analítico (Metric View)",
+}
 
 
 def page_dashboards() -> None:
@@ -4690,8 +4697,11 @@ def page_dashboards() -> None:
         "aparece no menu Governança para **admin** ou **Data Steward/Owner** daquele "
         "domínio/sub-domínio. Tipo **Qualidade de dados**: aparece na seção "
         "**Dashboards** do menu, para quem tem Engenharia, Power Steward ou "
-        "Cadastros. Vincular a um indicador (opcional) mostra o link também nas "
-        "telas do indicador (Indicador, Glossário e Indicadores — Engenharia)."
+        "Cadastros. Tipo **Analítico (Metric View)**: feito sobre a Metric View "
+        "de um indicador (vínculo obrigatório) — aparece na seção **Dashboards** "
+        "só para admin, o Power Steward do indicador e quem teve a consulta à "
+        "Metric View aprovada. Vincular a um indicador mostra o link também nas "
+        "telas do indicador (Indicador, Glossário, Engenharia e Metric View)."
     )
     _show_cad_feedback()
     role = st.session_state.get("role", "leitor")
@@ -4734,7 +4744,7 @@ def page_dashboards() -> None:
     if not doms:
         st.caption(
             "Nenhum **Domínio** cadastrado ainda — por enquanto só dá pra cadastrar "
-            "dashboards do tipo **Qualidade de dados** (domínio opcional)."
+            "dashboards do tipo **Qualidade de dados** ou **Analítico** (domínio opcional)."
         )
 
     recs = dash.to_dict("records")
@@ -4753,7 +4763,7 @@ def page_dashboards() -> None:
     )
 
     # Domínio é obrigatório só para o tipo Governança (é ele que decide quem vê
-    # o dashboard no menu Governança); para Qualidade de dados é opcional.
+    # o dashboard no menu Governança); para Qualidade/Analítico é opcional.
     dom_ids = [None] + [d["id"] for d in doms]
     cur_dom = cur.get("dominio_id")
     cur_dom = cur_dom if cur_dom is not None and pd.notna(cur_dom) else None
@@ -4771,11 +4781,11 @@ def page_dashboards() -> None:
         cur_ind = cur.get("indicador_id")
         cur_ind = int(cur_ind) if cur_ind is not None and pd.notna(cur_ind) else None
         indicador_id = st.selectbox(
-            "Indicador vinculado (opcional)", options=ind_options,
+            "Indicador vinculado (obrigatório para o tipo Analítico)", options=ind_options,
             index=ind_options.index(cur_ind) if cur_ind in ind_options else 0,
             format_func=lambda i: "(nenhum)" if i is None else ind_nome.get(i, i),
-            help="O link do dashboard aparece na tela Indicadores — Engenharia, "
-                 "junto do indicador escolhido aqui.",
+            help="O link do dashboard aparece nas telas do indicador escolhido aqui. "
+                 "No tipo Analítico, é o indicador que decide quem vê o dashboard.",
         )
         dom_id = st.selectbox(
             "Domínio (obrigatório para o tipo Governança)", options=dom_ids, index=dom_idx,
@@ -4807,8 +4817,14 @@ def page_dashboards() -> None:
         if not (url.startswith("http://") or url.startswith("https://")):
             st.warning("A URL deve começar com http:// ou https://.")
             return
-        if dom_id is None and categoria != "qualidade":
+        if dom_id is None and categoria == "governanca":
             st.warning("Dashboards do tipo **Governança** precisam de um domínio.")
+            return
+        if categoria == "analitico" and indicador_id is None:
+            st.warning(
+                "Dashboards do tipo **Analítico** precisam de um indicador vinculado — "
+                "é ele que define quem pode ver."
+            )
             return
         dom_sql = "NULL" if dom_id is None else str(int(dom_id))
         sub_sql = "NULL" if sub_id is None or dom_id is None else str(int(sub_id))
@@ -6028,8 +6044,8 @@ def _render_pedido_consulta_mv(user: str, outros: list[dict], pedidos: dict[int,
         st.caption(
             "Cada Power Steward vê só as Metric Views dos seus indicadores. Para "
             "consultar a de outro indicador, peça acesso — um admin decide. O acesso "
-            "liberado é **só para consulta**; a documentação continua com o Power "
-            "Steward do indicador."
+            "liberado é **só para consulta** (inclui os dashboards analíticos do "
+            "indicador); a documentação continua com o Power Steward do indicador."
         )
         if pendentes:
             st.markdown(
@@ -7521,10 +7537,10 @@ def user_visible_dashboards(user: str, is_admin: bool) -> list[dict]:
     dash = list_dashboards()
     if dash.empty:
         return []
-    # Dashboards de qualidade vão pra seção Dashboards (`dashboards_qualidade`).
+    # Qualidade e Analítico vão pra seção Dashboards (`dashboards_secao`).
     ativos = [
         r for r in dash.to_dict("records")
-        if r.get("ativo", True) and r.get("categoria") != "qualidade"
+        if r.get("ativo", True) and r.get("categoria") not in ("qualidade", "analitico")
     ]
     if is_admin:
         return ativos
@@ -7561,14 +7577,66 @@ def dashboards_qualidade(indicador_id: int | None = None) -> list[dict]:
     ]
 
 
+def _indicadores_mv_liberados(user: str) -> set[int]:
+    """Indicadores cuja Metric View (e dashboards analíticos) o usuário pode
+    ver: os que ele é o Power Steward + os com pedido de consulta aprovado.
+    Mesma regra da página Metric View. Admin não passa por aqui."""
+    try:
+        ind = list_indicadores()
+    except Exception:
+        ind = pd.DataFrame()
+    meus = set()
+    if not ind.empty:
+        meus = {
+            int(r["id"]) for r in ind.to_dict("records")
+            if str(r.get("power_steward") or "").lower() == (user or "").lower()
+        }
+    aprovados = {i for i, s in _mv_solicitacoes(user).items() if s == "aprovado"}
+    return meus | aprovados
+
+
+def _pode_ver_dashboard(row: dict, user: str, is_admin: bool, liberados: set[int] | None = None) -> bool:
+    """Analítico: admin, PS do indicador ou consulta aprovada. Os outros tipos
+    não têm filtro aqui (quem chega na tela já passou pelo portão dela)."""
+    if row.get("categoria") != "analitico" or is_admin:
+        return True
+    ind_id = row.get("indicador_id")
+    if ind_id is None or pd.isna(ind_id):
+        return False
+    if liberados is None:
+        liberados = _indicadores_mv_liberados(user)
+    return int(ind_id) in liberados
+
+
+def dashboards_secao(user: str, is_admin: bool, ver_qualidade: bool) -> list[dict]:
+    """Dashboards da seção Dashboards do menu: Qualidade (se `ver_qualidade`)
+    + Analíticos que o usuário pode ver (regra da Metric View)."""
+    dash = list_dashboards()
+    if dash.empty:
+        return []
+    ativos = [r for r in dash.to_dict("records") if r.get("ativo", True)]
+    out = [r for r in ativos if ver_qualidade and r.get("categoria") == "qualidade"]
+    analiticos = [r for r in ativos if r.get("categoria") == "analitico"]
+    if analiticos:
+        liberados = None if is_admin else _indicadores_mv_liberados(user)
+        out += [r for r in analiticos if _pode_ver_dashboard(r, user, is_admin, liberados)]
+    return out
+
+
 def _render_dashboards_do_indicador(indicador_id) -> None:
     """Botões dos dashboards ativos vinculados a um indicador — usado nas telas
-    Indicador (negócio), consulta do Glossário e Indicadores — Engenharia. Não
-    renderiza nada se não houver vínculo (ou se a leitura falhar)."""
+    Indicador (negócio), consulta do Glossário, Indicadores — Engenharia e
+    Metric View. Analíticos só aparecem para quem pode vê-los. Não renderiza
+    nada se não houver vínculo (ou se a leitura falhar)."""
     if indicador_id is None or pd.isna(indicador_id):
         return
     try:
-        dash_ind = dashboards_qualidade(int(indicador_id))
+        user = st.session_state.get("user") or current_username()
+        is_admin = st.session_state.get("role") == "admin"
+        dash_ind = [
+            d for d in dashboards_qualidade(int(indicador_id))
+            if _pode_ver_dashboard(d, user, is_admin)
+        ]
     except Exception:
         return
     if not dash_ind:
@@ -8106,23 +8174,24 @@ def main() -> None:
         pg_indicadores_eng = st.Page(page_indicadores_engenharia, title="Indicadores — Engenharia", icon="🛠️")
         nav_pages["indicadores_engenharia"] = pg_indicadores_eng
         pages["Engenharia"] = [pg_indicadores_eng]
-    # Dashboards de qualidade de dados: seção própria, comum à Engenharia e ao
-    # negócio dos indicadores (Power Steward / Cadastros). Só aparece se houver
-    # algum dashboard do tipo Qualidade cadastrado e ativo.
-    if is_admin or perms["engenharia"] or perms["power_steward"] or perms["ver_cadastros"]:
-        try:
-            dash_pages = [
-                st.Page(
-                    make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
-                    url_path=f"dashboard-{int(row['id'])}",
-                )
-                for row in dashboards_qualidade()
-            ]
-        except Exception as exc:
-            dash_pages = []
-            st.session_state.setdefault("cad_bootstrap_error", str(exc))
-        if dash_pages:
-            pages["Dashboards"] = dash_pages
+    # Seção Dashboards: Qualidade de dados (Engenharia, Power Steward,
+    # Cadastros) + Analíticos sobre Metric View (admin, PS do indicador ou
+    # consulta aprovada — vale até para quem não tem flag nenhuma). Só aparece
+    # se sobrar algum dashboard visível.
+    ver_qualidade = is_admin or perms["engenharia"] or perms["power_steward"] or perms["ver_cadastros"]
+    try:
+        dash_pages = [
+            st.Page(
+                make_dashboard_page(row), title=row["nome"], icon=row.get("icone") or "📊",
+                url_path=f"dashboard-{int(row['id'])}",
+            )
+            for row in dashboards_secao(user, is_admin, ver_qualidade)
+        ]
+    except Exception as exc:
+        dash_pages = []
+        st.session_state.setdefault("cad_bootstrap_error", str(exc))
+    if dash_pages:
+        pages["Dashboards"] = dash_pages
     st.session_state["_nav_pages"] = nav_pages
     nav = st.navigation(pages)
 
