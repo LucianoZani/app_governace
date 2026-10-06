@@ -1484,3 +1484,38 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     só via `MEASURE()` em Metric Views publicadas, exigindo OBO (fail-closed), ou
     embutindo o Genie pela API de conversa. No Free o OBO está desligado.
   - Pendente: bug do `q_str` (escape `''` some com o apóstrofo — usar `\'`).
+
+- **2026-10-06** — **Página Metric View: cada Power Steward vê só os seus indicadores.**
+  Os de outro PS só via pedido de acesso, e só para consulta (pedido do usuário).
+  - Código (repo principal `6d6c50b`, pushado; bundle `f8d57b9`): a página lista só os
+    indicadores em que o usuário é o PS (admin vê todos). Expander "🔑 Consultar a Metric
+    View de outro indicador" grava o pedido em `solicitacoes_acesso` com a coluna nova
+    **`indicador_id`** (migração idempotente em `ensure_cadastro_tables`). Pedido
+    aprovado em Solicitações de Acesso libera a consulta **no app** sozinho (exceção à
+    regra "aprovar só registra"); fica marcado "· só consulta" e a aba Documentar fica
+    só leitura. Admin vê "👥 Consulta liberada para N pessoa(s)" com botão Revogar
+    (status `revogado`). Helpers: `_mv_solicitacoes`, `_render_pedido_consulta_mv`,
+    `_render_consultas_liberadas_mv`.
+  - Testado pelo usuário no Free (simulação: papel `leitor` + Margem bruta com outro
+    PS). Simulação desfeita (papel admin e PS do Margem bruta restaurados).
+  - **PR !59251** (`feature/metric-view-acesso-por-ps` → `dev`, work item 218352,
+    criada via API REST) — **ABERTA, ainda não aprovada/mesclada.**
+  - 🔴 **Achado de grants (UC, Comgás dev):** `account users` tem `SELECT` + `USE
+    SCHEMA` + `USE CATALOG` no **catálogo `comgas_dev` inteiro** → a restrição por PS
+    vale só no app (pelo SQL Editor qualquer um consulta qualquer MV). E **nenhum PS
+    consegue aplicar tag** na MV: tag roda OBO e exige `APPLY TAG`, que só os grupos
+    com MANAGE têm (`cloud-nie-governanca`, `cloud-nie-eng-dados`, `cloud-nie-lt`,
+    `cloud-nie-adm`…). Comentário funciona (via SP). Proposta a levar ao Gregory:
+    schema dedicado às Metric Views **sem** grant de `account users`, com
+    `GRANT SELECT, APPLY TAG ON <view> TO <PS>` por view (e já definir o equivalente
+    em prd).
+
+  **▶️ PONTO DE RETOMADA:**
+  1. Aprovar/completar a **PR !59251** (self-approve ok — não toca `databricks.yml`/`devops/`).
+  2. Redeploy manual depois do merge (Bug 2 do pipeline): `databricks apps deploy
+     power-steward --source-code-path /Workspace/production/data-products/power-steward/dev/files/src/power-steward -p comgas-nie-dev`;
+     abrir o app em seguida (cria a coluna `indicador_id`).
+  3. Testar na Comgás com um PS real (vê só o seu; pede acesso; admin aprova/revoga).
+  4. Gregory: schema dedicado às MVs + `SELECT`/`APPLY TAG` por PS (sem isso o PS não
+     aplica tag e a restrição não vale fora do app). Pendências antigas seguem
+     (CAN USE `users` no warehouse, SP `235ed718…` na automação, bug do `q_str`).
