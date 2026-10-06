@@ -1535,3 +1535,8 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
 
   **▶️ PONTO DE RETOMADA:** aprovar/mesclar a !59251 (2 commits) → redeploy manual
   (Bug 2) → abrir o app (migração `indicador_id`) → testar MV por PS + dashboard analítico.
+  - ✅ **Feito na mesma sessão:** PR !59251 aprovada e completada via API REST (squash,
+    merge `f0875d9e`). Pipeline levou ~13 min pra subir os arquivos; redeploy manual →
+    deployment `01f1c1a6…`, RUNNING. Falta: abrir o app (migração `indicador_id`) e testar.
+    Dica: `git credential fill` trava sem `GCM_INTERACTIVE=never` + `path=` do repo; o token
+    não lê pipelines (`_apis/build` volta vazio) — confira o deploy pelo `app.py` do Workspace.
