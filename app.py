@@ -6209,7 +6209,8 @@ def page_metric_view() -> None:
         )
         return
 
-    todos = pub.to_dict("records")
+    # `id` vem como texto do Statement Execution; os pedidos usam int.
+    todos = [{**r, "id": int(r["id"])} for r in pub.to_dict("records")]
     meus = {r["id"] for r in todos if str(r.get("power_steward") or "").lower() == (user or "").lower()}
     # Cada Power Steward vê só os indicadores dele. Os de outro PS só aparecem
     # depois de um pedido aprovado em Solicitações de Acesso — e aí só para
