@@ -1625,3 +1625,29 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   histórico do audit → com o App criado: `databricks apps get power-steward -p comgas` (SP do
   App), rodar o script de migração, abrir o app, ajustar dados dev-específicos (URLs de
   dashboards, Desconto Total/`nie_dev`).
+
+- **2026-10-07** — **Warehouse dedicado do Power Steward em PRD.** Greg criou
+  `dbsql_cloud_dados_ia_dp_power_steward` (**`7db4076d9280cce9`**, serverless 2X-Small,
+  auto-stop 5min) no `cg-prd-dbw-nie-001`. Pediu também manter o prefixo **`ps_`** nas
+  tabelas — já é assim (`CADASTRO_TABLE_PREFIX=ps_` no prd + script de migração clona
+  `ps_X` → `ps_X`), nada a mudar.
+  - **PR !59348** (`feature/power-steward-prd-warehouse-dedicado` → `dev`, commit `df8d0d3`,
+    work item 218352): troca `6b64172bcbc6c3c3` → `7db4076d9280cce9` nos 2 pontos do
+    `targets.prd` em `resources/apps/power-steward.app.yml`. **Aberta** — autoaprovação via
+    API bloqueada pelo classificador do Claude Code; o usuário aprova/completa pela UI.
+    Precisa entrar em `dev` **antes** da !59329 (`dev → main`, já aprovada por Greg/
+    Deployers/Tech Reviewers, ainda não completada) — senão prd sobe com o warehouse antigo.
+  - ACL do warehouse novo (via `system.access.audit`, `changeEndpointAcls`, 07/10 06:25,
+    ator **`spn-prd-nie`** — ou seja, já nasce DENTRO da automação de ACL, não deve ser
+    zerado): `spn-prd-nie` Owner, `cloud-nie-adm` Manage, `spn-dados-ia-pwsteward-prd`
+    Manage, `spn-prd-databricks-runner` Use. **Faltam**: (1) `spn-dados-ia-dbx-apps-exp`
+    (`beb6fc7a…`, SP da service connection `arm-dados-ia-dbx-apps-exp` usada no stage
+    `deploy_prd`) Can Manage — sem isso a criação do App dá 403 (a menos que o Greg tenha
+    apontado a connection pro `pwsteward-prd`); (2) `users` Can Use (OBO — hoje nem o
+    `tr073686` tem); (3) SP do App Can Use, depois de criado. Mensagem pro Greg redigida.
+  - Dica: workspace de prd exige VPN ("Unauthorized network access" sem ela).
+
+  **▶️ PONTO DE RETOMADA:** usuário aprova/completa !59348 → Greg: itens (1) e (2) → !59329
+  mesclada → acompanhar `deploy_prd` → SP do App (`databricks apps get power-steward -p
+  comgas`) → Greg: item (3) + CREATE TABLE temporário → `migracao-power-steward-prd.sql` →
+  abrir o app → ajustar dados dev-específicos.
