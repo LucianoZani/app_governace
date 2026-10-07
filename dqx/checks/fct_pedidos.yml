@@ -1,0 +1,169 @@
+# DQX >= 0.16: em `allowed`, texto sem aspas simples = nome de COLUNA. Literal vai como "'valor'".
+# Regras de qualidade REVISADAS para dev.gold.fct_pedidos (DQX 0.16.0) — passo 2, 2026-10-05.
+# Ponto de partida: checks/fct_pedidos_candidatas.yml (22 regras do profiler).
+# user_metadata.origem: "profiler" = mantida do rascunho | "negocio" = escrita por nós.
+#
+# Descartadas do rascunho (e por quê):
+#   - is_in_range com mín/máx observado (dt_pedido, sk_data, valor_bruto, desconto,
+#     valor_liquido, qtd_itens, timestamps): "aprendidas" do dado de hoje — aceitam os
+#     defeitos (-100, 0 itens) e reprovariam qualquer carga nova (datas). Trocadas por
+#     limites de NEGÓCIO (>= 0, >= 1, não futuro).
+#   - is_not_null em colunas técnicas (_cliente_resolvido, _flags_origem,
+#     _bronze_ingestao_ts, _gold_processado_ts): controle do pipeline, não dado de negócio.
+#   - is_not_null_and_not_empty em status/canal/sistema_cliente: substituídas por
+#     is_not_null_and_is_in_list (nulo E domínio numa regra só).
+
+# ---------- Chave e identificação ----------
+- name: sk_pedido_vazio
+  criticality: error
+  check:
+    function: is_not_null_and_not_empty
+    arguments: {column: sk_pedido, trim_strings: true}
+  user_metadata: {origem: profiler, indicador: Margem bruta}
+
+- name: sk_pedido_duplicado          # o profiler NUNCA sugere unicidade (caso "Desconto Total" da Comgás)
+  criticality: error
+  check:
+    function: is_unique
+    arguments: {columns: [sk_pedido]}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: sk_cliente_vazio
+  criticality: error
+  check:
+    function: is_not_null_and_not_empty
+    arguments: {column: sk_cliente, trim_strings: true}
+  user_metadata: {origem: profiler, indicador: Margem bruta}
+
+- name: cliente_nao_resolvido        # P-0007. Começa como error; no passo 3 vira warn (demo de reprocesso)
+  criticality: error
+  check:
+    function: sql_expression
+    arguments:
+      expression: "sk_cliente <> '-1'"
+      msg: "Pedido sem cliente identificado (sk_cliente = -1)"
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: sk_cliente_sem_dimensao      # chave estrangeira: passa até o -1, porque a dim tem o membro "desconhecido"
+  criticality: warn
+  check:
+    function: foreign_key
+    arguments:
+      columns: [sk_cliente]
+      ref_columns: [sk_cliente]
+      ref_table: dev.gold.dim_cliente
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: id_cliente_vazio
+  criticality: error
+  check:
+    function: is_not_null_and_not_empty
+    arguments: {column: id_cliente, trim_strings: true}
+  user_metadata: {origem: profiler, indicador: Margem bruta}
+
+- name: sistema_cliente_invalido
+  criticality: error
+  check:
+    function: is_not_null_and_is_in_list
+    arguments: {column: sistema_cliente, allowed: ["'erp1'", "'erp2'"]}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+# ---------- Datas ----------
+- name: dt_pedido_vazia
+  criticality: error
+  check:
+    function: is_not_null
+    arguments: {column: dt_pedido}
+  user_metadata: {origem: profiler, indicador: Margem bruta}
+
+- name: dt_pedido_no_futuro          # substitui o range 10/06–03/09 (reprovaria pedidos novos)
+  criticality: error
+  check:
+    function: is_not_in_future
+    arguments: {column: dt_pedido, offset: 0}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: sk_data_incoerente           # consistência entre colunas
+  criticality: error
+  check:
+    function: sql_expression
+    arguments:
+      expression: "sk_data = cast(date_format(dt_pedido, 'yyyyMMdd') as int)"
+      msg: "sk_data não corresponde a dt_pedido"
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+# ---------- Domínios ----------
+- name: status_invalido              # P-0010 ('xpto')
+  criticality: error
+  check:
+    function: is_not_null_and_is_in_list
+    arguments: {column: status, allowed: ["'concluido'", "'pendente'", "'cancelado'", "'devolvido'"]}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: canal_invalido
+  criticality: error
+  check:
+    function: is_not_null_and_is_in_list
+    arguments: {column: canal, allowed: ["'web'", "'app'", "'loja'", "'telefone'"]}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+# ---------- Valores ----------
+- name: valor_bruto_vazio            # P-0008. O profiler não sugeriu (1 nulo em 17 = 5,9% > 5%)
+  criticality: error
+  check:
+    function: is_not_null
+    arguments: {column: valor_bruto}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: valor_bruto_negativo
+  criticality: error
+  check:
+    function: is_not_less_than
+    arguments: {column: valor_bruto, limit: 0}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: desconto_vazio
+  criticality: error
+  check:
+    function: is_not_null
+    arguments: {column: desconto}
+  user_metadata: {origem: profiler, indicador: Margem bruta}
+
+- name: desconto_negativo
+  criticality: error
+  check:
+    function: is_not_less_than
+    arguments: {column: desconto, limit: 0}
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: desconto_maior_que_bruto     # P-0009 (desconto 300 > bruto 200)
+  criticality: error
+  check:
+    function: sql_expression
+    arguments:
+      expression: "desconto <= valor_bruto"
+      msg: "Desconto maior que o valor bruto"
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: valor_liquido_incoerente
+  criticality: error
+  check:
+    function: sql_expression
+    arguments:
+      expression: "valor_liquido = valor_bruto - desconto"
+      msg: "valor_liquido diferente de valor_bruto - desconto"
+  user_metadata: {origem: negocio, indicador: Margem bruta}
+
+- name: qtd_itens_vazia
+  criticality: error
+  check:
+    function: is_not_null
+    arguments: {column: qtd_itens}
+  user_metadata: {origem: profiler, indicador: Margem bruta}
+
+- name: qtd_itens_zerada             # P-0012 (0 itens). O profiler sugeriu range 0–6
+  criticality: error
+  check:
+    function: is_not_less_than
+    arguments: {column: qtd_itens, limit: 1}
+  user_metadata: {origem: negocio, indicador: Margem bruta}

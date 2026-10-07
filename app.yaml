@@ -66,3 +66,8 @@ env:
   # a ser via Asset Bundle (target `free`): o repo virou a única fonte da config.
   - name: FINOPS_SNAPSHOT_TABLE
     value: "governance.finops.custo_snapshot"
+
+  # Regras de qualidade (DQX) por indicador — PoC. Schema onde o job
+  # `dqx/03_aplicar` grava os resultados. Vazio = página escondida.
+  - name: DQX_RESULTADOS_SCHEMA
+    value: "dev.dqx"

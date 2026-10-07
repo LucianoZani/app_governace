@@ -169,6 +169,14 @@ STATEMENT_TIMEOUT_S = 120
 # OBO cair pro service principal (USE_ON_BEHALF_OF_USER=false).
 PROPOSTAS_IA_TABLE = os.environ.get("PROPOSTAS_IA_TABLE", "").strip()
 
+# Regras de qualidade (DQX) por indicador — PoC. Schema ("catalog.schema")
+# onde o job do DQX grava os resultados (`execucoes`, `metricas_regras`,
+# `falhas`). Definido = a página "Regras de Qualidade" aparece pro Power
+# Steward; vazio = a funcionalidade fica escondida. As REGRAS em si ficam nos
+# cadastros do app (`regras_qualidade`); o app não roda o DQX (não tem Spark)
+# — quem aplica é o job (notebook `dqx/03_aplicar`), em modo monitoramento.
+DQX_RESULTADOS_SCHEMA = os.environ.get("DQX_RESULTADOS_SCHEMA", "").strip()
+
 # Snapshot de FinOps numa tabela Delta ("catalog.schema.tabela"). Alternativa
 # ao OBO quando o Service Principal do app NÃO tem acesso a `system.billing`
 # (o schema `system.billing` só concede ao grupo reservado `account admins`).
@@ -362,8 +370,15 @@ def q_fqn(dotted: str) -> str:
 
 
 def q_str(value: str) -> str:
-    """Quota um literal string, escapando aspas simples."""
-    return "'" + value.replace("'", "''") + "'"
+    """Quota um literal string para o Databricks SQL.
+
+    Escapa com barra invertida (`\\'` e `\\\\`). O escape SQL-padrão `''` NÃO
+    serve aqui: o Databricks lê `'it''s'` como dois literais concatenados
+    (`'it'` + `'s'` → "its") — o apóstrofo some, e um texto como
+    `status IN ('a','b')` quebra o comando inteiro. Testado no warehouse
+    (2026-10-07) com apóstrofo, barra, aspas duplas e acentos.
+    """
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _rows_to_df(resp) -> pd.DataFrame:
@@ -1926,6 +1941,17 @@ def ensure_cadastro_tables() -> bool:
         f"o_que_precisa STRING, motivo STRING, status STRING, "
         f"decidido_por STRING, decidido_em TIMESTAMP, comentario_decisao STRING, "
         f"criado_em TIMESTAMP)",
+        # Regras de qualidade (DQX) de um indicador, escritas pelo Power
+        # Steward na página "Regras de Qualidade". `funcao`/`argumentos` já
+        # estão no formato do DQX (argumentos = JSON) — o job lê as ativas e
+        # monta os checks sem tradução. `tipo` = modelo da tela (nao_vazio,
+        # lista, ...); `parametros` = o que o usuário digitou (pra reabrir a
+        # regra em português). `origem`: app / profiler / importada.
+        f"CREATE TABLE IF NOT EXISTS {_cad('regras_qualidade')} "
+        f"(id BIGINT GENERATED ALWAYS AS IDENTITY, indicador_id BIGINT, tabela STRING, "
+        f"nome STRING, descricao STRING, tipo STRING, coluna STRING, parametros STRING, "
+        f"criticidade STRING, funcao STRING, argumentos STRING, origem STRING, ativa BOOLEAN, "
+        f"teste_falhas BIGINT, teste_total BIGINT, testado_em TIMESTAMP, {audit})",
     ]
     for stmt in ddl:
         run_exec(stmt)  # SP
@@ -2684,6 +2710,7 @@ def _clear_cad_caches() -> None:
         list_glossario_negocio, list_indicadores, list_termos_negocio, _novos_na_semana,
         list_mapa_dominio_acesso, list_mapa_sensibilidade_acesso, list_grupos,
         buscar_principais, membros_do_grupo, list_solicitacoes_acesso,
+        list_regras_qualidade, _dqx_resultados,
     ):
         try:
             f.clear()
@@ -6350,6 +6377,567 @@ def page_metric_view() -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Regras de qualidade (DQX) por indicador — PoC
+# ---------------------------------------------------------------------------
+# O Power Steward escreve as regras em português, sobre as tabelas do lineage
+# do indicador; o app traduz cada modelo para uma função do DQX
+# (databricks-labs-dqx 0.16) e testa no warehouse quantas linhas violariam.
+# O app NÃO roda o DQX: o job `dqx/03_aplicar` lê as regras ativas desta
+# tabela e grava os resultados em DQX_RESULTADOS_SCHEMA (modo monitoramento —
+# nada é bloqueado; aplicar no pipeline fica para quando amadurecer).
+
+_RQ_TIPOS: dict[str, str] = {
+    "nao_vazio": "Não pode ficar vazio",
+    "unico": "Não pode se repetir",
+    "lista": "Só aceita estes valores",
+    "intervalo": "Valor dentro de um limite (mínimo / máximo)",
+    "data_futura": "Data não pode estar no futuro",
+    "existe_em": "Precisa existir em outra tabela",
+    "expressao": "Regra livre (escrita em SQL, com ajuda da IA)",
+}
+
+# Rótulo de exibição para funções DQX que não vieram dos modelos da tela
+# (regras importadas do profiler/YAML).
+_RQ_FUNCAO_LABEL: dict[str, str] = {
+    "is_not_null": "Não pode ser nulo",
+    "is_not_null_and_not_empty": "Não pode ficar vazio",
+    "is_unique": "Não pode se repetir",
+    "is_in_list": "Só aceita estes valores",
+    "is_not_null_and_is_in_list": "Obrigatório e só aceita estes valores",
+    "is_in_range": "Dentro do limite",
+    "is_not_less_than": "Valor mínimo",
+    "is_not_greater_than": "Valor máximo",
+    "is_not_in_future": "Data não pode estar no futuro",
+    "foreign_key": "Precisa existir em outra tabela",
+    "sql_expression": "Regra livre (SQL)",
+}
+
+_RQ_CRITICIDADE = {
+    "error": "🔴 Erro — dado não serve para o indicador",
+    "warn": "🟡 Aviso — merece atenção, não invalida",
+}
+
+
+def _rq_slug(texto: str) -> str:
+    base = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "_", base.lower()).strip("_")[:60] or "regra"
+
+
+def _rq_literal_dqx(valor: str) -> str:
+    """Valor de lista no formato do DQX 0.16: texto sem aspas simples é lido
+    como NOME DE COLUNA, então literal vai entre aspas (`'erp1'`)."""
+    return q_str(valor)
+
+
+def _rq_limite(texto: str):
+    """Converte o limite digitado: número (int/float) ou data ISO (texto).
+    Devolve (valor_para_dqx, literal_sql) ou None se vazio."""
+    t = (texto or "").strip()
+    if re.fullmatch(r"-?\d+(,\d+)?", t):  # vírgula decimal (pt-BR)
+        t = t.replace(",", ".")
+    if not t:
+        return None
+    try:
+        num = float(t)
+        num = int(num) if num.is_integer() else num
+        return num, str(num)
+    except ValueError:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
+            return t, f"DATE {q_str(t)}"
+        raise ValueError(f"Limite inválido: {texto!r} (use número ou data AAAA-MM-DD).")
+
+
+def _rq_montar(tipo: str, coluna: str, p: dict) -> tuple[str, dict, str]:
+    """(funcao DQX, argumentos DQX, condição SQL de VIOLAÇÃO sobre o alias `t`).
+
+    A condição de violação replica a semântica da função do DQX, para o teste
+    no app dar o mesmo número que o job vai dar. `unico` é tratado à parte em
+    `testar_regra_qualidade` (precisa de agregação)."""
+    c = f"t.{q_ident(coluna)}" if coluna else ""
+    if tipo == "nao_vazio":
+        return ("is_not_null_and_not_empty", {"column": coluna, "trim_strings": True},
+                f"{c} IS NULL OR trim(CAST({c} AS STRING)) = ''")
+    if tipo == "unico":
+        cols = [coluna] + [x for x in p.get("colunas_extra", []) if x and x != coluna]
+        return "is_unique", {"columns": cols}, ""
+    if tipo == "lista":
+        valores = [v for v in p.get("valores", []) if v != ""]
+        if not valores:
+            raise ValueError("Informe ao menos um valor permitido.")
+        args = {"column": coluna, "allowed": [_rq_literal_dqx(v) for v in valores]}
+        lista_sql = ", ".join(q_str(v) for v in valores)
+        if p.get("obrigatorio"):
+            return ("is_not_null_and_is_in_list", args,
+                    f"{c} IS NULL OR CAST({c} AS STRING) NOT IN ({lista_sql})")
+        return "is_in_list", args, f"{c} IS NOT NULL AND CAST({c} AS STRING) NOT IN ({lista_sql})"
+    if tipo == "intervalo":
+        mn, mx = _rq_limite(p.get("minimo", "")), _rq_limite(p.get("maximo", ""))
+        if mn and mx:
+            return ("is_in_range", {"column": coluna, "min_limit": mn[0], "max_limit": mx[0]},
+                    f"{c} < {mn[1]} OR {c} > {mx[1]}")
+        if mn:
+            return "is_not_less_than", {"column": coluna, "limit": mn[0]}, f"{c} < {mn[1]}"
+        if mx:
+            return "is_not_greater_than", {"column": coluna, "limit": mx[0]}, f"{c} > {mx[1]}"
+        raise ValueError("Informe o mínimo, o máximo ou os dois.")
+    if tipo == "data_futura":
+        return "is_not_in_future", {"column": coluna, "offset": 0}, f"{c} > current_timestamp()"
+    if tipo == "existe_em":
+        ref_tabela, ref_coluna = (p.get("ref_tabela") or "").strip(), (p.get("ref_coluna") or "").strip()
+        if not ref_tabela or not ref_coluna:
+            raise ValueError("Informe a tabela e a coluna de referência.")
+        return ("foreign_key",
+                {"columns": [coluna], "ref_columns": [ref_coluna], "ref_table": ref_tabela},
+                f"{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {q_fqn(ref_tabela)} r "
+                f"WHERE r.{q_ident(ref_coluna)} = {c})")
+    if tipo == "expressao":
+        expr = (p.get("expressao") or "").strip()
+        if not expr:
+            raise ValueError("Escreva a condição que o dado CORRETO deve cumprir.")
+        _validar_expr_sql_segura(expr)
+        args = {"expression": expr}
+        if p.get("mensagem"):
+            args["msg"] = p["mensagem"]
+        # DQX: falha quando a expressão é FALSE (NULL não falha).
+        return "sql_expression", args, f"NOT ({expr})"
+    raise ValueError(f"Tipo de regra desconhecido: {tipo}")
+
+
+def testar_regra_qualidade(tabela: str, tipo: str, argumentos: dict, cond_violacao: str) -> dict:
+    """Roda a regra no warehouse e devolve {total, falhas, amostra}. Lê dado
+    real, então roda com a identidade do usuário (OBO) — mesmo padrão do
+    `testar_candidato` da Metric View."""
+    fonte = f"{q_fqn(tabela)} t"
+    if tipo == "unico" or (not cond_violacao and argumentos.get("columns")):
+        cols = argumentos["columns"]
+        chaves = ", ".join(f"t.{q_ident(x)}" for x in cols)
+        nao_nulos = " AND ".join(f"t.{q_ident(x)} IS NOT NULL" for x in cols)
+        dup = (f"SELECT {chaves}, count(*) AS n FROM {fonte} WHERE {nao_nulos} "
+               f"GROUP BY ALL HAVING count(*) > 1")
+        tot = run_query(
+            f"SELECT (SELECT count(*) FROM {fonte}) AS total, "
+            f"(SELECT coalesce(sum(n), 0) FROM ({dup})) AS falhas", prefer_user=True)
+        using = ", ".join(q_ident(x) for x in cols)
+        amostra = run_query(
+            f"SELECT t.* FROM {fonte} JOIN ({dup}) d USING ({using}) LIMIT 5", prefer_user=True)
+    else:
+        # Duas contagens com WHERE (e não count_if): a condição pode ter
+        # subconsulta correlacionada (`existe_em`), que não vale dentro de agregação.
+        tot = run_query(
+            f"SELECT (SELECT count(*) FROM {fonte}) AS total, "
+            f"(SELECT count(*) FROM {fonte} WHERE {cond_violacao}) AS falhas",
+            prefer_user=True)
+        amostra = run_query(f"SELECT t.* FROM {fonte} WHERE {cond_violacao} LIMIT 5", prefer_user=True)
+    r = tot.iloc[0]
+    return {"total": int(r["total"] or 0), "falhas": int(r["falhas"] or 0), "amostra": amostra}
+
+
+def gerar_regra_sql(texto: str, colunas: list[str]) -> dict:
+    """IA traduz uma regra de qualidade em português numa condição SQL que o
+    dado CORRETO cumpre (formato do `sql_expression` do DQX)."""
+    prompt = (
+        "Você traduz regras de qualidade de dados, escritas em português por uma "
+        "pessoa de negócio, para uma condição SQL (dialeto Databricks/Spark SQL) "
+        "avaliada linha a linha.\n\n"
+        f"Colunas da tabela (use SOMENTE estas, com crase): {', '.join('`' + c + '`' for c in colunas)}\n\n"
+        f'Regra: "{texto}"\n\n'
+        "A condição deve ser VERDADEIRA quando a linha está CORRETA (a linha que "
+        "torna a condição falsa é a que viola a regra). Sem subconsulta, sem "
+        "agregação, sem ponto e vírgula.\n"
+        "Responda em JSON puro, sem markdown, neste formato exato:\n"
+        '{"expressao": "<condição SQL>", "mensagem": "<frase curta em português '
+        'descrevendo o problema quando a regra é violada>", '
+        '"explicacao": "<o que foi entendido, em português>"}'
+    )
+    client = get_llm_client()
+    response = client.chat.completions.create(
+        model=LLM_ENDPOINT, messages=[{"role": "user", "content": prompt}], max_tokens=2000,
+    )
+    texto_resp = _extract_text(response.choices[0].message.content).strip()
+    ini, fim = texto_resp.find("{"), texto_resp.rfind("}")
+    if ini == -1 or fim == -1:
+        raise ValueError(f"Resposta da IA sem JSON reconhecível: {texto_resp!r}")
+    dados = json.loads(texto_resp[ini:fim + 1])
+    expr = (dados.get("expressao") or "").strip()
+    if not expr:
+        raise ValueError("A IA não devolveu a condição.")
+    _validar_expr_sql_segura(expr)
+    return {"expressao": expr, "mensagem": (dados.get("mensagem") or "").strip(),
+            "explicacao": (dados.get("explicacao") or "").strip()}
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_regras_qualidade(indicador_id: int | None = None) -> pd.DataFrame:
+    where = f"WHERE indicador_id = {int(indicador_id)}" if indicador_id is not None else ""
+    return run_query(
+        "SELECT id, indicador_id, tabela, nome, descricao, tipo, coluna, parametros, "
+        "criticidade, funcao, argumentos, origem, ativa, teste_falhas, teste_total, "
+        "testado_em, criado_por, atualizado_em "
+        f"FROM {_cad('regras_qualidade')} {where} ORDER BY tabela, nome"
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _dqx_resultados(indicador_id: int) -> dict:
+    """Última execução do job DQX para o indicador: resumo por tabela e
+    resultado por regra. Vazio se o job ainda não rodou (ou as tabelas de
+    resultado não existem). Lê como SP — é dado interno do processo."""
+    if not DQX_RESULTADOS_SCHEMA:
+        return {}
+    base = q_fqn(DQX_RESULTADOS_SCHEMA)
+    try:
+        # Filtra pelo run_id da última execução (comparar o timestamp devolvido
+        # em texto, com o "Z" no fim, não casa com a coluna TIMESTAMP).
+        ult = run_query(
+            f"SELECT max(run_time) AS rt, max_by(run_id, run_time) AS rid "
+            f"FROM {base}.execucoes WHERE indicador_id = {int(indicador_id)}")
+        rt = ult.iloc[0]["rt"] if not ult.empty else None
+        if not rt:
+            return {}
+        filtro = f"indicador_id = {int(indicador_id)} AND run_id = {q_str(str(ult.iloc[0]['rid']))}"
+        execs = run_query(
+            f"SELECT tabela, qtd_regras, total_linhas, linhas_com_erro, linhas_com_aviso, "
+            f"linhas_validas, pct_linhas_validas FROM {base}.execucoes WHERE {filtro}")
+        regras = run_query(
+            f"SELECT regra_id, linhas_com_falha, pct_conformidade FROM {base}.metricas_regras "
+            f"WHERE {filtro}")
+        hist = run_query(
+            f"SELECT run_time, round(100.0 * sum(linhas_validas) / nullif(sum(total_linhas), 0), 2) AS pct "
+            f"FROM {base}.execucoes WHERE indicador_id = {int(indicador_id)} "
+            f"GROUP BY run_time ORDER BY run_time DESC LIMIT 30")
+    except Exception:
+        return {}
+    return {"run_time": rt, "execucoes": execs, "regras": regras, "historico": hist}
+
+
+def _rq_tabelas_lineage(cur: dict) -> list[str]:
+    tabelas = []
+    for it in _parse_tabelas_json(cur.get("metrica_tabelas")) + _parse_tabelas_json(cur.get("dimensao_tabelas")):
+        fqn = f'{it.get("catalogo")}.{it.get("schema")}.{it.get("tabela")}'
+        if it.get("tabela") and fqn not in tabelas:
+            tabelas.append(fqn)
+    return tabelas
+
+
+def _rq_descricao_padrao(tipo: str, coluna: str, p: dict) -> str:
+    if tipo == "nao_vazio":
+        return f"{coluna} não pode ficar vazio"
+    if tipo == "unico":
+        cols = [coluna] + [x for x in p.get("colunas_extra", []) if x and x != coluna]
+        return f"{' + '.join(cols)} não pode se repetir"
+    if tipo == "lista":
+        return f"{coluna} só aceita: {', '.join(p.get('valores', []))}"
+    if tipo == "intervalo":
+        partes = []
+        if p.get("minimo"):
+            partes.append(f"≥ {p['minimo']}")
+        if p.get("maximo"):
+            partes.append(f"≤ {p['maximo']}")
+        return f"{coluna} deve ser {' e '.join(partes)}"
+    if tipo == "data_futura":
+        return f"{coluna} não pode estar no futuro"
+    if tipo == "existe_em":
+        return f"{coluna} precisa existir em {p.get('ref_tabela')}.{p.get('ref_coluna')}"
+    return p.get("texto") or p.get("mensagem") or "Regra livre"
+
+
+def _rq_salvar(user: str, indicador_id: int, tabela: str, nome: str, descricao: str, tipo: str,
+               coluna: str, params: dict, criticidade: str, funcao: str, argumentos: dict,
+               teste: dict | None) -> None:
+    run_exec(
+        f"INSERT INTO {_cad('regras_qualidade')} (indicador_id, tabela, nome, descricao, tipo, "
+        "coluna, parametros, criticidade, funcao, argumentos, origem, ativa, teste_falhas, "
+        "teste_total, testado_em, criado_em, criado_por, atualizado_em, atualizado_por) VALUES ("
+        f"{int(indicador_id)}, {q_str(tabela)}, {q_str(nome)}, {q_str(descricao)}, {q_str(tipo)}, "
+        f"{_qn(coluna or None)}, {q_str(json.dumps(params, ensure_ascii=False))}, "
+        f"{q_str(criticidade)}, {q_str(funcao)}, {q_str(json.dumps(argumentos, ensure_ascii=False))}, "
+        "'app', true, "
+        f"{teste['falhas'] if teste else 'NULL'}, {teste['total'] if teste else 'NULL'}, "
+        f"{'current_timestamp()' if teste else 'NULL'}, "
+        f"current_timestamp(), {q_str(user)}, current_timestamp(), {q_str(user)})"
+    )
+    _log_cadastro(user, "regras_qualidade", "INSERT", f"{indicador_id}:{nome}", None,
+                  {"tabela": tabela, "nome": nome, "funcao": funcao, "argumentos": argumentos})
+
+
+def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
+    """Cartões com a última execução do job + histórico. Devolve o resultado
+    por regra (regra_id → (falhas, pct)) para a lista de regras."""
+    res = _dqx_resultados(int(cur["id"])) if DQX_RESULTADOS_SCHEMA else {}
+    ativas = int(regras["ativa"].astype(str).str.lower().eq("true").sum()) if not regras.empty else 0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Regras ativas", ativas)
+    if not res:
+        c2.metric("Linhas válidas", "—")
+        c3.metric("Regras com falha", "—")
+        c4.metric("Última verificação", "—")
+        st.caption(
+            "O monitoramento ainda não rodou para este indicador. O job do DQX lê as "
+            "regras **ativas** e grava o resultado — depois disso os números aparecem aqui."
+        )
+        return {}
+    ex = res["execucoes"]
+    tot = pd.to_numeric(ex["total_linhas"]).sum()
+    val = pd.to_numeric(ex["linhas_validas"]).sum()
+    por_regra = {
+        str(r["regra_id"]): (int(r["linhas_com_falha"] or 0), r["pct_conformidade"])
+        for r in res["regras"].to_dict("records")
+    }
+    com_falha = sum(1 for f, _ in por_regra.values() if f > 0)
+    c2.metric("Linhas válidas", f"{(100.0 * val / tot if tot else 0):.1f}%",
+              help="Linhas sem nenhuma violação (erro ou aviso), somando as tabelas do indicador.")
+    c3.metric("Regras com falha", f"{com_falha} de {len(por_regra)}")
+    c4.metric("Última verificação", str(res["run_time"])[:16].replace("T", " "))
+    hist = res["historico"]
+    if len(hist) > 1:
+        h = hist.copy()
+        h["pct"] = pd.to_numeric(h["pct"])
+        h["run_time"] = pd.to_datetime(h["run_time"])
+        st.line_chart(h.set_index("run_time")["pct"], height=140, y_label="% válidas")
+    with st.expander("Resultado por tabela"):
+        st.dataframe(
+            ex.rename(columns={
+                "tabela": "Tabela", "qtd_regras": "Regras", "total_linhas": "Linhas",
+                "linhas_com_erro": "Com erro", "linhas_com_aviso": "Com aviso",
+                "linhas_validas": "Válidas", "pct_linhas_validas": "% válidas",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+    return por_regra
+
+
+def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_editar: bool) -> None:
+    if regras.empty:
+        st.info("Nenhuma regra ainda. Crie a primeira na aba **➕ Nova regra**.")
+        return
+    for r in regras.to_dict("records"):
+        ativa = str(r.get("ativa")).lower() == "true"
+        rid = str(r["id"])
+        with st.container(border=True):
+            a, b = st.columns([5, 2])
+            crit = "🔴 Erro" if r.get("criticidade") == "error" else "🟡 Aviso"
+            a.markdown(
+                f"**{r.get('descricao') or r['nome']}**  \n"
+                f"{crit} · `{r['tabela']}`"
+                + (f" · coluna `{r['coluna']}`" if r.get("coluna") else "")
+                + f" · {_RQ_TIPOS.get(r.get('tipo'), _RQ_FUNCAO_LABEL.get(r.get('funcao'), r.get('funcao')))}"
+                + ("" if ativa else " · ⏸️ *desativada*")
+            )
+            linhas = []
+            if rid in por_regra:
+                f, pct = por_regra[rid]
+                linhas.append(("✅ sem falhas" if f == 0 else f"❌ {f} linha(s) com falha")
+                              + f" na última verificação ({pct}% conforme)")
+            if r.get("teste_total") not in (None, ""):
+                linhas.append(f"Teste ao criar: {r['teste_falhas']} de {r['teste_total']} linha(s) violavam")
+            if r.get("origem") and r["origem"] != "app":
+                linhas.append(f"Origem: {r['origem']}")
+            if linhas:
+                a.caption(" · ".join(linhas))
+            with a.expander("Definição técnica (DQX)"):
+                st.code(json.dumps({"name": r["nome"], "criticality": r["criticidade"],
+                                    "check": {"function": r["funcao"],
+                                              "arguments": json.loads(r["argumentos"] or "{}")}},
+                                   ensure_ascii=False, indent=2), language="json")
+            if pode_editar:
+                if b.button("⏸️ Desativar" if ativa else "▶️ Ativar", key=f"rq_tog_{rid}",
+                            use_container_width=True):
+                    run_exec(
+                        f"UPDATE {_cad('regras_qualidade')} SET ativa = {'false' if ativa else 'true'}, "
+                        f"atualizado_em = current_timestamp(), atualizado_por = {q_str(user)} "
+                        f"WHERE id = {int(r['id'])}")
+                    _log_cadastro(user, "regras_qualidade", "UPDATE", rid,
+                                  {"ativa": ativa}, {"ativa": not ativa})
+                    _finish_write("Regra " + ("desativada." if ativa else "ativada."))
+                if b.button("🗑️ Excluir", key=f"rq_del_{rid}", use_container_width=True):
+                    st.session_state[f"rq_conf_{rid}"] = True
+                if st.session_state.get(f"rq_conf_{rid}"):
+                    b.warning("Excluir de vez?")
+                    if b.button("Sim, excluir", key=f"rq_del_ok_{rid}", type="primary",
+                                use_container_width=True):
+                        run_exec(f"DELETE FROM {_cad('regras_qualidade')} WHERE id = {int(r['id'])}")
+                        _log_cadastro(user, "regras_qualidade", "DELETE", rid,
+                                      {"nome": r["nome"], "funcao": r["funcao"]}, None)
+                        st.session_state.pop(f"rq_conf_{rid}", None)
+                        _finish_write("Regra excluída.")
+
+
+def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
+    tabelas = _rq_tabelas_lineage(cur)
+    sid = cur["id"]
+    st.caption(
+        "Escolha a tabela e o tipo de regra; o app monta a regra do DQX. Use **🧪 Testar** "
+        "para ver quantas linhas violariam hoje antes de salvar. A regra salva já entra "
+        "no próximo monitoramento."
+    )
+    tabela = st.selectbox("Tabela", tabelas, key=f"rq_tab_{sid}",
+                          help="As tabelas vêm do lineage do indicador, definido pela Engenharia.")
+    cat, sch, tbl = tabela.split(".")
+    try:
+        cols = get_columns(user, cat, sch, tbl)
+    except Exception as exc:
+        st.error(f"Não foi possível ler as colunas de `{tabela}`: {exc}")
+        return
+    nomes = [c.name for c in cols]
+    tipos_col = {c.name: c.data_type for c in cols}
+    tipo = st.selectbox("Tipo de regra", list(_RQ_TIPOS), format_func=_RQ_TIPOS.get,
+                        key=f"rq_tipo_{sid}")
+    p: dict = {}
+    coluna = ""
+    if tipo != "expressao":
+        coluna = st.selectbox("Coluna", nomes, key=f"rq_col_{sid}_{tabela}",
+                              format_func=lambda n: f"{n}  ·  {tipos_col.get(n, '')}")
+    if tipo == "unico":
+        p["colunas_extra"] = st.multiselect(
+            "Combinada com (opcional)", [n for n in nomes if n != coluna], key=f"rq_ux_{sid}",
+            help="Para chave composta: a COMBINAÇÃO das colunas não pode se repetir.")
+    elif tipo == "lista":
+        txt = st.text_area("Valores permitidos (um por linha)", key=f"rq_vals_{sid}", height=110)
+        p["valores"] = [v.strip() for v in txt.splitlines() if v.strip()]
+        p["obrigatorio"] = st.checkbox("Também não pode ficar vazio", key=f"rq_obr_{sid}")
+    elif tipo == "intervalo":
+        x, y = st.columns(2)
+        p["minimo"] = x.text_input("Mínimo", key=f"rq_min_{sid}", placeholder="ex.: 0")
+        p["maximo"] = y.text_input("Máximo", key=f"rq_max_{sid}", placeholder="ex.: 100")
+        st.caption("Número ou data (AAAA-MM-DD). Deixe um dos dois vazio para limitar só de um lado.")
+    elif tipo == "existe_em":
+        x, y = st.columns(2)
+        p["ref_tabela"] = x.text_input("Tabela de referência (catálogo.schema.tabela)",
+                                       key=f"rq_rt_{sid}")
+        p["ref_coluna"] = y.text_input("Coluna na tabela de referência", key=f"rq_rc_{sid}")
+    elif tipo == "expressao":
+        p["texto"] = st.text_area(
+            "Descreva a regra em português", key=f"rq_txt_{sid}", height=80,
+            placeholder="ex.: o desconto não pode ser maior que o valor bruto")
+        if LLM_ENABLED and st.button("🤖 Escrever em SQL com IA", key=f"rq_ia_{sid}",
+                                     disabled=not p["texto"].strip()):
+            with st.spinner("A IA está escrevendo a regra…"):
+                try:
+                    g = gerar_regra_sql(p["texto"], nomes)
+                    st.session_state[f"rq_expr_{sid}"] = g["expressao"]
+                    st.session_state[f"rq_msg_{sid}"] = g["mensagem"]
+                    st.session_state[f"rq_expl_{sid}"] = g["explicacao"]
+                except Exception as exc:
+                    st.error(f"A IA não conseguiu escrever a regra: {exc}")
+        if st.session_state.get(f"rq_expl_{sid}"):
+            st.info("**O que a IA entendeu:** " + st.session_state[f"rq_expl_{sid}"])
+        p["expressao"] = st.text_input(
+            "Condição que o dado CORRETO cumpre (SQL)", key=f"rq_expr_{sid}",
+            help="Linha que torna a condição FALSA é a que viola a regra. Revise antes de testar.")
+        p["mensagem"] = st.text_input("Mensagem quando a regra falha", key=f"rq_msg_{sid}")
+
+    crit = st.radio("Gravidade", list(_RQ_CRITICIDADE), format_func=_RQ_CRITICIDADE.get,
+                    key=f"rq_crit_{sid}", horizontal=True)
+    descricao = st.text_input(
+        "Descrição (como aparece no painel)", key=f"rq_desc_{sid}",
+        placeholder=_rq_descricao_padrao(tipo, coluna, p) if (coluna or tipo == "expressao") else "")
+
+    try:
+        funcao, argumentos, cond = _rq_montar(tipo, coluna, p)
+        erro_def = None
+    except ValueError as exc:
+        funcao, argumentos, cond, erro_def = None, None, None, str(exc)
+
+    assinatura = json.dumps([tabela, funcao, argumentos], sort_keys=True, ensure_ascii=False, default=str)
+    teste = st.session_state.get(f"rq_teste_{sid}")
+    if teste and teste.get("assinatura") != assinatura:
+        teste = None  # regra mudou depois do teste
+
+    b1, b2 = st.columns(2)
+    if b1.button("🧪 Testar", key=f"rq_test_{sid}", use_container_width=True, disabled=bool(erro_def)):
+        with st.spinner("Testando a regra na tabela…"):
+            try:
+                t = testar_regra_qualidade(tabela, tipo, argumentos, cond)
+                t["assinatura"] = assinatura
+                st.session_state[f"rq_teste_{sid}"] = teste = t
+            except Exception as exc:
+                st.error(f"A regra não rodou na tabela — revise a definição. Detalhe: {exc}")
+    if erro_def and (coluna or p.get("texto")):
+        st.caption(f"⚠️ {erro_def}")
+    if teste:
+        if teste["falhas"] == 0:
+            st.success(f"✅ Nenhuma das {teste['total']} linha(s) viola a regra hoje.")
+        else:
+            st.warning(f"❌ {teste['falhas']} de {teste['total']} linha(s) violariam a regra hoje. "
+                       "Exemplos:")
+            st.dataframe(teste["amostra"], use_container_width=True, hide_index=True)
+
+    nome_tecnico = _rq_slug(descricao or _rq_descricao_padrao(tipo, coluna, p))
+    existentes = set(regras["nome"].tolist()) if not regras.empty else set()
+    if b2.button("💾 Salvar regra", key=f"rq_save_{sid}", type="primary", use_container_width=True,
+                 disabled=bool(erro_def)):
+        if nome_tecnico in existentes:
+            st.error("Já existe uma regra com essa descrição neste indicador — mude a descrição.")
+            return
+        _rq_salvar(user, sid, tabela, nome_tecnico,
+                   descricao or _rq_descricao_padrao(tipo, coluna, p), tipo, coluna, p,
+                   crit, funcao, argumentos, teste)
+        for k in [k for k in st.session_state if k.startswith("rq_") and k.endswith(f"_{sid}")]:
+            st.session_state.pop(k, None)
+        _finish_write("Regra salva e ativa — entra no próximo monitoramento.")
+    if not teste and not erro_def:
+        st.caption("Dica: teste antes de salvar — o resultado do teste fica registrado na regra.")
+
+
+def page_regras_qualidade() -> None:
+    """Regras de qualidade (DQX) dos indicadores do Power Steward."""
+    st.title("🛡️ Regras de Qualidade")
+    st.caption(
+        "Defina, em português, o que é dado bom para o seu indicador. As regras valem para "
+        "as tabelas do lineage e são verificadas pelo monitoramento de qualidade (DQX) — "
+        "por enquanto só **monitoram**: nada é bloqueado nos pipelines."
+    )
+    _show_cad_feedback()
+    user = st.session_state.get("user") or current_username()
+    is_admin = st.session_state.get("role") == "admin"
+
+    ind = list_indicadores()
+    recs = [{**r, "id": int(r["id"])} for r in ind.to_dict("records")] if not ind.empty else []
+    if not is_admin:
+        recs = [r for r in recs if str(r.get("power_steward") or "").lower() == (user or "").lower()]
+    if not recs:
+        st.info("Você ainda não é o Power Steward de nenhum indicador.")
+        return
+    com_lineage = [r for r in recs if _rq_tabelas_lineage(r)]
+    sem_lineage = [r["nome"] for r in recs if not _rq_tabelas_lineage(r)]
+    if sem_lineage:
+        st.caption("Aguardando a Engenharia definir as tabelas: " + ", ".join(sem_lineage))
+    if not com_lineage:
+        st.info(
+            "Nenhum dos seus indicadores tem as tabelas definidas ainda. As regras são "
+            "escritas sobre as tabelas do lineage — a Engenharia define isso em "
+            "**Indicadores — Engenharia**."
+        )
+        return
+
+    ids = [r["id"] for r in com_lineage]
+    preset = st.session_state.pop("_rq_preset", None)
+    if preset in ids:
+        st.session_state["rq_sel"] = preset
+    sel = st.selectbox("Indicador", ids, key="rq_sel",
+                       format_func=lambda i: next(r["nome"] for r in com_lineage if r["id"] == i))
+    cur = next(r for r in com_lineage if r["id"] == sel)
+    pode_editar = is_admin or str(cur.get("power_steward") or "").lower() == (user or "").lower()
+    st.markdown(
+        f"**Power Steward:** {cur.get('power_steward') or '—'} · **Tabelas:** "
+        + ", ".join(f"`{t}`" for t in _rq_tabelas_lineage(cur))
+    )
+    _render_dashboards_do_indicador(cur["id"])
+
+    regras = list_regras_qualidade(sel)
+    por_regra = _render_rq_resumo(cur, regras)
+    st.divider()
+    aba_lista, aba_nova = st.tabs([f"📋 Regras ({len(regras)})", "➕ Nova regra"])
+    with aba_lista:
+        _render_rq_lista(user, regras, por_regra, pode_editar)
+    with aba_nova:
+        if pode_editar:
+            _render_rq_nova(user, cur, regras)
+        else:
+            st.info("Só o Power Steward do indicador (ou um admin) cria regras.")
+
+
 def page_indicadores_engenharia() -> None:
     """Fila de indicadores enviados pelo negócio (tela Indicador): escolha
     das tabelas/colunas que formam Dimensão e Métrica, seguida do pipeline
@@ -8164,6 +8752,12 @@ def main() -> None:
             pg_metric_view = st.Page(page_metric_view, title="Metric View", icon="📐")
             nav_pages["metric_view"] = pg_metric_view
             cadastros += [pg_indicadores, pg_metric_view]
+            # Regras de qualidade (DQX) — PoC, opt-in por DQX_RESULTADOS_SCHEMA.
+            if DQX_RESULTADOS_SCHEMA:
+                pg_regras_qualidade = st.Page(
+                    page_regras_qualidade, title="Regras de Qualidade", icon="🛡️")
+                nav_pages["regras_qualidade"] = pg_regras_qualidade
+                cadastros.append(pg_regras_qualidade)
         pages["Cadastros"] = cadastros
 
     # Usuários (antiga "Usuários & Permissões") — sempre admin-only, agora num

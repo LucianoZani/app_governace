@@ -36,6 +36,7 @@ sync:
     - "*.md"
     - "docs/**"
     - "docs-produto/**"
+    - "dqx/**"          # notebooks do job DQX (rodam no workspace, não no app)
 
 resources:
   apps:
