@@ -1766,3 +1766,43 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   6. Ajustar dados de dev: URLs de dashboards (workspace dev), Desconto Total (MV em
      `comgas_dev` + tabela de `nie_dev`, inexistente em prd). Pedido do Vinicius (id 1) vai
      pendente para prd — Rafael (`cs397756`) decide lá.
+
+- **2026-10-07** — 🆕 **PoC: regras de qualidade (DQX) por indicador, escritas pelo
+  negócio no app.** ⚠️ **Só no Free** — decisão do usuário: NÃO portar para o bundle da
+  Comgás agora; projeto "na manga" (candidato a oferecer à Honda/DAMA também). Commit
+  `feat: regras de qualidade (DQX) por indicador — PoC` (não pushado).
+  - Visão do usuário: indicador com dono (PS) → Engenharia monta lineage/MV → PS refina
+    com regras de qualidade → job DQX **monitora** e alimenta dashboard de qualidade.
+    Fase 2 (quando maduro): as mesmas regras no pipeline (quarentena). Decidido: regra de
+    qualidade **não** vira `filter:` da MV (esconderia o problema); quem cria = PS do
+    indicador (admin também), ativação direta; página própria.
+  - App: página **"🛡️ Regras de Qualidade"** (Cadastros, `cadastro_completo`; opt-in por
+    `DQX_RESULTADOS_SCHEMA`, no Free = `dev.dqx`). 7 modelos em português →
+    funções DQX 0.16 (`_rq_montar`): não vazio, único (composto), lista, intervalo
+    (mín/máx, número ou data), data no futuro, existe em outra tabela (`foreign_key`),
+    regra livre (`sql_expression`, com IA `gerar_regra_sql` + `_validar_expr_sql_segura`).
+    **Testar** (`testar_regra_qualidade`, OBO) conta violações no warehouse com a MESMA
+    semântica do DQX. Tabela `regras_qualidade` nos cadastros (funcao/argumentos já no
+    formato DQX). Resumo da última verificação + histórico via `_dqx_resultados`.
+  - App NÃO roda DQX (sem Spark). Job = notebook `dqx/03_aplicar` (agora versionado em
+    `dqx/`, fora do sync do app): lê regras **ativas** do app, aplica por
+    indicador × tabela, grava `dev.dqx.execucoes` / `metricas_regras` / `falhas`
+    (append, com `indicador_id`/`regra_id`). Roda como o usuário (lê os cadastros —
+    ALL PRIVILEGES no schema); o SP do app lê `dev.dqx` (ALL PRIVILEGES no catálogo `dev`).
+    Hoje só via `jobs submit` (sem agendamento).
+  - Pegadinhas do DQX 0.16: em `allowed`, texto sem aspas simples = NOME DE COLUNA (literal
+    vai `"'erp1'"`; o app faz sozinho) — `validate_checks` não pega; `_errors`/`_warnings`
+    vêm NULOS (não lista vazia) quando a linha está ok; serverless não aceita `.cache()`.
+  - As 20 regras revisadas de 05/10 (`dqx/checks/fct_pedidos.yml`, notebooks 01/02 feitos
+    numa sessão fora daqui) foram importadas p/ o indicador **Margem bruta** (id 4).
+    1ª execução: 17 linhas, 12 válidas (70,6%), 5 falhas (os casos plantados).
+  - 🔴 **Fix do `q_str`** (pendente desde 09-23): escape `''` virava concatenação no
+    Databricks; agora `\'` e `\`. Testado no warehouse (apóstrofo, barra, aspas, acento).
+    ⚠️ Vale portar para o bundle da Comgás (bug geral, não é parte do DQX).
+  - Não testado na UI (Chrome desconectado na sessão) — só as funções/consultas
+    (harness fora do Streamlit, contra dado real).
+
+  **▶️ PONTO DE RETOMADA (DQX):** (1) usuário abrir a página e testar (criar regra, testar,
+  ativar/desativar); (2) dashboard AI/BI sobre `dev.dqx.*` + cadastrar como Qualidade
+  vinculado ao Margem bruta; (3) agendar o `03_aplicar` (job diário, idealmente no bundle);
+  (4) depois: sugestão de regras pelo profiler a partir da página.
