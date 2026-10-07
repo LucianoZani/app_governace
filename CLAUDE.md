@@ -1721,3 +1721,48 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   não existe no workspace de prd) → grupo do warehouse. Pendentes: filtro/CSV na consulta de MV
   (proposto, não feito); `ps_permissoes` aberta demais (SELECT `account users`, MODIFY de vários
   grupos) — levar ao Greg; Bug 2 do pipeline (deveria rodar `bundle run power_steward`).
+
+- **2026-10-07 (4ª parte)** — Continuação do PRD. **Sessão interrompida: usuário vai
+  reiniciar a máquina (VPN sem rota — CLI e workspaces dev/prd com "Unauthorized network
+  access"; DNS resolvendo o IP público 52.254.24.96).**
+  - Greg deu **CAN_READ** na pasta `.../power-steward/prd` (listagem passou a funcionar) →
+    `apps deploy` em prd **SUCCEEDED** (deployment `01f1c24cc513…`), MAS o app subiu com o
+    **app.yaml de DEV**: o `config` do App no bundle é descontinuado e não é aplicado
+    (databricks/cli#4901). **App de PRD desligado** (STOPPED) pra não gravar em `comgas_dev`.
+  - Fix: **PR !59372** (mesclada em dev, `b8872f1`): um `app.yaml` único — warehouse via
+    `valueFrom: warehouse`; `PRD__<NOME>` sobrepõe `<NOME>` quando o host está em `PRD_HOSTS`
+    (`adb-6448854079193408.8…`): `ENVIRONMENT=prd`, `ALLOWED_CATALOGS=nie_prd,nie_prd_legacy,
+    comgas_prd`, `CADASTRO_CATALOG=comgas_prd`, `FINOPS_SNAPSHOT_TABLE=""`. Lógica em
+    `_aplicar_overrides_de_ambiente` (app.py). Removido `config` do target prd. Testado em dev
+    (deploy manual SUCCEEDED, RUNNING; não conferido visualmente). Só no bundle (repo principal
+    não precisa).
+  - **PR !59375 (`dev → main`)** aberta: Greg aprovou (Deployers + Tech Reviewers); **falta o
+    grupo `Reviewers - dados-ia-power-steward`** (Felipe). O voto do usuário NÃO conta pra esse
+    grupo (ele não é membro).
+  - Grants rodados pelo usuário (via `cloud-nie-governanca`, MANAGE no catálogo `comgas_prd`):
+    SP do App `ac448084…` → `USE CATALOG` em `comgas_prd` + `USE SCHEMA, CREATE TABLE, MODIFY,
+    SELECT` em `comgas_prd.dp_power_steward`; `tr073686` → `USE SCHEMA, CREATE TABLE` no schema.
+    ⚠️ schema é da automação `spn-prd-nie` — podem ser zerados; pedido ao Greg segue valendo.
+  - **Migração parcial**: DEEP CLONE OK de `ps_dashboards`, `ps_data_stewards`, `ps_dominios`;
+    **faltam 13** (franquias, glossario_negocio, indicadores, log_cadastros, log_comentarios,
+    log_tags, mapa_dominio_acesso, mapa_sensibilidade_acesso, padroes_dado_pessoal, permissoes,
+    solicitacoes_acesso, subdominios, tag_backlog) — caiu a VPN. Script:
+    `Documents/Projetos/Comgas/migracao-power-steward-prd.sql` (CREATE OR REPLACE, pode repetir
+    tudo). Depois: `ALTER TABLE … OWNER TO ac448084-…` (script já preenchido; classificador do
+    Claude Code pode bloquear → usuário roda) + conferência de contagens.
+  - Helper de SQL do Claude (scratchpad) quebrou porque o CLI agora imprime "Databricks skills
+    are not installed…" antes do JSON — pular até o primeiro `{`.
+
+  **▶️ PONTO DE RETOMADA (pós-reinício):**
+  1. Testar rede: `databricks current-user me -p comgas-nie-dev` (deve devolver o userName).
+  2. Rodar as 13 DEEP CLONE restantes (ou o script inteiro) → conferir contagem dev × prd das 16.
+  3. `ALTER TABLE … OWNER TO \`ac448084-ad73-4583-aa0b-0c85a6ca5669\`` nas 16.
+  4. Felipe aprova a !59375 → merge em main → confirmar `app.yaml` publicado em prd tem
+     `PRD_HOSTS`/`PRD__*` → `apps start` + `apps deploy power-steward --source-code-path
+     /Workspace/production/data-products/power-steward/prd/files/src/power-steward -p comgas`.
+  5. Abrir o app de PRD (sidebar: Warehouse `7db4076d9280cce9`, cadastros em comgas_prd).
+     Lembrar: com OBO, telas de leitura falham até existir o grupo com Can Use no warehouse
+     (proposto `GRP-POWER-STEWARD`, aguardando Greg).
+  6. Ajustar dados de dev: URLs de dashboards (workspace dev), Desconto Total (MV em
+     `comgas_dev` + tabela de `nie_dev`, inexistente em prd). Pedido do Vinicius (id 1) vai
+     pendente para prd — Rafael (`cs397756`) decide lá.
