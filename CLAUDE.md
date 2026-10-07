@@ -1806,3 +1806,17 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   ativar/desativar); (2) dashboard AI/BI sobre `dev.dqx.*` + cadastrar como Qualidade
   vinculado ao Margem bruta; (3) agendar o `03_aplicar` (job diário, idealmente no bundle);
   (4) depois: sugestão de regras pelo profiler a partir da página.
+
+- **2026-10-07 (2ª parte)** — **Metric View com metadados semânticos** (commit `b1171f7`):
+  `display_name` (medida = nome do indicador; dimensões = nome legível, siglas UF/CEP/ID…
+  em maiúsculas), `format` da medida pela Unidade (US$→USD, R$→BRL, %→percentage,
+  quantidade→number 0 casas; vazio/desconhecido = sem bloco — `format` malformado derruba
+  a definição), `synonyms` ≤ 10. Prefixo de alias de join (recomendação da skill oficial)
+  NÃO aplicado: `expr_validada` já referencia os aliases atuais (ex. Margem bruta).
+  **Receita de Vendas republicado no Free** via `ALTER VIEW` (DDL do próprio app, comentários
+  reinjetados): comentário da view, 9 comentários de coluna e tags preservados; MEASURE
+  66.471 antes e depois; metadados conferidos no `DESCRIBE ... AS JSON`.
+  Skills oficiais da Databricks instaladas (`databricks aitools install`, plugin v0.2.x);
+  a `databricks-metric-views` ainda diz "joins só many-to-one" — a doc atual tem
+  `cardinality: one_to_many` (DBR 18.1+), candidato para o caso `ft_margem` da Comgás.
+  Commits locais não pushados: `02e3536`, `8f0d224`, `b1171f7`.
