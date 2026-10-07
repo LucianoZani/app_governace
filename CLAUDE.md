@@ -1651,3 +1651,32 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   mesclada → acompanhar `deploy_prd` → SP do App (`databricks apps get power-steward -p
   comgas`) → Greg: item (3) + CREATE TABLE temporário → `migracao-power-steward-prd.sql` →
   abrir o app → ajustar dados dev-específicos.
+
+- **2026-10-07 (2ª parte)** — **Pedido de consulta a Metric View passa a ser decidido pelo
+  Power Steward do indicador** (pedido do usuário: "precisam receber a aprovação do dono do
+  indicador, não a minha"). Repo principal `8d47e67` + fix `6da51ab`; bundle **PR !59349**
+  (mesclada + redeploy manual) e **PR !59350** (fix, **aberta** — o fix já está no ar em dev
+  via `workspace import` + `apps deploy`; se a !59350 não entrar, o próximo deploy do pipeline
+  volta o código com o bug).
+  - Página Metric View: bloco **"📥 Pedidos de consulta aos seus indicadores"** (Aprovar/Negar)
+    para o PS dos indicadores; admin vê todos e decide quando o PS não puder. "Consulta
+    liberada / Revogar" agora também para o PS. Pedidos de MV saíram da fila de Solicitações
+    de Acesso (admin). Início avisa o PS quando há pedidos. Helpers `_pedidos_mv_recebidos`,
+    `_render_pedidos_recebidos_mv`.
+  - 🔴 Bug achado no teste (existia desde a !59251): `id` do indicador vem como **texto** do
+    Statement Execution e os pedidos usam int → indicador liberado não aparecia na página
+    Metric View (o menu de Dashboards já convertia). Fix: normaliza `id` para int na página.
+  - **Testado ao vivo em dev, ponta a ponta**, simulando PS sem acesso com o próprio usuário
+    (`ps_permissoes.papel` admin→editor→admin por `UPDATE` rodado pelo usuário no SQL Editor —
+    o classificador do Claude Code bloqueia esse UPDATE e grants; usuário se deu `MODIFY` em
+    `ps_permissoes`/`ps_solicitacoes_acesso`): antes de aprovar some da página e o Analítico
+    some do menu; pedido grava `indicador_id`; aprovar pelo bloco novo; depois aparece
+    "· só consulta", Documentar só leitura, Analítico volta; Revogar → `revogado`. Linha de
+    permissão conferida igual à original. Pedido de teste (`id=2`) ficou como `revogado`.
+  - Pedido **real** pendente: Vinicius (`cs318382`) → Desconto Total (PS `cs397756`).
+  - 🔴 Achado de segurança (levar ao Greg): em `comgas_dev.dp_power_steward.ps_permissoes`,
+    `account users` tem SELECT e vários grupos têm MODIFY (`cloud-nie-eng-dados(-squad)`,
+    `cloud-nie-cien-dados(-squad)`, `cloud-nie-cien-lt`, `cloud-nie-lt`) → qualquer membro
+    pode se tornar admin do app por SQL. Provavelmente vem do schema (automação `spn-dev-nie`);
+    conferir também em `comgas_prd.dp_power_steward`.
+  - Detalhe: número da consulta da MV sai sem formatação (18 casas decimais).
