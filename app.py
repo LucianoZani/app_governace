@@ -2379,6 +2379,30 @@ def _mv_solicitacoes(usuario: str) -> dict[int, str]:
     return out
 
 
+def _pedidos_mv_recebidos(user: str, is_admin: bool) -> list[dict]:
+    """Pedidos pendentes de consulta a Metric View que cabem a `user` decidir:
+    os dos indicadores em que ele é o Power Steward. Admin recebe todos
+    (decide quando o PS não puder). Cada item ganha `indicador_nome`."""
+    try:
+        df = list_solicitacoes_acesso("pendente")
+        ind = list_indicadores()
+    except Exception:
+        return []
+    if df.empty or ind.empty:
+        return []
+    df = df[df["indicador_id"].notna()]
+    donos = {
+        int(r["id"]): (str(r.get("power_steward") or "").lower(), r["nome"])
+        for r in ind.to_dict("records")
+    }
+    out = []
+    for r in df.to_dict("records"):
+        ps, nome = donos.get(int(r["indicador_id"]), ("", "?"))
+        if is_admin or (ps and ps == (user or "").lower()):
+            out.append({**r, "indicador_nome": nome})
+    return out
+
+
 def _decidir_solicitacao_acesso(item: dict, status: str, aprovador: str, comentario: str) -> None:
     run_exec(
         f"UPDATE {_cad('solicitacoes_acesso')} SET status = {q_str(status)}, "
@@ -6043,7 +6067,8 @@ def _render_pedido_consulta_mv(user: str, outros: list[dict], pedidos: dict[int,
     with st.expander("🔑 Consultar a Metric View de outro indicador", expanded=False):
         st.caption(
             "Cada Power Steward vê só as Metric Views dos seus indicadores. Para "
-            "consultar a de outro indicador, peça acesso — um admin decide. O acesso "
+            "consultar a de outro indicador, peça acesso — o Power Steward do indicador "
+            "decide. O acesso "
             "liberado é **só para consulta** (inclui os dashboards analíticos do "
             "indicador); a documentação continua com o Power Steward do indicador."
         )
@@ -6065,7 +6090,7 @@ def _render_pedido_consulta_mv(user: str, outros: list[dict], pedidos: dict[int,
         motivo = st.text_area("Por que você precisa consultar?", key="mv_pedido_motivo")
         if st.button("Enviar pedido", key="mv_pedido_btn", type="primary"):
             if not motivo.strip():
-                st.warning("Conte por que você precisa — ajuda o admin a decidir.")
+                st.warning("Conte por que você precisa — ajuda o Power Steward a decidir.")
                 return
             nome_ind = next(r["nome"] for r in pediveis if r["id"] == sel)
             perms = st.session_state.get("perms", {}) or {}
@@ -6076,16 +6101,56 @@ def _render_pedido_consulta_mv(user: str, outros: list[dict], pedidos: dict[int,
                     motivo.strip(), indicador_id=sel,
                 )
                 st.session_state["save_feedback"] = [
-                    ("success", "✅ Pedido enviado. Um admin vai revisar.")
+                    ("success", "✅ Pedido enviado. O Power Steward do indicador vai revisar.")
                 ]
             except Exception as exc:
                 st.session_state["save_feedback"] = [("error", f"Falha ao enviar: {exc}")]
             st.rerun()
 
 
+def _render_pedidos_recebidos_mv(user: str, pedidos: list[dict], is_admin: bool) -> None:
+    """Pedidos pendentes de consulta às Metric Views do Power Steward (admin vê
+    todos). Aprovar libera a consulta no app na hora; revogar depois em
+    "Consulta liberada", com o indicador selecionado."""
+    if not pedidos:
+        return
+    with st.container(border=True):
+        st.markdown(f"##### 📥 Pedidos de consulta aos seus indicadores · {len(pedidos)}")
+        if is_admin:
+            st.caption(
+                "Quem decide é o Power Steward do indicador. Como admin, você vê "
+                "todos e pode decidir quando ele não puder."
+            )
+        for r in pedidos:
+            quem = r.get("nome") or r["usuario"]
+            st.markdown(
+                f"**{quem}** (`{r['usuario']}`) quer consultar **{r['indicador_nome']}**  \n"
+                f"<small>{_fmt_ts(r.get('criado_em'))} · {r.get('motivo') or '—'}</small>",
+                unsafe_allow_html=True,
+            )
+            c1, c2, _ = st.columns([1, 1, 4])
+            for col, status, rotulo, tipo in (
+                (c1, "aprovado", "✅ Aprovar", "primary"),
+                (c2, "negado", "❌ Negar", "secondary"),
+            ):
+                if col.button(rotulo, key=f"mv_dec_{status}_{r['id']}", type=tipo):
+                    run_exec(
+                        f"UPDATE {_cad('solicitacoes_acesso')} SET status = {q_str(status)}, "
+                        f"decidido_por = {q_str(user)}, decidido_em = current_timestamp() "
+                        f"WHERE id = {int(r['id'])} AND status = 'pendente'"
+                    )
+                    list_solicitacoes_acesso.clear()
+                    st.session_state["save_feedback"] = [(
+                        "success",
+                        f"✅ Consulta liberada para {quem}." if status == "aprovado"
+                        else f"🚫 Pedido de {quem} negado.",
+                    )]
+                    st.rerun()
+
+
 def _render_consultas_liberadas_mv(cur: dict) -> None:
-    """Admin: quem tem consulta liberada (pedido aprovado) a esta Metric View,
-    com opção de revogar."""
+    """Power Steward do indicador (ou admin): quem tem consulta liberada
+    (pedido aprovado) a esta Metric View, com opção de revogar."""
     try:
         df = list_solicitacoes_acesso("aprovado")
     except Exception:
@@ -6154,6 +6219,7 @@ def page_metric_view() -> None:
     recs = todos if is_admin else [r for r in todos if r["id"] in meus or r["id"] in liberados]
     outros = [r for r in todos if r["id"] not in meus and r["id"] not in liberados]
 
+    _render_pedidos_recebidos_mv(user, _pedidos_mv_recebidos(user, is_admin), is_admin)
     if not is_admin:
         _render_pedido_consulta_mv(user, outros, pedidos)
     if not recs:
@@ -6186,7 +6252,7 @@ def page_metric_view() -> None:
     c1.markdown(f"**Metric View**\n\n`{fqn}`")
     c2.markdown(f"**Power Steward**\n\n{cur.get('power_steward') or '—'}")
     _render_dashboards_do_indicador(cur["id"])
-    if is_admin:
+    if pode_editar:
         _render_consultas_liberadas_mv(cur)
 
     partes = _split_fqn(fqn)
@@ -7445,9 +7511,9 @@ def page_solicitacoes_acesso() -> None:
     st.caption(
         "Pedidos enviados por usuários na tela **Solicitar Acesso**. Aprovar/negar "
         "aqui só registra a decisão — quem de fato concede o acesso é você, à mão, "
-        "marcando as flags certas em **Usuários**. Exceção: pedidos de **consulta "
-        "à Metric View** de um indicador (feitos na página Metric View) liberam a "
-        "consulta no app assim que aprovados — revogue na própria página Metric View."
+        "marcando as flags certas em **Usuários**. Pedidos de **consulta à Metric "
+        "View** de um indicador não aparecem aqui: quem decide é o Power Steward do "
+        "indicador, na página **Metric View** (onde o admin também pode decidir)."
     )
     _show_cad_feedback()
     user = st.session_state.get("user", "")
@@ -7457,6 +7523,7 @@ def page_solicitacoes_acesso() -> None:
     except Exception as exc:
         st.warning(f"Não foi possível ler as solicitações: {exc}")
         return
+    pend = pend[pend["indicador_id"].isna()] if not pend.empty else pend
 
     if pend.empty:
         st.success("Nenhuma solicitação pendente. 🎉")
@@ -7877,6 +7944,13 @@ def page_inicio() -> None:
         st.caption("Acesso de leitura — use o glossário e o Assistente para explorar o que já existe.")
 
     st.divider()
+
+    if is_power or is_admin:
+        n_mv = len(_pedidos_mv_recebidos(user, is_admin))
+        if n_mv:
+            st.info(f"📥 **{n_mv}** pedido(s) de consulta às Metric Views "
+                    f"{'dos indicadores' if is_admin else 'dos seus indicadores'} aguardando decisão.")
+            _atalho("metric_view", "Abrir Metric View", "📐")
 
     # ---- Números ----
     novos = _novos_na_semana()
