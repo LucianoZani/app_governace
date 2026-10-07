@@ -1680,3 +1680,44 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
     pode se tornar admin do app por SQL. Provavelmente vem do schema (automação `spn-dev-nie`);
     conferir também em `comgas_prd.dp_power_steward`.
   - Detalhe: número da consulta da MV sai sem formatação (18 casas decimais).
+
+- **2026-10-07 (3ª parte)** — **App `power-steward` criado em PRD** (`cg-prd-dbw-nie-001`).
+  - Greg deu **Can manage** no warehouse `7db4076d9280cce9` ao `spn-dados-ia-dbx-apps-exp`
+    (ACL agora: `spn-prd-nie` Owner, `Admins`, `cloud-nie-adm`, `-exp` Manage — o
+    `pwsteward-prd` e o runner sumiram: a automação reescreve o ACL).
+  - !59350 mesclada; **!59329 (`dev → main`) mesclada** (faltava o grupo `Reviewers -
+    dados-ia-power-steward`, aprovado). Run `#20261007.4` (build 113875) do
+    `power-steward-deploy` (definitionId 1063): 71 arquivos em
+    `/Workspace/production/data-products/power-steward/prd/files`, `Created apps.power_steward`
+    + job `wf_catalogacao_ia_publisher`; depois o Bug 2 (`--auto-approve`) de novo.
+  - App: URL `https://power-steward-6448854079193408.8.azure.databricksapps.com`, **SP
+    `app-2ucifx power-steward` (`ac448084-ad73-4583-aa0b-0c85a6ca5669`)**, warehouse novo
+    anexado com CAN_USE, escopo `sql` efetivo. Sem deployment.
+  - 🔴 `apps deploy` manual falha: `no files found. Please check if app Service Principal has
+    access to the source code folder`. A pasta de prd só dá acesso ao deployer (Manage),
+    `pwsteward-prd` (Run) e runner (View); o usuário (`cloud-nie-governanca`) nem lista. Em dev
+    funciona porque o target dá CAN_MANAGE na pasta ao `cloud-nie-governanca` — em prd não dá
+    para repetir no target (conflita com o `CAN_MANAGE_RUN` que os jobs da catalogação dão ao
+    mesmo grupo). **Pedido ao Greg: CAN_READ na pasta `.../power-steward/prd` para o SP do App
+    e para `cloud-nie-governanca`** (ACL manual na pasta; o bundle só avisa, não remove).
+  - Decisão do warehouse (msg do Greg: `users` com Can Use = uso direto/concorrência/custo;
+    SPN-only perde permissão por asset): proposto **grupo dedicado** (ex. `GRP-POWER-STEWARD`)
+    com PS, Data Stewards, Engenharia e admins. Só as telas OBO precisam (Governança de Dados,
+    Metric View, Engenharia/testar, FinOps ao vivo, revisão de catalogação IA, tools de
+    descoberta do assistente); Glossário/Indicador/Cadastros/Solicitar Acesso rodam via SP.
+    Usuário decidiu: MV no app só para PS; o resto do negócio consome Metric View/dashboards
+    pela plataforma. **Aguardando o Greg** (quem cria o grupo).
+  - `migracao-power-steward-prd.sql` com o SP do App preenchido. Rodar ANTES de abrir o app
+    (senão `ensure_cadastro_tables` cria tabelas vazias; o `CREATE OR REPLACE … DEEP CLONE`
+    sobrescreveria, mas é mais limpo antes). Falta: CREATE TABLE no schema
+    `comgas_prd.dp_power_steward` para quem roda + o SP do App na automação do `spn-prd-nie`
+    (Can Use no warehouse; USE SCHEMA/CREATE TABLE/MODIFY no schema; USE CATALOG/USE SCHEMA/
+    MODIFY em `nie_prd`, `nie_prd_legacy`, `comgas_prd`).
+
+  **▶️ PONTO DE RETOMADA:** Greg: CAN_READ na pasta de prd → `apps deploy power-steward
+  --source-code-path /Workspace/production/data-products/power-steward/prd/files/src/power-steward
+  -p comgas` → grants do SP do App (automação) → migração → abrir o app → ajustar dados de dev
+  (URLs de dashboards; Desconto Total aponta para MV em `comgas_dev` + tabela de `nie_dev`, que
+  não existe no workspace de prd) → grupo do warehouse. Pendentes: filtro/CSV na consulta de MV
+  (proposto, não feito); `ps_permissoes` aberta demais (SELECT `account users`, MODIFY de vários
+  grupos) — levar ao Greg; Bug 2 do pipeline (deveria rodar `bundle run power_steward`).
