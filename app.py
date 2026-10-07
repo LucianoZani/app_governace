@@ -3778,6 +3778,40 @@ def _yaml_comment(txt: str) -> str:
     return (txt or "").replace('"', "'").replace("\n", " ").strip()
 
 
+def _yaml_format_medida(unidade: str | None) -> list[str]:
+    """Bloco `format:` da medida a partir da Unidade do indicador (YAML 1.1,
+    DBR 17.3+). Todo bloco precisa do `type` — um bloco malformado derruba a
+    definição inteira (METRIC_VIEW_INVALID_VIEW_DEFINITION), então só gera
+    para unidades reconhecidas; o resto fica sem `format`."""
+    u = (unidade or "").strip().lower()
+    if not u:
+        return []
+    casas = lambda n: ["      decimal_places:", "        type: exact", f"        places: {n}"]  # noqa: E731
+    if "us$" in u or "usd" in u or "dólar" in u or "dolar" in u:
+        return ["    format:", "      type: currency", "      currency_code: USD"] + casas(2)
+    if "r$" in u or "brl" in u or "real" in u or "reais" in u:
+        return ["    format:", "      type: currency", "      currency_code: BRL"] + casas(2)
+    if "%" in u or "percent" in u:
+        return ["    format:", "      type: percentage"]
+    if u in ("quantidade", "qtd", "qtde", "unidades", "contagem"):
+        return ["    format:", "      type: number"] + casas(0)
+    return ["    format:", "      type: number"]
+
+
+def _yaml_display_name(texto: str) -> str:
+    """Rótulo legível (máx. 255) para `display_name`: nome de coluna vira
+    "Segmento erp1"; nomes digitados por gente ficam como estão."""
+    t = (texto or "").strip()
+    if t and t == t.lower() and " " not in t:
+        palavras = t.split("_")
+        # Siglas conhecidas ficam em maiúsculas: "uf" → "UF".
+        siglas = {"uf", "cep", "cpf", "cnpj", "id", "sku", "kpi", "ddd", "erp", "icms", "iss", "pis"}
+        palavras = [p.upper() if p in siglas else p for p in palavras]
+        t = " ".join(palavras)
+        t = t[:1].upper() + t[1:]
+    return _yaml_comment(t)[:255]
+
+
 def montar_yaml_metric_view(indicador: dict, comentarios: dict[str, str] | None = None) -> str:
     """Monta o YAML da Metric View (Passo 4) só transcrevendo campos já
     estruturados do indicador — determinístico, sem IA envolvida. Exige
@@ -3828,12 +3862,17 @@ def montar_yaml_metric_view(indicador: dict, comentarios: dict[str, str] | None 
 
     nome_medida = _slugify(indicador["nome"])
     comment = _yaml_comment(comentarios.get(nome_medida, "")) or _montar_comentario_metric_view(indicador)
-    synonyms = [s.strip() for s in (indicador.get("palavras_chave") or "").split(",") if s.strip()]
+    # Genie aceita até 10 sinônimos por campo (DBR 17.3+).
+    synonyms = [s.strip() for s in (indicador.get("palavras_chave") or "").split(",") if s.strip()][:10]
     filtro_sql = (indicador.get("filtro_sql") or "").strip()
 
     linhas = ["version: 1.1", f"source: {catalogo}.{schema}.{tabela}"]
 
-    def _dim_comment(nome_dim: str) -> None:
+    def _dim_comment(nome_dim: str, rotulo: str = "") -> None:
+        # display_name (DBR 17.3+): rótulo legível em dashboards e no Genie.
+        dn = _yaml_display_name(rotulo or nome_dim)
+        if dn:
+            linhas.append(f'    display_name: "{dn}"')
         c = _yaml_comment(comentarios.get(nome_dim, ""))
         if c:
             linhas.append(f'    comment: "{c}"')
@@ -3862,13 +3901,13 @@ def montar_yaml_metric_view(indicador: dict, comentarios: dict[str, str] | None 
             # confirmado: "found character '`' that cannot start any token").
             linhas.append(f"  - name: {_slugify(col)}")
             linhas.append(f'    expr: "`{col}`"')
-            _dim_comment(_slugify(col))
+            _dim_comment(_slugify(col), col)
         for alias, col in dim_cols_join:
             # Coluna de uma tabela juntada — referencia pelo alias do join
             # (ex.: `dim_cliente.\`segmento_erp1\``).
             linhas.append(f"  - name: {_slugify(col)}")
             linhas.append(f'    expr: "{alias}.`{col}`"')
-            _dim_comment(_slugify(col))
+            _dim_comment(_slugify(col), col)
         for dc in dims_calculadas:
             # Expressão SQL livre escrita pela Engenharia (ex.:
             # `MONTH(\`DT_PERIODO\`)`) — não passa por IA nem validação de
@@ -3880,10 +3919,12 @@ def montar_yaml_metric_view(indicador: dict, comentarios: dict[str, str] | None 
                 continue
             linhas.append(f"  - name: {_slugify(nome_dc)}")
             linhas.append(f'    expr: "{expr_dc}"')
-            _dim_comment(_slugify(nome_dc))
+            _dim_comment(_slugify(nome_dc), nome_dc)
     linhas.append("measures:")
     linhas.append(f"  - name: {nome_medida}")
     linhas.append(f"    expr: {expr_validada}")
+    linhas.append(f'    display_name: "{_yaml_display_name(indicador["nome"])}"')
+    linhas.extend(_yaml_format_medida(indicador.get("unidade")))
     if comment:
         linhas.append(f'    comment: "{comment}"')
     if synonyms:
