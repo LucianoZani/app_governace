@@ -1820,3 +1820,22 @@ frente é **refazer as 3 PoCs com dados de pipeline (`dev`)**.
   a `databricks-metric-views` ainda diz "joins só many-to-one" — a doc atual tem
   `cardinality: one_to_many` (DBR 18.1+), candidato para o caso `ft_margem` da Comgás.
   Commits locais não pushados: `02e3536`, `8f0d224`, `b1171f7`.
+
+  **▶️ PONTO DE RETOMADA (repo principal / Free, 2026-10-08):**
+  1. **4 commits locais não pushados** na `main` (`02e3536`, `8f0d224`, `b1171f7`, `50bc67b`)
+     — push para o GitHub quando o usuário pedir.
+  2. DQX: usuário abrir a página **🛡️ Regras de Qualidade** (não vista na UI ainda) e testar;
+     depois dashboard AI/BI sobre `dev.dqx.*` (cadastrar como Qualidade no Margem bruta) e
+     agendar o `dqx/03_aplicar`.
+  3. Metric View: rótulo (`display_name`) editável na página Metric View (hoje vem do nome
+     da coluna, sem acento); suportar `cardinality: one_to_many` (testar Runtime); botão
+     "Certificar" (`system.certification_status`) — confirmar quem pode aplicar a tag.
+  4. Teste proposto (não feito): no Free, verificar se quem consulta uma Metric View precisa
+     de SELECT nas tabelas de origem e se o row filter de `dev.gold.fct_pedidos` vale para
+     quem consulta a `dev.gold.margem_bruta` — define o desenho "schema dedicado às MVs com
+     SELECT por PS" levado ao Greg.
+  5. Ideias de arquitetura discutidas (sem decisão): página "Diagnóstico do ambiente";
+     FinOps sem fallback silencioso; um repo de produto só (fim do `git apply` entre repos);
+     modularizar o `app.py`; testes na CI; migrações num job do bundle; publicação de MV por
+     job do bundle; Metric View por grupo de KPI (padrão da skill) vs. uma por indicador;
+     app publicando a semântica no UC (Pages/Domains/certificação).
