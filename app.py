@@ -6457,6 +6457,8 @@ _RQ_TIPOS: dict[str, str] = {
     "data_futura": "Data não pode estar no futuro",
     "existe_em": "Precisa existir em outra tabela",
     "expressao": "Regra livre (escrita em SQL, com ajuda da IA)",
+    "compara_tabela": "Valor bate com outra tabela (comparação por chave)",
+    "registro_anterior": "Comparar com o registro anterior (ex.: leitura ≥ anterior)",
     "atualidade": "Atualizado com a frequência esperada (tabela inteira)",
     "acuracia": "Bate com a fonte de verdade (conferência de totais)",
 }
@@ -6465,6 +6467,36 @@ _RQ_TIPOS: dict[str, str] = {
 # formato das regras DQX. Não entram no "% de linhas válidas" — tabela atrasada não tem
 # linha errada — só no status da dimensão e do indicador.
 _RQ_TIPOS_TABELA = {"atualidade", "acuracia"}
+
+# Regras de linha que precisam de OUTRA linha: o job (e o Testar) enriquece a tabela antes
+# — valor da referência pela chave, ou o valor anterior do mesmo grupo (lag) — em colunas
+# `_ref<tok>` / `_refn<tok>` / `_ant<tok>`, e a regra vira um `sql_expression` comum do DQX
+# (entra no % de linhas válidas e grava os reprovados). `tok` = hash da definição, para
+# duas regras na mesma tabela não colidirem. Colunas com "_" não vão para o registro gravado.
+_RQ_TIPOS_ENRIQUECIDOS = {"compara_tabela", "registro_anterior"}
+_RQ_OPERADORES = {"=": "igual a", "<>": "diferente de", ">=": "maior ou igual a",
+                  "<=": "menor ou igual a", ">": "maior que", "<": "menor que"}
+
+
+def _rq_token(p: dict) -> str:
+    import hashlib
+    spec = {k: v for k, v in p.items() if not k.startswith("_")}
+    return hashlib.md5(json.dumps(spec, sort_keys=True, default=str).encode()).hexdigest()[:8]
+
+
+def _rq_fonte_enriquecida(tabela: str, tipo: str, coluna: str, p: dict) -> str:
+    """FROM (alias `t`) com as colunas auxiliares — mesma lógica de `_enriquecer` do job."""
+    tok = p["_tok"]
+    if tipo == "compara_tabela":
+        pares = list(zip(p["chaves"], p["ref_chaves"]))
+        ks = ", ".join(f"{q_ident(rk)} AS `_k{tok}_{i}`" for i, (_, rk) in enumerate(pares))
+        on = " AND ".join(f"t0.{q_ident(tk)} = r.`_k{tok}_{i}`" for i, (tk, _) in enumerate(pares))
+        return (f"(SELECT t0.*, r.`_ref{tok}`, r.`_refn{tok}` FROM {q_fqn(tabela)} t0 LEFT JOIN "
+                f"(SELECT {ks}, first({q_ident(p['ref_coluna'])}) AS `_ref{tok}`, count(*) AS `_refn{tok}` "
+                f"FROM {q_fqn(p['ref_tabela'])} GROUP BY ALL) r ON {on}) t")
+    part = ", ".join(q_ident(c) for c in p["chaves"])
+    return (f"(SELECT *, lag({q_ident(coluna)}) OVER (PARTITION BY {part} "
+            f"ORDER BY {q_ident(p['ordem'])}) AS `_ant{tok}` FROM {q_fqn(tabela)}) t")
 _RQ_FUNCOES_TABELA = {"freshness_sla", "reconciliacao"}
 # Frequência esperada → horas do ciclo. Régua derivada: OK dentro de 1 ciclo, Atenção
 # perdeu 1 ciclo, Ruim perdeu 2+. Gravada como faixa 100/50 sobre o "pct" 100/50/0.
@@ -6510,7 +6542,8 @@ _RQ_DIMENSOES = {
 _RQ_DIM_CURTO = {k: v.split(" — ")[0] for k, v in _RQ_DIMENSOES.items()}
 _RQ_DIM_POR_TIPO = {"nao_vazio": "completude", "unico": "unicidade", "lista": "validade",
                     "intervalo": "validade", "data_futura": "validade", "existe_em": "consistencia",
-                    "expressao": "consistencia", "atualidade": "atualidade", "acuracia": "acuracia"}
+                    "expressao": "consistencia", "atualidade": "atualidade", "acuracia": "acuracia",
+                    "compara_tabela": "consistencia", "registro_anterior": "consistencia"}
 _RQ_DIM_POR_FUNCAO = {"is_not_null": "completude", "is_not_null_and_not_empty": "completude",
                       "is_not_empty": "completude", "is_unique": "unicidade",
                       "is_in_list": "validade", "is_not_null_and_is_in_list": "validade",
@@ -6714,6 +6747,28 @@ def _rq_montar(tipo: str, coluna: str, p: dict) -> tuple[str, dict, str]:
             args["msg"] = p["mensagem"]
         # DQX: falha quando a expressão é FALSE (NULL não falha).
         return "sql_expression", args, f"NOT ({expr})"
+    if tipo in _RQ_TIPOS_ENRIQUECIDOS:
+        op = p.get("op", "=")
+        if op not in _RQ_OPERADORES or not coluna:
+            raise ValueError("Escolha a coluna e a comparação.")
+        p["_tok"] = _rq_token(p)
+        tok, col = p["_tok"], q_ident(coluna)
+        if tipo == "compara_tabela":
+            if not p.get("ref_tabela") or not p.get("ref_coluna"):
+                raise ValueError("Escolha a tabela de referência e a coluna a comparar.")
+            if not p.get("chaves") or len(p["chaves"]) != len(p.get("ref_chaves") or []):
+                raise ValueError("Escolha a chave de ligação nas duas tabelas (mesma quantidade de colunas).")
+            # Mais de um registro na referência p/ a mesma chave = falha (ambíguo).
+            ok = f"`_refn{tok}` = 1 AND {col} {op} `_ref{tok}`"
+            expr = ok if p.get("falta_falha", True) else f"`_refn{tok}` IS NULL OR ({ok})"
+            msg = (f"{coluna} não é {_RQ_OPERADORES[op]} {p['ref_tabela']}.{p['ref_coluna']} "
+                   f"(ou chave sem correspondente/ambígua)")
+        else:
+            if not p.get("chaves") or not p.get("ordem"):
+                raise ValueError("Escolha o agrupamento (ex.: cliente) e a ordem (ex.: data).")
+            expr = f"`_ant{tok}` IS NULL OR {col} {op} `_ant{tok}`"
+            msg = f"{coluna} não é {_RQ_OPERADORES[op]} o registro anterior do mesmo {', '.join(p['chaves'])}"
+        return "sql_expression", {"expression": expr, "msg": msg}, f"NOT ({expr})"
     if tipo == "atualidade":
         if p.get("medida") == "coluna" and not coluna:
             raise ValueError("Escolha a coluna de data/hora.")
@@ -6801,11 +6856,13 @@ def testar_regra_tabela(tabela: str, funcao: str, a: dict, faixa_ok: float) -> d
     return _rq_avaliar_acuracia(linhas, faixa_ok)
 
 
-def testar_regra_qualidade(tabela: str, tipo: str, argumentos: dict, cond_violacao: str) -> dict:
+def testar_regra_qualidade(tabela: str, tipo: str, argumentos: dict, cond_violacao: str,
+                           fonte: str | None = None) -> dict:
     """Roda a regra no warehouse e devolve {total, falhas, amostra}. Lê dado
     real, então roda com a identidade do usuário (OBO) — mesmo padrão do
-    `testar_candidato` da Metric View."""
-    fonte = f"{q_fqn(tabela)} t"
+    `testar_candidato` da Metric View. `fonte` (alias `t`) substitui a tabela
+    nas regras que precisam de outra linha (`_rq_fonte_enriquecida`)."""
+    fonte = fonte or f"{q_fqn(tabela)} t"
     if tipo == "unico" or (not cond_violacao and argumentos.get("columns")):
         cols = argumentos["columns"]
         chaves = ", ".join(f"t.{q_ident(x)}" for x in cols)
@@ -6945,6 +7002,12 @@ def _rq_descricao_padrao(tipo: str, coluna: str, p: dict) -> str:
         return f"{coluna} não pode estar no futuro"
     if tipo == "existe_em":
         return f"{coluna} precisa existir em {p.get('ref_tabela')}.{p.get('ref_coluna')}"
+    if tipo == "compara_tabela":
+        return (f"{coluna} {p.get('op', '=')} {p.get('ref_tabela') or 'referência'}.{p.get('ref_coluna') or ''} "
+                f"(por {', '.join(p.get('chaves') or [])})")
+    if tipo == "registro_anterior":
+        return (f"{coluna} {p.get('op', '>=')} registro anterior do mesmo {', '.join(p.get('chaves') or [])} "
+                f"(ordem: {p.get('ordem') or ''})")
     if tipo == "atualidade":
         freq = _RQ_FREQUENCIAS.get(p.get("frequencia", "diaria"), ("Diária",))[0].lower()
         base = f"pela coluna {coluna}" if p.get("medida") == "coluna" else "pela carga"
@@ -7275,6 +7338,37 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
         p["ref_tabela"] = x.text_input("Tabela de referência (catálogo.schema.tabela)",
                                        key=f"rq_rt_{sid}")
         p["ref_coluna"] = y.text_input("Coluna na tabela de referência", key=f"rq_rc_{sid}")
+    elif tipo in _RQ_TIPOS_ENRIQUECIDOS:
+        p["op"] = st.selectbox("Comparação", list(_RQ_OPERADORES), key=f"rq_op_{sid}_{tipo}",
+                               index=0 if tipo == "compara_tabela" else 2,
+                               format_func=lambda o: f"{coluna or 'a coluna'} deve ser {_RQ_OPERADORES[o]}")
+        if tipo == "compara_tabela":
+            try:
+                p["ref_tabela"] = _rq_escolher_tabela(user, f"rq_cref_{sid}", "Tabela de referência")
+                ref_cols = []
+                if p["ref_tabela"]:
+                    rc, rs_, rt = p["ref_tabela"].split(".")
+                    ref_cols = [c.name for c in get_columns(user, rc, rs_, rt)]
+            except Exception as exc:
+                st.error(f"Não foi possível listar a tabela de referência: {exc}")
+                return
+            p["ref_coluna"] = st.selectbox("…o valor desta coluna da referência", ref_cols,
+                                           key=f"rq_cref_col_{sid}_{p['ref_tabela']}")
+            x, y = st.columns(2)
+            p["chaves"] = x.multiselect("Ligação: chave nesta tabela", nomes, key=f"rq_ck_{sid}_{tabela}",
+                                        help="Ex.: id_cliente. Pode ser composta (mesma ordem nas duas).")
+            p["ref_chaves"] = y.multiselect("Ligação: chave na referência", ref_cols,
+                                            key=f"rq_crk_{sid}_{p['ref_tabela']}")
+            p["falta_falha"] = st.checkbox("Linha sem correspondente na referência conta como falha",
+                                           value=True, key=f"rq_cff_{sid}")
+            st.caption("Se a referência tiver mais de um registro para a mesma chave, a linha falha "
+                       "(ligação ambígua).")
+        else:
+            x, y = st.columns(2)
+            p["chaves"] = x.multiselect("…o registro anterior do mesmo", nomes, key=f"rq_ak_{sid}_{tabela}",
+                                        help="Ex.: id_cliente ou medidor — o anterior é procurado dentro do grupo.")
+            p["ordem"] = y.selectbox("Ordenado por", nomes, key=f"rq_ao_{sid}_{tabela}",
+                                     help="Ex.: data da leitura. O primeiro registro de cada grupo não tem anterior e passa.")
     elif tipo == "expressao":
         p["texto"] = st.text_area(
             "Descreva a regra em português", key=f"rq_txt_{sid}", height=80,
@@ -7335,8 +7429,10 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
     if b1.button("🧪 Testar", key=f"rq_test_{sid}", use_container_width=True, disabled=bool(erro_def)):
         with st.spinner("Testando a regra na tabela…"):
             try:
+                fonte = (_rq_fonte_enriquecida(tabela, tipo, coluna, p)
+                         if tipo in _RQ_TIPOS_ENRIQUECIDOS else None)
                 t = (testar_regra_tabela(tabela, funcao, argumentos, faixa_ok) if de_tabela
-                     else testar_regra_qualidade(tabela, tipo, argumentos, cond))
+                     else testar_regra_qualidade(tabela, tipo, argumentos, cond, fonte=fonte))
                 t["assinatura"] = assinatura
                 st.session_state[f"rq_teste_{sid}"] = teste = t
             except Exception as exc:
@@ -7367,7 +7463,7 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
         if escopo == "montante" and not user_can_access_table(user, cat, sch, tbl):
             st.error(f"Você não tem acesso a `{tabela}` — não é possível criar regra nela.")
             return
-        if tipo == "acuracia" and not user_can_access_table(user, *p["ref_tabela"].split(".")):
+        if tipo in ("acuracia", "compara_tabela") and not user_can_access_table(user, *p["ref_tabela"].split(".")):
             st.error(f"Você não tem acesso a `{p['ref_tabela']}` — escolha outra fonte de verdade.")
             return
         _rq_salvar(user, sid, tabela, nome_tecnico,

@@ -51,7 +51,8 @@ COLS_REGRAS = set(spark.table(f"{CAD}.regras_qualidade").columns)
 # mesmo mapa do app (`_RQ_DIM_POR_TIPO` / `_RQ_DIM_POR_FUNCAO`).
 DIM_POR_TIPO = {"nao_vazio": "completude", "unico": "unicidade", "lista": "validade",
                 "intervalo": "validade", "data_futura": "validade", "existe_em": "consistencia",
-                "expressao": "consistencia", "atualidade": "atualidade", "acuracia": "acuracia"}
+                "expressao": "consistencia", "atualidade": "atualidade", "acuracia": "acuracia",
+                "compara_tabela": "consistencia", "registro_anterior": "consistencia"}
 DIM_POR_FUNCAO = {"is_not_null": "completude", "is_not_null_and_not_empty": "completude",
                   "is_not_empty": "completude", "is_unique": "unicidade", "is_in_list": "validade",
                   "is_not_null_and_is_in_list": "validade", "is_in_range": "validade",
@@ -132,6 +133,37 @@ def _acuracia(tabela, a, faixa_ok):
                        + (f" · {fora} de {len(linhas)} grupo(s) fora" if len(linhas) > 1 else "")}
 
 
+# --- Regras de linha que precisam de OUTRA linha (mesma lógica de `_rq_fonte_enriquecida`) --
+# Acrescenta colunas auxiliares `_ref<tok>`/`_refn<tok>` (valor da referência pela chave e
+# quantos registros casaram) ou `_ant<tok>` (valor anterior no grupo); a regra em si é um
+# `sql_expression` comum. Começam com "_", então não entram no registro gravado em `falhas`.
+TIPOS_ENRIQUECIDOS = {"compara_tabela", "registro_anterior"}
+
+
+def _enriquecer(df, rs):
+    for r in rs:
+        if r.tipo not in TIPOS_ENRIQUECIDOS:
+            continue
+        p = json.loads(r.parametros or "{}")
+        tok = p["_tok"]
+        if r.tipo == "compara_tabela":
+            pares = list(zip(p["chaves"], p["ref_chaves"]))
+            ks = [f"_k{tok}_{i}" for i in range(len(pares))]
+            ref = (spark.table(p["ref_tabela"])
+                   .groupBy(*[F.col(f"`{rk}`").alias(k) for (_, rk), k in zip(pares, ks)])
+                   .agg(F.first(F.col(f"`{p['ref_coluna']}`")).alias(f"_ref{tok}"),
+                        F.count(F.lit(1)).alias(f"_refn{tok}")))
+            cond = None
+            for (tk, _), k in zip(pares, ks):
+                c = df[f"`{tk}`"] == ref[k]
+                cond = c if cond is None else cond & c
+            df = df.join(ref, cond, "left").drop(*ks)
+        else:
+            w = Window.partitionBy(*[F.col(f"`{c}`") for c in p["chaves"]]).orderBy(F.col(f"`{p['ordem']}`"))
+            df = df.withColumn(f"_ant{tok}", F.lag(F.col(f"`{r.coluna}`")).over(w))
+    return df
+
+
 def _avaliar_tabela(tabela, r):
     a = json.loads(r.argumentos or "{}")
     if r.funcao == "freshness_sla":
@@ -148,6 +180,7 @@ def _status(pct, faixa_ok, faixa_ruim):
 
 regras = spark.sql(f"""
     SELECT r.id, r.indicador_id, i.nome AS indicador, r.tabela, r.nome, r.descricao, r.coluna, r.tipo,
+           r.parametros,
            {"r.dimensao" if "dimensao" in COLS_REGRAS else "CAST(NULL AS STRING)"} AS dimensao,
            r.criticidade, r.funcao, r.argumentos, r.origem,
            {"r.escopo" if "escopo" in COLS_REGRAS else "NULL"} AS escopo,
@@ -256,6 +289,7 @@ for (indicador_id, indicador, tabela, escopo), todas in grupos.items():
     try:
         origem = spark.table(tabela)
         cols_dados = [c for c in origem.columns if not c.startswith("_")]
+        origem = _enriquecer(origem, rs)  # depois de cols_dados: auxiliares não vão p/ o registro
         sensiveis = _colunas_sensiveis(tabela, cols_dados)
         registro = [F.lit(MASCARA).alias(c) if c in sensiveis else F.col(c) for c in cols_dados]
         resultado = (dq_engine.apply_checks_by_metadata(origem, checks)
