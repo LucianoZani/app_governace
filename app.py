@@ -7040,13 +7040,19 @@ def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
     # A evolução no tempo fica no dashboard de qualidade (link no topo da página).
     with st.expander("Resultado por tabela"):
         st.dataframe(
-            ex.assign(escopo=ex["escopo"].map({"lineage": "lineage", "montante": "⬆️ a montante"}))
-            .rename(columns={
-                "tabela": "Tabela", "escopo": "Escopo", "qtd_regras": "Regras", "total_linhas": "Linhas",
+            ex.drop(columns=["escopo"]).rename(columns={
+                "tabela": "Tabela", "qtd_regras": "Regras", "total_linhas": "Linhas",
                 "linhas_com_erro": "Com erro", "linhas_com_aviso": "Com aviso",
                 "linhas_validas": "Válidas", "pct_linhas_validas": "% válidas",
             }),
             use_container_width=True, hide_index=True,
+            column_config={
+                "Com erro": st.column_config.NumberColumn(
+                    help="Linhas que violaram ao menos uma regra de gravidade ⛔ Erro (não servem para o indicador)."),
+                "Com aviso": st.column_config.NumberColumn(
+                    help="Linhas que violaram ao menos uma regra de gravidade ⚠️ Aviso (merecem atenção, não invalidam)."),
+                "Válidas": st.column_config.NumberColumn(help="Linhas sem nenhuma violação, de erro ou de aviso."),
+            },
         )
     return por_regra
 
