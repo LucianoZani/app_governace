@@ -44,16 +44,57 @@ SELECT indicador, tabela, run_time, regra_id, regra,
        CASE WHEN st = 'ok' THEN 1 ELSE 0 END AS is_ok,
        CASE WHEN st = 'atencao' THEN 1 ELSE 0 END AS is_atencao,
        CASE WHEN st = 'ruim' THEN 1 ELSE 0 END AS is_ruim,
-       concat('OK ≥ ', format_number(fok, '#.#'), '% · Ruim < ', format_number(fruim, '#.#'), '%') AS regua
+       concat('OK ≥ ', format_number(fok, '#.#'), '% · Ruim < ', format_number(fruim, '#.#'), '%') AS regua,
+       dimensao_label AS dimensao
 FROM (
   -- Régua gravada pelo job em cada execução; execuções antigas usam o padrão 99 / 95.
   SELECT *, coalesce(faixa_ok, 99.0) AS fok, coalesce(faixa_ruim, 95.0) AS fruim,
+         CASE coalesce(dimensao, CASE
+           WHEN funcao IN ('is_not_null', 'is_not_null_and_not_empty', 'is_not_empty') THEN 'completude'
+           WHEN funcao = 'is_unique' THEN 'unicidade'
+           WHEN funcao IN ('foreign_key', 'sql_expression') THEN 'consistencia'
+           WHEN funcao IN ('is_data_fresh', 'is_older_than_n_days') THEN 'atualidade'
+           ELSE 'validade' END)
+         WHEN 'completude' THEN '🧩 Completude' WHEN 'unicidade' THEN '🔂 Unicidade'
+         WHEN 'validade' THEN '✅ Validade' WHEN 'consistencia' THEN '🔗 Consistência'
+         WHEN 'atualidade' THEN '⏱️ Atualidade' ELSE '🎯 Acurácia' END AS dimensao_label,
          coalesce(status, CASE WHEN pct_conformidade >= coalesce(faixa_ok, 99.0) THEN 'ok'
                                WHEN pct_conformidade < coalesce(faixa_ruim, 95.0) THEN 'ruim'
                                ELSE 'atencao' END) AS st
   FROM metricas_regras
 )
 QUALIFY run_time = MAX(run_time) OVER (PARTITION BY indicador_id, tabela)""")},
+    # Status por dimensão DAMA: as 6 sempre aparecem — "Sem regra" mostra a lacuna de cobertura.
+    {"name": "ds_dimensao", "displayName": "Status por dimensão DAMA (última execução)", "queryLines": ql("""
+WITH ult AS (
+  SELECT indicador, coalesce(escopo, 'lineage') AS escopo,
+         CASE coalesce(dimensao, CASE
+           WHEN funcao IN ('is_not_null', 'is_not_null_and_not_empty', 'is_not_empty') THEN 'completude'
+           WHEN funcao = 'is_unique' THEN 'unicidade'
+           WHEN funcao IN ('foreign_key', 'sql_expression') THEN 'consistencia'
+           WHEN funcao IN ('is_data_fresh', 'is_older_than_n_days') THEN 'atualidade'
+           ELSE 'validade' END)
+         WHEN 'completude' THEN '🧩 Completude' WHEN 'unicidade' THEN '🔂 Unicidade'
+         WHEN 'validade' THEN '✅ Validade' WHEN 'consistencia' THEN '🔗 Consistência'
+         WHEN 'atualidade' THEN '⏱️ Atualidade' ELSE '🎯 Acurácia' END AS dimensao,
+         coalesce(status, CASE WHEN pct_conformidade >= 99 THEN 'ok'
+                               WHEN pct_conformidade < 95 THEN 'ruim' ELSE 'atencao' END) AS status
+  FROM metricas_regras
+  QUALIFY run_time = MAX(run_time) OVER (PARTITION BY indicador_id)
+),
+dims AS (
+  SELECT * FROM VALUES ('🧩 Completude', 1), ('🔂 Unicidade', 2), ('✅ Validade', 3),
+                       ('🔗 Consistência', 4), ('⏱️ Atualidade', 5), ('🎯 Acurácia', 6) AS d(dimensao, ordem)
+)
+SELECT i.indicador, d.dimensao, d.ordem, count(u.status) AS regras,
+       CASE WHEN count(u.status) = 0 THEN '⚪ Sem regra'
+            ELSE CASE max(CASE WHEN u.status = 'ruim' AND u.escopo <> 'montante' THEN 2
+                               WHEN u.status IN ('ruim', 'atencao') THEN 1 ELSE 0 END)
+                 WHEN 2 THEN '🔴 Ruim' WHEN 1 THEN '🟡 Atenção' ELSE '🟢 OK' END END AS status
+FROM (SELECT DISTINCT indicador FROM ult) i
+CROSS JOIN dims d
+LEFT JOIN ult u ON u.indicador = i.indicador AND u.dimensao = d.dimensao
+GROUP BY i.indicador, d.dimensao, d.ordem""")},
     # Status do indicador: vale a pior regra; regra a montante é alerta antecipado (no máximo Atenção).
     {"name": "ds_status", "displayName": "Status do indicador (última execução)", "queryLines": ql("""
 SELECT indicador, max(run_time) AS run_time,
@@ -154,7 +195,20 @@ layout = [
                     "frame": {"title": "Status do indicador", "showTitle": True,
                               "description": "Vale a pior regra. Regras a montante (ex.: silver) deixam no máximo em Atenção.",
                               "showDescription": True}}},
-     "position": pos(0, 5, 12, 3)},
+     "position": pos(0, 5, 5, 4)},
+    {"widget": {"name": "tabela_dimensao",
+                "queries": q("ds_dimensao", [fld(n) for n in ["dimensao", "status", "regras", "indicador", "ordem"]],
+                             dis=True, orders=[{"direction": "ASC", "expression": "`indicador`"},
+                                               {"direction": "ASC", "expression": "`ordem`"}]),
+                "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": [
+                    {"fieldName": "dimensao", "displayName": "Dimensão (DAMA)"},
+                    {"fieldName": "status", "displayName": "Status"},
+                    {"fieldName": "regras", "displayName": "Regras"},
+                    {"fieldName": "indicador", "displayName": "Indicador"}]},
+                    "frame": {"title": "Status por dimensão de qualidade (DAMA)", "showTitle": True,
+                              "description": "Vale a pior regra da dimensão. ⚪ Sem regra = dimensão ainda não coberta.",
+                              "showDescription": True}}},
+     "position": pos(5, 5, 7, 4)},
     {"widget": {"name": "evolucao_pct",
                 "queries": q("ds_hist", [fld("run_time"), fld("serie"), fld("avg(pct_validas)", "AVG(`pct_validas`)")]),
                 "spec": {"version": 3, "widgetType": "line",
@@ -166,7 +220,7 @@ layout = [
                          "frame": {"title": "Evolução das linhas válidas", "showTitle": True,
                                    "description": "Uma linha por indicador e escopo (lineage = tabelas do indicador; a montante = ex. silver). Cada ponto é uma execução do job DQX.",
                                    "showDescription": True}}},
-     "position": pos(0, 8, 6, 6)},
+     "position": pos(0, 9, 6, 6)},
     {"widget": {"name": "falhas_por_regra",
                 "queries": q("ds_regras", [fld("regra_descricao"), fld("status"),
                                            fld("sum(linhas_com_falha)", "SUM(`linhas_com_falha`)")]),
@@ -179,11 +233,12 @@ layout = [
                              "color": {"fieldName": "status", "displayName": "Status",
                                        "scale": {"type": "categorical", "mappings": STATUS_MAP}}},
                          "frame": {"title": "Linhas com falha por regra", "showTitle": True}}},
-     "position": pos(6, 8, 6, 6)},
-    text("sec_detalhe", ["## Detalhe por regra\n"], 0, 14, 12, 1),
+     "position": pos(6, 9, 6, 6)},
+    text("sec_detalhe", ["## Detalhe por regra\n"], 0, 15, 12, 1),
     table("tabela_regras", "ds_regras", [
         {"fieldName": "status", "displayName": "Status", "style": STATUS_RULES},
         {"fieldName": "regra_descricao", "displayName": "Regra"},
+        {"fieldName": "dimensao", "displayName": "Dimensão"},
         {"fieldName": "gravidade", "displayName": "Gravidade"},
         {"fieldName": "indicador", "displayName": "Indicador"},
         {"fieldName": "tabela", "displayName": "Tabela"},
@@ -193,10 +248,10 @@ layout = [
         {"fieldName": "pct_conformidade", "displayName": "Conformidade", "format": PCT},
         {"fieldName": "regua", "displayName": "Régua (negócio)"},
         {"fieldName": "origem_regra", "displayName": "Origem"},
-    ], "Regras da última verificação", 15, 7, orders=[{"direction": "DESC", "expression": "`status_ordem`"},
+    ], "Regras da última verificação", 16, 7, orders=[{"direction": "DESC", "expression": "`status_ordem`"},
                                                     {"direction": "DESC", "expression": "`linhas_com_falha`"}]),
     text("sec_registros", ["## Registros com falha\n",
-                           "Só tabelas do lineage — regras a montante guardam apenas contagens.\n"], 0, 22, 12, 1),
+                           "Só tabelas do lineage — regras a montante guardam apenas contagens.\n"], 0, 23, 12, 1),
     table("tabela_falhas", "ds_falhas", [
         {"fieldName": "regra_descricao", "displayName": "Regra"},
         {"fieldName": "gravidade", "displayName": "Gravidade"},
@@ -205,10 +260,10 @@ layout = [
         {"fieldName": "registro", "displayName": "Registro"},
         {"fieldName": "indicador", "displayName": "Indicador"},
         {"fieldName": "tabela", "displayName": "Tabela"},
-    ], "Registros reprovados na última verificação", 23, 7),
+    ], "Registros reprovados na última verificação", 24, 7),
 ]
 
-FDS = ["ds_hist", "ds_ultima", "ds_regras", "ds_status", "ds_falhas"]
+FDS = ["ds_hist", "ds_ultima", "ds_regras", "ds_status", "ds_dimensao", "ds_falhas"]
 filters = [
     {"widget": {"name": "filtro_indicador",
                 "queries": [{"name": f"q_{d}", "query": {"datasetName": d, "fields": [fld("indicador")], "disaggregated": False}}

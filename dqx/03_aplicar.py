@@ -47,6 +47,25 @@ run_time = datetime.now(timezone.utc)
 COLS_REGRAS = set(spark.table(f"{CAD}.regras_qualidade").columns)
 
 
+# Dimensão DAMA: a gravada pelo app; regras antigas (NULL) deduzem pelo tipo/função —
+# mesmo mapa do app (`_RQ_DIM_POR_TIPO` / `_RQ_DIM_POR_FUNCAO`).
+DIM_POR_TIPO = {"nao_vazio": "completude", "unico": "unicidade", "lista": "validade",
+                "intervalo": "validade", "data_futura": "validade", "existe_em": "consistencia",
+                "expressao": "consistencia"}
+DIM_POR_FUNCAO = {"is_not_null": "completude", "is_not_null_and_not_empty": "completude",
+                  "is_not_empty": "completude", "is_unique": "unicidade", "is_in_list": "validade",
+                  "is_not_null_and_is_in_list": "validade", "is_in_range": "validade",
+                  "is_not_less_than": "validade", "is_not_greater_than": "validade",
+                  "is_not_in_future": "validade", "is_valid_date": "validade",
+                  "is_valid_timestamp": "validade", "regex_match": "validade",
+                  "foreign_key": "consistencia", "sql_expression": "consistencia",
+                  "is_data_fresh": "atualidade", "is_older_than_n_days": "atualidade"}
+
+
+def _dimensao(r):
+    return r.dimensao or DIM_POR_TIPO.get(r.tipo) or DIM_POR_FUNCAO.get(r.funcao, "validade")
+
+
 def _status(pct, faixa_ok, faixa_ruim):
     """Régua do negócio (% de conformidade): OK ≥ faixa_ok; Ruim < faixa_ruim; senão Atenção."""
     if pct is None:
@@ -55,7 +74,8 @@ def _status(pct, faixa_ok, faixa_ruim):
 
 
 regras = spark.sql(f"""
-    SELECT r.id, r.indicador_id, i.nome AS indicador, r.tabela, r.nome, r.descricao, r.coluna,
+    SELECT r.id, r.indicador_id, i.nome AS indicador, r.tabela, r.nome, r.descricao, r.coluna, r.tipo,
+           {"r.dimensao" if "dimensao" in COLS_REGRAS else "CAST(NULL AS STRING)"} AS dimensao,
            r.criticidade, r.funcao, r.argumentos, r.origem,
            {"r.escopo" if "escopo" in COLS_REGRAS else "NULL"} AS escopo,
            {"coalesce(r.faixa_ok, 99.0)" if "faixa_ok" in COLS_REGRAS else "99.0"} AS faixa_ok,
@@ -174,7 +194,7 @@ for (indicador_id, indicador, tabela, escopo), rs in grupos.items():
                          "coluna": r.coluna, "criticidade": r.criticidade, "funcao": r.funcao,
                          "origem_regra": r.origem, "total_linhas": total, "linhas_com_falha": n,
                          "pct_conformidade": pct, "faixa_ok": float(r.faixa_ok),
-                         "faixa_ruim": float(r.faixa_ruim),
+                         "faixa_ruim": float(r.faixa_ruim), "dimensao": _dimensao(r),
                          "status": _status(pct, float(r.faixa_ok), float(r.faixa_ruim))})
 
     if escopo == "lineage":
