@@ -59,16 +59,47 @@ def _n(coluna):
     return F.when(F.col(coluna).isNull(), F.lit(0)).otherwise(F.size(coluna))
 
 
-def _issues(df, coluna, criticidade):
-    """Explode _errors/_warnings: 1 linha por registro × regra violada."""
+def _issues(df, coluna, criticidade, sensiveis):
+    """Explode _errors/_warnings: 1 linha por registro × regra violada.
+
+    A mensagem do DQX repete o valor ("Value 'x' in Column ..."): se a regra
+    toca coluna sensível, o valor sai da mensagem também.
+    """
+    msg = F.col("i.message")
+    if sensiveis:
+        toca = F.arrays_overlap(F.coalesce(F.col("i.columns"), F.array().cast("array<string>")),
+                                F.array(*[F.lit(c) for c in sensiveis]))
+        msg = F.when(toca, F.regexp_replace(msg, r"Value '[^']*'", f"Value '{MASCARA}'")).otherwise(msg)
     return (df.where(_n(coluna) > 0)
               .select(F.col("_registro"), F.explode(coluna).alias("i"))
               .select(F.col("i.name").alias("regra"),
                       F.lit(criticidade).alias("criticidade"),
                       F.col("i.function").alias("funcao"),
-                      F.col("i.message").alias("mensagem"),
+                      msg.alias("mensagem"),
                       F.col("i.columns").alias("colunas"),
                       F.col("_registro").alias("registro")))
+
+
+# Dado pessoal/confidencial não pode vazar em `falhas` (o registro vai inteiro em JSON).
+# Mesmos critérios do app: nome casa com Padrões de Dado Pessoal (substring) OU a coluna
+# tem tag de compliance (privacidade = dado pessoal / seguranca = confidencial).
+MASCARA = "***"
+TAGS_SENSIVEIS = {("privacidade", "dado pessoal"), ("seguranca", "confidencial")}
+PADROES = [r.padrao.strip().lower() for r in
+           spark.sql(f"SELECT padrao FROM {CAD}.padroes_dado_pessoal").collect() if r.padrao]
+
+
+def _colunas_sensiveis(tabela, colunas):
+    """Colunas a mascarar. Se não der pra ler as tags, falha: melhor não gravar do que vazar."""
+    cat, sch, tab = tabela.split(".")
+    tags = spark.sql(f"""
+        SELECT column_name, lower(tag_name) AS k, lower(trim(tag_value)) AS v
+        FROM `{cat}`.information_schema.column_tags
+        WHERE schema_name = '{sch}' AND table_name = '{tab}'
+    """).collect()
+    por_tag = {t.column_name for t in tags if (t.k, t.v) in TAGS_SENSIVEIS}
+    por_nome = {c for c in colunas if any(p in c.lower() for p in PADROES)}
+    return sorted((por_tag | por_nome) & set(colunas))
 
 
 saida = {"run_id": run_id, "run_time": str(run_time), "grupos": [], "erros": []}
@@ -89,15 +120,18 @@ for (indicador_id, indicador, tabela), rs in grupos.items():
     try:
         origem = spark.table(tabela)
         cols_dados = [c for c in origem.columns if not c.startswith("_")]
+        sensiveis = _colunas_sensiveis(tabela, cols_dados)
+        registro = [F.lit(MASCARA).alias(c) if c in sensiveis else F.col(c) for c in cols_dados]
         resultado = (dq_engine.apply_checks_by_metadata(origem, checks)
-                     .withColumn("_registro", F.to_json(F.struct(*cols_dados))))
+                     .withColumn("_registro", F.to_json(F.struct(*registro))))
         totais = resultado.agg(
             F.count("*").alias("total"),
             F.sum(F.when(_n("_errors") > 0, 1).otherwise(0)).alias("com_erro"),
             F.sum(F.when(_n("_warnings") > 0, 1).otherwise(0)).alias("com_aviso"),
             F.sum(F.when((_n("_errors") == 0) & (_n("_warnings") == 0), 1).otherwise(0)).alias("validas"),
         ).first()
-        issues = _issues(resultado, "_errors", "error").unionByName(_issues(resultado, "_warnings", "warn"))
+        issues = (_issues(resultado, "_errors", "error", sensiveis)
+                  .unionByName(_issues(resultado, "_warnings", "warn", sensiveis)))
         por_regra = {x["regra"]: x["n"] for x in issues.groupBy("regra").agg(F.count("*").alias("n")).collect()}
     except Exception as exc:  # uma tabela com problema não derruba as outras
         saida["erros"].append({"indicador_id": indicador_id, "tabela": tabela,
@@ -129,7 +163,8 @@ for (indicador_id, indicador, tabela), rs in grupos.items():
                         .withColumn("indicador", F.lit(indicador))
                         .withColumn("tabela", F.lit(tabela)))
     saida["grupos"].append({"indicador": indicador, "tabela": tabela, "regras": len(rs),
-                            **totais.asDict(), "falhas_por_regra": por_regra})
+                            **totais.asDict(), "falhas_por_regra": por_regra,
+                            "colunas_mascaradas": sensiveis})
 
 print(json.dumps(saida, indent=2, default=str, ensure_ascii=False))
 
@@ -157,9 +192,18 @@ if execucoes:
                         for t in ("execucoes", "metricas_regras", "falhas")}
     print(saida["gravado"])
 
-if saida["erros"]:
-    print("⚠️ grupos com erro:", json.dumps(saida["erros"], indent=2, ensure_ascii=False))
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Resultado do job
+# MAGIC Grupo com erro (regra inválida, tabela inacessível…) não impede os outros de gravar,
+# MAGIC mas **falha o job** no fim — senão o alerta de falha nunca dispara.
 
 # COMMAND ----------
+
+if saida["erros"]:
+    raise RuntimeError(
+        f"{len(saida['erros'])} grupo(s) indicador × tabela com erro (os demais foram gravados):\n"
+        + json.dumps(saida["erros"], indent=2, ensure_ascii=False))
 
 dbutils.notebook.exit(json.dumps(saida, default=str, ensure_ascii=False))
