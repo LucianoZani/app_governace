@@ -23,8 +23,12 @@
 
 dbutils.widgets.text("cadastros", "apps.governanca_unity_catalog_prd", "Schema de cadastros do app")
 dbutils.widgets.text("resultados", "dev.dqx", "Schema dos resultados")
+# No job: "{{job.run_id}}" — igual em todas as tentativas da mesma execução, o que deixa a
+# gravação idempotente (retry do serverless não duplica o histórico). Vazio = execução manual.
+dbutils.widgets.text("job_run_id", "", "Id da execução do job")
 CAD = dbutils.widgets.get("cadastros")
 RES = dbutils.widgets.get("resultados")
+JOB_RUN_ID = dbutils.widgets.get("job_run_id").strip()
 
 import json
 import uuid
@@ -37,7 +41,7 @@ from databricks.labs.dqx.engine import DQEngine
 
 MAX_FALHAS_POR_REGRA = 1000   # o detalhe é amostra; as contagens são sempre completas
 dq_engine = DQEngine(WorkspaceClient())
-run_id = str(uuid.uuid4())
+run_id = f"job-{JOB_RUN_ID}" if JOB_RUN_ID else str(uuid.uuid4())
 run_time = datetime.now(timezone.utc)
 
 regras = spark.sql(f"""
@@ -174,6 +178,11 @@ print(json.dumps(saida, indent=2, default=str, ensure_ascii=False))
 # MAGIC ## Gravação (append — cada execução vira um ponto da série histórica)
 
 # COMMAND ----------
+
+# Tentativa anterior da mesma execução (retry) pode ter gravado parte: limpa antes do append.
+for t in ("execucoes", "metricas_regras", "falhas"):
+    if spark.catalog.tableExists(f"{RES}.{t}"):
+        spark.sql(f"DELETE FROM {RES}.{t} WHERE run_id = '{run_id}'")
 
 if execucoes:
     spark.createDataFrame(execucoes).write.mode("append").option("mergeSchema", "true").saveAsTable(f"{RES}.execucoes")
