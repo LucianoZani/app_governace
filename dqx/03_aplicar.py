@@ -44,10 +44,22 @@ dq_engine = DQEngine(WorkspaceClient())
 run_id = f"job-{JOB_RUN_ID}" if JOB_RUN_ID else str(uuid.uuid4())
 run_time = datetime.now(timezone.utc)
 
+COLS_REGRAS = set(spark.table(f"{CAD}.regras_qualidade").columns)
+
+
+def _status(pct, faixa_ok, faixa_ruim):
+    """Régua do negócio (% de conformidade): OK ≥ faixa_ok; Ruim < faixa_ruim; senão Atenção."""
+    if pct is None:
+        return None
+    return "ok" if pct >= faixa_ok else ("ruim" if pct < faixa_ruim else "atencao")
+
+
 regras = spark.sql(f"""
     SELECT r.id, r.indicador_id, i.nome AS indicador, r.tabela, r.nome, r.descricao, r.coluna,
            r.criticidade, r.funcao, r.argumentos, r.origem,
-           {"r.escopo" if "escopo" in spark.table(f"{CAD}.regras_qualidade").columns else "NULL"} AS escopo
+           {"r.escopo" if "escopo" in COLS_REGRAS else "NULL"} AS escopo,
+           {"coalesce(r.faixa_ok, 99.0)" if "faixa_ok" in COLS_REGRAS else "99.0"} AS faixa_ok,
+           {"coalesce(r.faixa_ruim, 95.0)" if "faixa_ruim" in COLS_REGRAS else "95.0"} AS faixa_ruim
     FROM {CAD}.regras_qualidade r
     LEFT JOIN {CAD}.indicadores i ON i.id = r.indicador_id
     WHERE r.ativa
@@ -156,10 +168,14 @@ for (indicador_id, indicador, tabela, escopo), rs in grupos.items():
                       "pct_linhas_validas": round(100.0 * totais["validas"] / total, 2) if total else None})
     for r in rs:
         n = por_regra.get(r.nome, 0)
+        pct = round(100.0 * (total - n) / total, 2) if total else None
+        # A régua vai junto: o histórico mostra o critério que valia em cada execução.
         metricas.append({**base, "regra_id": r.id, "regra": r.nome, "descricao": r.descricao,
                          "coluna": r.coluna, "criticidade": r.criticidade, "funcao": r.funcao,
                          "origem_regra": r.origem, "total_linhas": total, "linhas_com_falha": n,
-                         "pct_conformidade": round(100.0 * (total - n) / total, 2) if total else None})
+                         "pct_conformidade": pct, "faixa_ok": float(r.faixa_ok),
+                         "faixa_ruim": float(r.faixa_ruim),
+                         "status": _status(pct, float(r.faixa_ok), float(r.faixa_ruim))})
 
     if escopo == "lineage":
         ids = spark.createDataFrame([(r.nome, r.id) for r in rs], "regra string, regra_id long")

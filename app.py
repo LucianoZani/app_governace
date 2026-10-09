@@ -1951,6 +1951,7 @@ def ensure_cadastro_tables() -> bool:
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, indicador_id BIGINT, tabela STRING, "
         f"nome STRING, descricao STRING, tipo STRING, coluna STRING, parametros STRING, "
         f"criticidade STRING, funcao STRING, argumentos STRING, origem STRING, ativa BOOLEAN, escopo STRING, "
+        f"faixa_ok DOUBLE, faixa_ruim DOUBLE, "
         f"teste_falhas BIGINT, teste_total BIGINT, testado_em TIMESTAMP, {audit})",
     ]
     for stmt in ddl:
@@ -2046,6 +2047,9 @@ def ensure_cadastro_tables() -> bool:
         existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
         if existing_cols and "escopo" not in existing_cols:
             run_exec(f"ALTER TABLE {_cad('regras_qualidade')} ADD COLUMNS (escopo STRING)")
+        # Régua de aceitação (% de conformidade) definida pelo negócio. NULL = padrão 99 / 95.
+        if existing_cols and "faixa_ok" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('regras_qualidade')} ADD COLUMNS (faixa_ok DOUBLE, faixa_ruim DOUBLE)")
     except Exception:
         pass
     # Coluna `power_steward` em `indicadores` (idempotente p/ a tabela já
@@ -6469,9 +6473,79 @@ _RQ_FUNCAO_LABEL: dict[str, str] = {
 }
 
 _RQ_CRITICIDADE = {
-    "error": "🔴 Erro — dado não serve para o indicador",
-    "warn": "🟡 Aviso — merece atenção, não invalida",
+    "error": "⛔ Erro — a linha não serve para o indicador",
+    "warn": "⚠️ Aviso — a linha merece atenção, não invalida",
 }
+
+# Régua de aceitação por regra (definida pelo negócio), em % de conformidade:
+# >= faixa_ok → OK; < faixa_ruim → Ruim; entre as duas → Atenção. Padrão 99 / 95.
+_RQ_FAIXAS = [100.0, 99.9, 99.5, 99.0, 98.0, 97.0, 95.0, 90.0, 85.0, 80.0]
+_RQ_FAIXA_OK_PADRAO, _RQ_FAIXA_RUIM_PADRAO = 99.0, 95.0
+_RQ_STATUS = {"ok": "🟢 OK", "atencao": "🟡 Atenção", "ruim": "🔴 Ruim"}
+_RQ_STATUS_COR = {"ok": "#2E9E6B", "atencao": "#F5A524", "ruim": "#E5484D"}
+_RQ_STATUS_ORDEM = {"ok": 0, "atencao": 1, "ruim": 2}
+
+
+def _rq_fmt_pct(v) -> str:
+    # A Statement Execution API devolve números como texto.
+    return f"{float(v):g}".replace(".", ",") + "%"
+
+
+def _rq_status(pct, faixa_ok, faixa_ruim) -> str | None:
+    if pct is None or pd.isna(pct):
+        return None
+    pct = float(pct)
+    if pct >= float(faixa_ok):
+        return "ok"
+    return "ruim" if pct < float(faixa_ruim) else "atencao"
+
+
+def _rq_status_indicador(itens: list[tuple[str, str | None]]) -> str | None:
+    """Pior status entre as regras (pessimista: uma regra Ruim basta). Regras a
+    montante são alerta antecipado — no máximo Atenção para o indicador."""
+    pior = None
+    for escopo, status in itens:
+        if status is None:
+            continue
+        if escopo == "montante" and status == "ruim":
+            status = "atencao"
+        if pior is None or _RQ_STATUS_ORDEM[status] > _RQ_STATUS_ORDEM[pior]:
+            pior = status
+    return pior
+
+
+def _rq_regua_html(faixa_ok: float, faixa_ruim: float) -> str:
+    """Prévia da régua no formulário. A escala começa 10 pontos abaixo do vermelho
+    (as faixas ficam entre 80% e 100% — de 0 a 100 o amarelo e o verde somem)."""
+    ok_v, ruim_v = float(faixa_ok), float(faixa_ruim)
+    base = max(0.0, min(ruim_v, 80.0) - 10.0)
+    span = 100.0 - base
+    larg = lambda a, b: 100.0 * (b - a) / span
+    seg = lambda w, cor, txt: (
+        f'<div style="width:{max(w, 0)}%;background:{cor};color:#fff;font-size:12px;'
+        f'text-align:center;white-space:nowrap;overflow:hidden">{txt if w >= 8 else ""}</div>')
+    return (
+        '<div style="display:flex;align-items:center;gap:6px;margin:4px 0">'
+        f'<span style="font-size:11px;opacity:.7">{_rq_fmt_pct(base)}</span>'
+        '<div style="display:flex;flex:1;height:22px;border-radius:6px;overflow:hidden">'
+        + seg(larg(base, ruim_v), _RQ_STATUS_COR["ruim"], f"Ruim &lt; {_rq_fmt_pct(ruim_v)}")
+        + seg(larg(ruim_v, ok_v), _RQ_STATUS_COR["atencao"], "Atenção")
+        + seg(larg(ok_v, 100.0), _RQ_STATUS_COR["ok"], f"OK ≥ {_rq_fmt_pct(ok_v)}")
+        + '</div><span style="font-size:11px;opacity:.7">100%</span></div>')
+
+
+def _rq_regua_inputs(key: str, faixa_ok: float, faixa_ruim: float) -> tuple[float, float]:
+    """Os dois dropdowns da régua + prévia. Vermelho só oferece valores ≤ verde."""
+    x, y = st.columns(2)
+    ok = x.selectbox("🟢 OK a partir de", _RQ_FAIXAS, key=f"{key}_ok", format_func=_rq_fmt_pct,
+                     index=_RQ_FAIXAS.index(faixa_ok) if faixa_ok in _RQ_FAIXAS else 3)
+    opc_ruim = [v for v in _RQ_FAIXAS if v <= ok]
+    ruim = y.selectbox("🔴 Ruim abaixo de", opc_ruim, key=f"{key}_ruim", format_func=_rq_fmt_pct,
+                       index=opc_ruim.index(faixa_ruim) if faixa_ruim in opc_ruim else 0)
+    st.markdown(_rq_regua_html(ok, ruim), unsafe_allow_html=True)
+    st.caption("% de linhas que cumprem a regra. Entre os dois valores fica 🟡 Atenção. "
+               "OK 100% e Ruim abaixo de 100% = tolerância zero (uma falha já é Ruim).")
+    return ok, ruim
 
 
 def _rq_slug(texto: str) -> str:
@@ -6628,6 +6702,8 @@ def list_regras_qualidade(indicador_id: int | None = None) -> pd.DataFrame:
     return run_query(
         "SELECT id, indicador_id, tabela, nome, descricao, tipo, coluna, parametros, "
         "criticidade, funcao, argumentos, origem, ativa, coalesce(escopo, 'lineage') AS escopo, "
+        f"coalesce(faixa_ok, {_RQ_FAIXA_OK_PADRAO}) AS faixa_ok, "
+        f"coalesce(faixa_ruim, {_RQ_FAIXA_RUIM_PADRAO}) AS faixa_ruim, "
         "teste_falhas, teste_total, "
         "testado_em, criado_por, atualizado_em "
         f"FROM {_cad('regras_qualidade')} {where} ORDER BY tabela, nome"
@@ -6711,22 +6787,24 @@ def _rq_descricao_padrao(tipo: str, coluna: str, p: dict) -> str:
 
 def _rq_salvar(user: str, indicador_id: int, tabela: str, nome: str, descricao: str, tipo: str,
                coluna: str, params: dict, criticidade: str, funcao: str, argumentos: dict,
-               teste: dict | None, escopo: str = "lineage") -> None:
+               teste: dict | None, escopo: str = "lineage",
+               faixa_ok: float = _RQ_FAIXA_OK_PADRAO, faixa_ruim: float = _RQ_FAIXA_RUIM_PADRAO) -> None:
     run_exec(
         f"INSERT INTO {_cad('regras_qualidade')} (indicador_id, tabela, nome, descricao, tipo, "
-        "coluna, parametros, criticidade, funcao, argumentos, origem, ativa, escopo, teste_falhas, "
+        "coluna, parametros, criticidade, funcao, argumentos, origem, ativa, escopo, "
+        "faixa_ok, faixa_ruim, teste_falhas, "
         "teste_total, testado_em, criado_em, criado_por, atualizado_em, atualizado_por) VALUES ("
         f"{int(indicador_id)}, {q_str(tabela)}, {q_str(nome)}, {q_str(descricao)}, {q_str(tipo)}, "
         f"{_qn(coluna or None)}, {q_str(json.dumps(params, ensure_ascii=False))}, "
         f"{q_str(criticidade)}, {q_str(funcao)}, {q_str(json.dumps(argumentos, ensure_ascii=False))}, "
-        f"'app', true, {q_str(escopo)}, "
+        f"'app', true, {q_str(escopo)}, {float(faixa_ok)}, {float(faixa_ruim)}, "
         f"{teste['falhas'] if teste else 'NULL'}, {teste['total'] if teste else 'NULL'}, "
         f"{'current_timestamp()' if teste else 'NULL'}, "
         f"current_timestamp(), {q_str(user)}, current_timestamp(), {q_str(user)})"
     )
     _log_cadastro(user, "regras_qualidade", "INSERT", f"{indicador_id}:{nome}", None,
                   {"tabela": tabela, "nome": nome, "funcao": funcao, "argumentos": argumentos,
-                   "escopo": escopo})
+                   "escopo": escopo, "faixa_ok": faixa_ok, "faixa_ruim": faixa_ruim})
 
 
 def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
@@ -6738,7 +6816,7 @@ def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
     c1.metric("Regras ativas", ativas)
     if not res:
         c2.metric("Linhas válidas", "—")
-        c3.metric("Regras com falha", "—")
+        c3.metric("Status do indicador", "—")
         c4.metric("Última verificação", "—")
         st.caption(
             "O monitoramento ainda não rodou para este indicador. O job do DQX lê as "
@@ -6752,12 +6830,26 @@ def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
         str(r["regra_id"]): (int(r["linhas_com_falha"] or 0), r["pct_conformidade"])
         for r in res["regras"].to_dict("records")
     }
-    com_falha = sum(1 for f, _ in por_regra.values() if f > 0)
+    # Status com a régua ATUAL de cada regra (o PS vê na hora o efeito de mudar a régua;
+    # o dashboard usa a régua gravada em cada execução).
+    itens, contagem = [], {"ok": 0, "atencao": 0, "ruim": 0}
+    for r in regras.to_dict("records"):
+        if str(r.get("ativa")).lower() != "true" or str(r["id"]) not in por_regra:
+            continue
+        s = _rq_status(por_regra[str(r["id"])][1], r["faixa_ok"], r["faixa_ruim"])
+        if s:
+            itens.append((r.get("escopo"), s))
+            contagem[s] += 1
+    status_ind = _rq_status_indicador(itens)
+    c3.metric("Status do indicador", _RQ_STATUS.get(status_ind, "—"),
+              delta=f"🟢 {contagem['ok']} · 🟡 {contagem['atencao']} · 🔴 {contagem['ruim']} regras",
+              delta_color="off",
+              help="Vale a pior regra (uma regra Ruim basta). Regras a montante são alerta "
+                   "antecipado: deixam o indicador no máximo em Atenção.")
     c2.metric("Linhas válidas", "—" if pct_lin is None else f"{pct_lin:.1f}%",
               delta=None if pct_mon is None else f"a montante: {pct_mon:.1f}%", delta_color="off",
               help="Linhas sem nenhuma violação (erro ou aviso) nas tabelas do lineage do indicador. "
                    "As tabelas a montante (ex.: silver) aparecem separadas, embaixo.")
-    c3.metric("Regras com falha", f"{com_falha} de {len(por_regra)}")
     c4.metric("Última verificação", str(res["run_time"])[:16].replace("T", " "))
     hist = res["historico"]
     if hist["run_time"].nunique() > 1:
@@ -6791,9 +6883,11 @@ def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_edit
         rid = str(r["id"])
         with st.container(border=True):
             a, b = st.columns([5, 2])
-            crit = "🔴 Erro" if r.get("criticidade") == "error" else "🟡 Aviso"
+            crit = "⛔ Erro" if r.get("criticidade") == "error" else "⚠️ Aviso"
+            status = _rq_status(por_regra[rid][1], r["faixa_ok"], r["faixa_ruim"]) if rid in por_regra else None
             a.markdown(
-                f"**{r.get('descricao') or r['nome']}**  \n"
+                (f"{_RQ_STATUS[status]} · " if status and ativa else "")
+                + f"**{r.get('descricao') or r['nome']}**  \n"
                 f"{crit} · `{r['tabela']}`"
                 + (" · ⬆️ a montante" if r.get("escopo") == "montante" else "")
                 + (f" · coluna `{r['coluna']}`" if r.get("coluna") else "")
@@ -6803,8 +6897,9 @@ def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_edit
             linhas = []
             if rid in por_regra:
                 f, pct = por_regra[rid]
-                linhas.append(("✅ sem falhas" if f == 0 else f"❌ {f} linha(s) com falha")
+                linhas.append(("sem falhas" if f == 0 else f"{f} linha(s) com falha")
                               + f" na última verificação ({pct}% conforme)")
+            linhas.append(f"Régua: 🟢 ≥ {_rq_fmt_pct(r['faixa_ok'])} · 🔴 < {_rq_fmt_pct(r['faixa_ruim'])}")
             if r.get("teste_total") not in (None, ""):
                 linhas.append(f"Teste ao criar: {r['teste_falhas']} de {r['teste_total']} linha(s) violavam")
             if r.get("origem") and r["origem"] != "app":
@@ -6817,6 +6912,20 @@ def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_edit
                                               "arguments": json.loads(r["argumentos"] or "{}")}},
                                    ensure_ascii=False, indent=2), language="json")
             if pode_editar:
+                with a.expander("📏 Editar régua"):
+                    novo_ok, novo_ruim = _rq_regua_inputs(f"rq_reg_{rid}", float(r["faixa_ok"]),
+                                                          float(r["faixa_ruim"]))
+                    mudou = (novo_ok, novo_ruim) != (float(r["faixa_ok"]), float(r["faixa_ruim"]))
+                    if st.button("💾 Salvar régua", key=f"rq_reg_save_{rid}", disabled=not mudou):
+                        run_exec(
+                            f"UPDATE {_cad('regras_qualidade')} SET faixa_ok = {float(novo_ok)}, "
+                            f"faixa_ruim = {float(novo_ruim)}, atualizado_em = current_timestamp(), "
+                            f"atualizado_por = {q_str(user)} WHERE id = {int(r['id'])}")
+                        # Auditoria: ninguém afrouxa a régua em silêncio.
+                        _log_cadastro(user, "regras_qualidade", "UPDATE", rid,
+                                      {"faixa_ok": float(r["faixa_ok"]), "faixa_ruim": float(r["faixa_ruim"])},
+                                      {"faixa_ok": novo_ok, "faixa_ruim": novo_ruim})
+                        _finish_write("Régua atualizada.")
                 if b.button("⏸️ Desativar" if ativa else "▶️ Ativar", key=f"rq_tog_{rid}",
                             use_container_width=True):
                     run_exec(
@@ -6933,8 +7042,10 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
             help="Linha que torna a condição FALSA é a que viola a regra. Revise antes de testar.")
         p["mensagem"] = st.text_input("Mensagem quando a regra falha", key=f"rq_msg_{sid}")
 
-    crit = st.radio("Gravidade", list(_RQ_CRITICIDADE), format_func=_RQ_CRITICIDADE.get,
+    crit = st.radio("Gravidade (por linha)", list(_RQ_CRITICIDADE), format_func=_RQ_CRITICIDADE.get,
                     key=f"rq_crit_{sid}", horizontal=True)
+    st.markdown("**Régua de aceitação** — quanto de falha o negócio aceita nesta regra")
+    faixa_ok, faixa_ruim = _rq_regua_inputs(f"rq_regua_{sid}", _RQ_FAIXA_OK_PADRAO, _RQ_FAIXA_RUIM_PADRAO)
     descricao = st.text_input(
         "Descrição (como aparece no painel)", key=f"rq_desc_{sid}",
         placeholder=_rq_descricao_padrao(tipo, coluna, p) if (coluna or tipo == "expressao") else "")
@@ -6983,7 +7094,8 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
             return
         _rq_salvar(user, sid, tabela, nome_tecnico,
                    descricao or _rq_descricao_padrao(tipo, coluna, p), tipo, coluna, p,
-                   crit, funcao, argumentos, teste, escopo=escopo)
+                   crit, funcao, argumentos, teste, escopo=escopo,
+                   faixa_ok=faixa_ok, faixa_ruim=faixa_ruim)
         for k in [k for k in st.session_state if k.startswith("rq_") and k.endswith(f"_{sid}")]:
             st.session_state.pop(k, None)
         _finish_write("Regra salva e ativa — entra no próximo monitoramento.")
