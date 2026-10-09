@@ -51,7 +51,7 @@ COLS_REGRAS = set(spark.table(f"{CAD}.regras_qualidade").columns)
 # mesmo mapa do app (`_RQ_DIM_POR_TIPO` / `_RQ_DIM_POR_FUNCAO`).
 DIM_POR_TIPO = {"nao_vazio": "completude", "unico": "unicidade", "lista": "validade",
                 "intervalo": "validade", "data_futura": "validade", "existe_em": "consistencia",
-                "expressao": "consistencia"}
+                "expressao": "consistencia", "atualidade": "atualidade", "acuracia": "acuracia"}
 DIM_POR_FUNCAO = {"is_not_null": "completude", "is_not_null_and_not_empty": "completude",
                   "is_not_empty": "completude", "is_unique": "unicidade", "is_in_list": "validade",
                   "is_not_null_and_is_in_list": "validade", "is_in_range": "validade",
@@ -59,11 +59,84 @@ DIM_POR_FUNCAO = {"is_not_null": "completude", "is_not_null_and_not_empty": "com
                   "is_not_in_future": "validade", "is_valid_date": "validade",
                   "is_valid_timestamp": "validade", "regex_match": "validade",
                   "foreign_key": "consistencia", "sql_expression": "consistencia",
-                  "is_data_fresh": "atualidade", "is_older_than_n_days": "atualidade"}
+                  "is_data_fresh": "atualidade", "is_older_than_n_days": "atualidade",
+                  "freshness_sla": "atualidade", "reconciliacao": "acuracia"}
 
 
 def _dimensao(r):
     return r.dimensao or DIM_POR_TIPO.get(r.tipo) or DIM_POR_FUNCAO.get(r.funcao, "validade")
+
+
+# --- Verificações da tabela (mesma lógica de `testar_regra_tabela` no app) -------------
+FUNCOES_TABELA = {"freshness_sla", "reconciliacao"}
+FREQUENCIAS = {"horaria": ("A cada hora", 1), "diaria": ("Diária", 24),
+               "semanal": ("Semanal", 24 * 7), "mensal": ("Mensal", 24 * 31)}
+# Operações do histórico Delta que são CARGA (comentário/tag/propriedade não contam).
+OPS_CARGA = {"WRITE", "MERGE", "UPDATE", "DELETE", "STREAMING UPDATE", "COPY INTO",
+             "CREATE TABLE AS SELECT", "REPLACE TABLE AS SELECT",
+             "CREATE OR REPLACE TABLE AS SELECT", "TRUNCATE", "RESTORE"}
+
+
+def _q(nome):
+    return ".".join(f"`{p}`" for p in nome.split("."))
+
+
+def _atualidade(tabela, a):
+    nome, horas = FREQUENCIAS.get(a.get("frequencia", "diaria"), FREQUENCIAS["diaria"])
+    if a.get("medida") == "coluna":
+        ultimo = spark.sql(f"SELECT max(`{a['column']}`) AS u FROM {_q(tabela)}").first()["u"]
+    else:
+        h = spark.sql(f"DESCRIBE HISTORY {_q(tabela)} LIMIT 500")
+        ultimo = h.where(F.upper("operation").isin(list(OPS_CARGA))).agg(F.max("timestamp")).first()[0]
+    if ultimo is None:
+        return {"pct": 0.0, "total": 1, "falhas": 1, "detalhe": f"{nome} · nenhuma carga encontrada"}
+    if not isinstance(ultimo, datetime):  # coluna DATE
+        ultimo = datetime(ultimo.year, ultimo.month, ultimo.day)
+    if ultimo.tzinfo is None:
+        ultimo = ultimo.replace(tzinfo=timezone.utc)
+    idade_h = (datetime.now(timezone.utc) - ultimo).total_seconds() / 3600
+    ciclos = idade_h / horas
+    pct = 100.0 if ciclos <= 1 else (50.0 if ciclos <= 2 else 0.0)
+    idade = f"{idade_h:.0f}h" if idade_h < 72 else f"{idade_h / 24:.0f} dias"
+    perdeu = "" if ciclos <= 1 else f" · perdeu {int(ciclos)} ciclo(s)"
+    return {"pct": pct, "total": 1, "falhas": 0 if pct == 100 else 1,
+            "detalhe": f"{nome} · última atualização há {idade}{perdeu}"}
+
+
+def _acuracia(tabela, a, faixa_ok):
+    agg = lambda col: "count(*)" if a["aggr"] == "count" and not col else f"{a['aggr']}(`{col}`)"
+    g = f"`{a['group_by']}`" if a.get("group_by") else "'total'"
+    rg = f"`{a['ref_group_by']}`" if a.get("ref_group_by") else "'total'"
+    linhas = spark.sql(
+        f"WITH x AS (SELECT CAST({g} AS STRING) AS grp, CAST({agg(a.get('column'))} AS DOUBLE) AS v "
+        f"FROM {_q(tabela)} GROUP BY 1), "
+        f"r AS (SELECT CAST({rg} AS STRING) AS grp, CAST({agg(a.get('ref_column'))} AS DOUBLE) AS v "
+        f"FROM {_q(a['ref_table'])} GROUP BY 1) "
+        "SELECT coalesce(x.grp, r.grp) AS grp, x.v AS valor, r.v AS referencia "
+        "FROM x FULL OUTER JOIN r ON x.grp <=> r.grp").collect()
+    if not linhas:
+        return {"pct": 0.0, "total": 0, "falhas": 0, "detalhe": "sem dados para comparar"}
+
+    def dif(v, ref):
+        if v is None or ref is None:
+            return 100.0
+        return 0.0 if v == ref else (100.0 if ref == 0 else abs(v - ref) / abs(ref) * 100)
+
+    difs = [(dif(l.valor, l.referencia), l) for l in linhas]
+    pior, l = max(difs, key=lambda t: t[0])
+    fora = sum(1 for d, _ in difs if d > (100.0 - faixa_ok) + 1e-9)
+    fmt = lambda v: "—" if v is None else f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    grupo = f" (pior grupo: {l.grp})" if len(linhas) > 1 else ""
+    return {"pct": max(0.0, round(100.0 - pior, 2)), "total": len(linhas), "falhas": fora,
+            "detalhe": f"diferença {str(round(pior, 2)).replace('.', ',')}%{grupo} · {fmt(l.valor)} × referência {fmt(l.referencia)}"
+                       + (f" · {fora} de {len(linhas)} grupo(s) fora" if len(linhas) > 1 else "")}
+
+
+def _avaliar_tabela(tabela, r):
+    a = json.loads(r.argumentos or "{}")
+    if r.funcao == "freshness_sla":
+        return _atualidade(tabela, a)
+    return _acuracia(tabela, a, float(r.faixa_ok))
 
 
 def _status(pct, faixa_ok, faixa_ruim):
@@ -146,7 +219,29 @@ def _colunas_sensiveis(tabela, colunas):
 saida = {"run_id": run_id, "run_time": str(run_time), "grupos": [], "erros": []}
 execucoes, metricas, falhas = [], [], []
 
-for (indicador_id, indicador, tabela, escopo), rs in grupos.items():
+for (indicador_id, indicador, tabela, escopo), todas in grupos.items():
+    # Verificações da TABELA (atualidade/acurácia) saem do DQX: SQL próprio, mesmo cálculo
+    # do "Testar" do app. Não entram em `execucoes` (o % de linhas válidas é sobre linhas).
+    rs = [r for r in todas if r.funcao not in FUNCOES_TABELA]
+    for r in [r for r in todas if r.funcao in FUNCOES_TABELA]:
+        try:
+            res = _avaliar_tabela(tabela, r)
+        except Exception as exc:
+            saida["erros"].append({"indicador_id": indicador_id, "tabela": tabela, "regra": r.nome,
+                                   "erro": f"{type(exc).__name__}: {exc}"[:500]})
+            continue
+        metricas.append({"run_id": run_id, "run_time": run_time, "indicador_id": indicador_id,
+                         "indicador": indicador, "tabela": tabela, "escopo": escopo,
+                         "regra_id": r.id, "regra": r.nome, "descricao": r.descricao,
+                         "coluna": r.coluna, "criticidade": r.criticidade, "funcao": r.funcao,
+                         "origem_regra": r.origem, "total_linhas": res["total"],
+                         "linhas_com_falha": res["falhas"], "pct_conformidade": res["pct"],
+                         "faixa_ok": float(r.faixa_ok), "faixa_ruim": float(r.faixa_ruim),
+                         "dimensao": _dimensao(r), "detalhe": res["detalhe"],
+                         "status": _status(res["pct"], float(r.faixa_ok), float(r.faixa_ruim))})
+        saida["grupos"].append({"indicador": indicador, "tabela": tabela, "regra": r.nome, **res})
+    if not rs:
+        continue
     checks = [{
         "name": r.nome,
         "criticality": r.criticidade,
@@ -195,6 +290,7 @@ for (indicador_id, indicador, tabela, escopo), rs in grupos.items():
                          "origem_regra": r.origem, "total_linhas": total, "linhas_com_falha": n,
                          "pct_conformidade": pct, "faixa_ok": float(r.faixa_ok),
                          "faixa_ruim": float(r.faixa_ruim), "dimensao": _dimensao(r),
+                         "detalhe": f"{n} de {total} linha(s) com falha",
                          "status": _status(pct, float(r.faixa_ok), float(r.faixa_ruim))})
 
     if escopo == "lineage":

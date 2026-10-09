@@ -6457,7 +6457,23 @@ _RQ_TIPOS: dict[str, str] = {
     "data_futura": "Data não pode estar no futuro",
     "existe_em": "Precisa existir em outra tabela",
     "expressao": "Regra livre (escrita em SQL, com ajuda da IA)",
+    "atualidade": "Atualizado com a frequência esperada (tabela inteira)",
+    "acuracia": "Bate com a fonte de verdade (conferência de totais)",
 }
+
+# Verificações da TABELA (não linha a linha): o job calcula por SQL e grava no mesmo
+# formato das regras DQX. Não entram no "% de linhas válidas" — tabela atrasada não tem
+# linha errada — só no status da dimensão e do indicador.
+_RQ_TIPOS_TABELA = {"atualidade", "acuracia"}
+_RQ_FUNCOES_TABELA = {"freshness_sla", "reconciliacao"}
+# Frequência esperada → horas do ciclo. Régua derivada: OK dentro de 1 ciclo, Atenção
+# perdeu 1 ciclo, Ruim perdeu 2+. Gravada como faixa 100/50 sobre o "pct" 100/50/0.
+_RQ_FREQUENCIAS = {"horaria": ("A cada hora", 1), "diaria": ("Diária", 24),
+                   "semanal": ("Semanal", 24 * 7), "mensal": ("Mensal", 24 * 31)}
+# Operações do histórico Delta que são CARGA de dado (comentário/tag/propriedade não contam).
+_RQ_OPS_CARGA = {"WRITE", "MERGE", "UPDATE", "DELETE", "STREAMING UPDATE", "COPY INTO",
+                 "CREATE TABLE AS SELECT", "REPLACE TABLE AS SELECT",
+                 "CREATE OR REPLACE TABLE AS SELECT", "TRUNCATE", "RESTORE"}
 
 # Rótulo de exibição para funções DQX que não vieram dos modelos da tela
 # (regras importadas do profiler/YAML).
@@ -6494,7 +6510,7 @@ _RQ_DIMENSOES = {
 _RQ_DIM_CURTO = {k: v.split(" — ")[0] for k, v in _RQ_DIMENSOES.items()}
 _RQ_DIM_POR_TIPO = {"nao_vazio": "completude", "unico": "unicidade", "lista": "validade",
                     "intervalo": "validade", "data_futura": "validade", "existe_em": "consistencia",
-                    "expressao": "consistencia"}
+                    "expressao": "consistencia", "atualidade": "atualidade", "acuracia": "acuracia"}
 _RQ_DIM_POR_FUNCAO = {"is_not_null": "completude", "is_not_null_and_not_empty": "completude",
                       "is_not_empty": "completude", "is_unique": "unicidade",
                       "is_in_list": "validade", "is_not_null_and_is_in_list": "validade",
@@ -6503,7 +6519,8 @@ _RQ_DIM_POR_FUNCAO = {"is_not_null": "completude", "is_not_null_and_not_empty": 
                       "is_valid_date": "validade", "is_valid_timestamp": "validade",
                       "regex_match": "validade", "foreign_key": "consistencia",
                       "sql_expression": "consistencia", "is_data_fresh": "atualidade",
-                      "is_older_than_n_days": "atualidade"}
+                      "is_older_than_n_days": "atualidade", "freshness_sla": "atualidade",
+                      "reconciliacao": "acuracia"}
 
 
 def _rq_dimensao(r: dict) -> str:
@@ -6568,6 +6585,37 @@ def _rq_regua_html(faixa_ok: float, faixa_ruim: float) -> str:
         + seg(larg(ruim_v, ok_v), _RQ_STATUS_COR["atencao"], "Atenção")
         + seg(larg(ok_v, 100.0), _RQ_STATUS_COR["ok"], f"OK ≥ {_rq_fmt_pct(ok_v)}")
         + '</div><span style="font-size:11px;opacity:.7">100%</span></div>')
+
+
+_RQ_DIFS = [0.0, 0.1, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
+
+
+def _rq_regua_dif_inputs(key: str, faixa_ok: float, faixa_ruim: float) -> tuple[float, float]:
+    """Régua da Acurácia em % de DIFERENÇA (mais natural p/ conferência de totais).
+    Grava como conformidade (100 − diferença), na mesma régua das demais regras."""
+    dif_ok_atual, dif_ruim_atual = round(100 - float(faixa_ok), 1), round(100 - float(faixa_ruim), 1)
+    x, y = st.columns(2)
+    dif_ok = x.selectbox("🟢 OK com diferença de até", _RQ_DIFS, key=f"{key}_dok", format_func=_rq_fmt_pct,
+                         index=_RQ_DIFS.index(dif_ok_atual) if dif_ok_atual in _RQ_DIFS else 2)
+    opc = [v for v in _RQ_DIFS if v >= dif_ok]
+    dif_ruim = y.selectbox("🔴 Ruim com diferença acima de", opc, key=f"{key}_druim", format_func=_rq_fmt_pct,
+                           index=opc.index(dif_ruim_atual) if dif_ruim_atual in opc else min(1, len(opc) - 1))
+    st.caption("Diferença entre o total desta tabela e o da fonte de verdade. Entre os dois valores "
+               "fica 🟡 Atenção. Por grupo, vale o pior grupo.")
+    return 100.0 - dif_ok, 100.0 - dif_ruim
+
+
+def _rq_escolher_tabela(user: str, key: str, rotulo: str) -> str | None:
+    """Catálogo › schema › tabela que o usuário enxerga (OBO). None até completar."""
+    st.markdown(f"**{rotulo}**")
+    x, y, z = st.columns(3)
+    cat = x.selectbox("Catálogo", list_catalogs(user), key=f"{key}_cat")
+    sch = y.selectbox("Schema", list_schemas(user, cat) if cat else [], key=f"{key}_sch")
+    # `__materialization_*` / `event_log_*` são internas dos pipelines declarativos.
+    opcoes = [t for t in (list_tables(user, cat, sch) if sch else [])
+              if not t.startswith("__") and not t.startswith("event_log_")]
+    tbl = z.selectbox("Tabela", opcoes, key=f"{key}_tbl")
+    return f"{cat}.{sch}.{tbl}" if cat and sch and tbl else None
 
 
 def _rq_regua_inputs(key: str, faixa_ok: float, faixa_ruim: float) -> tuple[float, float]:
@@ -6666,7 +6714,91 @@ def _rq_montar(tipo: str, coluna: str, p: dict) -> tuple[str, dict, str]:
             args["msg"] = p["mensagem"]
         # DQX: falha quando a expressão é FALSE (NULL não falha).
         return "sql_expression", args, f"NOT ({expr})"
+    if tipo == "atualidade":
+        if p.get("medida") == "coluna" and not coluna:
+            raise ValueError("Escolha a coluna de data/hora.")
+        return ("freshness_sla", {"frequencia": p.get("frequencia", "diaria"),
+                                  "medida": p.get("medida", "carga"),
+                                  "column": coluna if p.get("medida") == "coluna" else None}, "")
+    if tipo == "acuracia":
+        ref = (p.get("ref_tabela") or "").strip()
+        if not ref or len(ref.split(".")) != 3:
+            raise ValueError("Escolha a tabela de referência (fonte de verdade).")
+        if p.get("aggr") == "sum" and (not coluna or not p.get("ref_coluna")):
+            raise ValueError("Na soma, escolha a coluna aqui e a correspondente na referência.")
+        if bool(p.get("group_by")) != bool(p.get("ref_group_by")):
+            raise ValueError("Por grupo: escolha a coluna de agrupamento nas duas tabelas.")
+        return ("reconciliacao", {"aggr": p.get("aggr", "sum"), "column": coluna or None,
+                                  "ref_table": ref, "ref_column": p.get("ref_coluna") or None,
+                                  "group_by": p.get("group_by") or None,
+                                  "ref_group_by": p.get("ref_group_by") or None}, "")
     raise ValueError(f"Tipo de regra desconhecido: {tipo}")
+
+
+def _rq_avaliar_atualidade(ultimo, frequencia: str) -> dict:
+    """{pct, total, falhas, detalhe}: pct 100 = no ciclo, 50 = perdeu 1, 0 = perdeu 2+."""
+    nome, horas = _RQ_FREQUENCIAS.get(frequencia, _RQ_FREQUENCIAS["diaria"])
+    if ultimo is None or pd.isna(ultimo):
+        return {"pct": 0.0, "total": 1, "falhas": 1, "detalhe": f"{nome} · nenhuma carga encontrada"}
+    ultimo = pd.Timestamp(ultimo)
+    ultimo = ultimo.tz_localize("UTC") if ultimo.tzinfo is None else ultimo.tz_convert("UTC")
+    idade_h = (pd.Timestamp.now(tz="UTC") - ultimo).total_seconds() / 3600
+    ciclos = idade_h / horas
+    pct = 100.0 if ciclos <= 1 else (50.0 if ciclos <= 2 else 0.0)
+    idade = f"{idade_h:.0f}h" if idade_h < 72 else f"{idade_h / 24:.0f} dias"
+    perdeu = "" if ciclos <= 1 else f" · perdeu {int(ciclos)} ciclo(s)"
+    return {"pct": pct, "total": 1, "falhas": 0 if pct == 100 else 1,
+            "detalhe": f"{nome} · última atualização há {idade}{perdeu}"}
+
+
+def _rq_sql_acuracia(tabela: str, a: dict) -> str:
+    """Agregado por grupo nas duas tabelas (FULL OUTER: grupo faltando de um lado conta)."""
+    def agg(col):
+        return "count(*)" if a["aggr"] == "count" and not col else f"{a['aggr']}({q_ident(col)})"
+    g = q_ident(a["group_by"]) if a.get("group_by") else "'total'"
+    rg = q_ident(a["ref_group_by"]) if a.get("ref_group_by") else "'total'"
+    return (
+        f"WITH x AS (SELECT CAST({g} AS STRING) AS grp, CAST({agg(a.get('column'))} AS DOUBLE) AS v "
+        f"FROM {q_fqn(tabela)} GROUP BY 1), "
+        f"r AS (SELECT CAST({rg} AS STRING) AS grp, CAST({agg(a.get('ref_column'))} AS DOUBLE) AS v "
+        f"FROM {q_fqn(a['ref_table'])} GROUP BY 1) "
+        "SELECT coalesce(x.grp, r.grp) AS grp, x.v AS valor, r.v AS referencia "
+        "FROM x FULL OUTER JOIN r ON x.grp <=> r.grp")
+
+
+def _rq_avaliar_acuracia(linhas: list[dict], faixa_ok: float) -> dict:
+    """pct = 100 − pior diferença % entre grupos; falhas = grupos acima da tolerância do OK."""
+    def dif(v, ref):
+        if v is None or ref is None or pd.isna(v) or pd.isna(ref):
+            return 100.0
+        v, ref = float(v), float(ref)
+        return 0.0 if v == ref else (100.0 if ref == 0 else abs(v - ref) / abs(ref) * 100)
+    if not linhas:
+        return {"pct": 0.0, "total": 0, "falhas": 0, "detalhe": "sem dados para comparar"}
+    difs = [(dif(l["valor"], l["referencia"]), l) for l in linhas]
+    pior, l = max(difs, key=lambda t: t[0])
+    tol = 100.0 - float(faixa_ok)
+    fora = sum(1 for d, _ in difs if d > tol + 1e-9)
+    fmt = lambda v: "—" if v is None or pd.isna(v) else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    grupo = f" (pior grupo: {l['grp']})" if len(linhas) > 1 else ""
+    return {"pct": max(0.0, round(100.0 - pior, 2)), "total": len(linhas), "falhas": fora,
+            "detalhe": f"diferença {str(round(pior, 2)).replace('.', ',')}%{grupo} · {fmt(l['valor'])} × referência {fmt(l['referencia'])}"
+                       + (f" · {fora} de {len(linhas)} grupo(s) fora" if len(linhas) > 1 else "")}
+
+
+def testar_regra_tabela(tabela: str, funcao: str, a: dict, faixa_ok: float) -> dict:
+    """Mesmo cálculo do job, no warehouse e com a identidade do usuário (OBO)."""
+    if funcao == "freshness_sla":
+        if a.get("medida") == "coluna":
+            df = run_query(f"SELECT max({q_ident(a['column'])}) AS u FROM {q_fqn(tabela)}", prefer_user=True)
+            ultimo = df.iloc[0]["u"] if not df.empty else None
+        else:
+            h = run_query(f"DESCRIBE HISTORY {q_fqn(tabela)} LIMIT 500", prefer_user=True)
+            h = h[h["operation"].str.upper().isin(_RQ_OPS_CARGA)] if not h.empty else h
+            ultimo = pd.to_datetime(h["timestamp"]).max() if not h.empty else None
+        return _rq_avaliar_atualidade(ultimo, a.get("frequencia", "diaria"))
+    linhas = run_query(_rq_sql_acuracia(tabela, a), prefer_user=True).to_dict("records")
+    return _rq_avaliar_acuracia(linhas, faixa_ok)
 
 
 def testar_regra_qualidade(tabela: str, tipo: str, argumentos: dict, cond_violacao: str) -> dict:
@@ -6767,7 +6899,7 @@ def _dqx_resultados(indicador_id: int) -> dict:
         # SELECT * : `escopo` só existe depois da 1ª execução do job com regras a montante.
         execs = run_query(f"SELECT * FROM {base}.execucoes WHERE {filtro}")
         regras = run_query(
-            f"SELECT regra_id, linhas_com_falha, pct_conformidade FROM {base}.metricas_regras "
+            f"SELECT * FROM {base}.metricas_regras "
             f"WHERE {filtro}")
     except Exception:
         return {}
@@ -6813,6 +6945,14 @@ def _rq_descricao_padrao(tipo: str, coluna: str, p: dict) -> str:
         return f"{coluna} não pode estar no futuro"
     if tipo == "existe_em":
         return f"{coluna} precisa existir em {p.get('ref_tabela')}.{p.get('ref_coluna')}"
+    if tipo == "atualidade":
+        freq = _RQ_FREQUENCIAS.get(p.get("frequencia", "diaria"), ("Diária",))[0].lower()
+        base = f"pela coluna {coluna}" if p.get("medida") == "coluna" else "pela carga"
+        return f"Atualização {freq} ({base})"
+    if tipo == "acuracia":
+        o_que = f"Soma de {coluna}" if p.get("aggr") == "sum" else "Quantidade de linhas"
+        grp = f" por {p['group_by']}" if p.get("group_by") else ""
+        return f"{o_que}{grp} bate com {p.get('ref_tabela') or 'a fonte de verdade'}"
     return p.get("texto") or p.get("mensagem") or "Regra livre"
 
 
@@ -6861,7 +7001,8 @@ def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
     pct_lin = _rq_pct_validas(ex, "lineage")
     pct_mon = _rq_pct_validas(ex, "montante")
     por_regra = {
-        str(r["regra_id"]): (int(r["linhas_com_falha"] or 0), r["pct_conformidade"])
+        # (falhas, pct, detalhe) — `detalhe` só nas verificações de tabela (atualidade/acurácia).
+        str(r["regra_id"]): (int(r["linhas_com_falha"] or 0), r["pct_conformidade"], r.get("detalhe"))
         for r in res["regras"].to_dict("records")
     }
     # Status com a régua ATUAL de cada regra (o PS vê na hora o efeito de mudar a régua;
@@ -6924,7 +7065,9 @@ def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_edit
             a.markdown(
                 (f"{_RQ_STATUS[status]} · " if status and ativa else "")
                 + f"**{r.get('descricao') or r['nome']}**  \n"
-                f"{_RQ_DIM_CURTO[_rq_dimensao(r)]} · {crit} · `{r['tabela']}`"
+                f"{_RQ_DIM_CURTO[_rq_dimensao(r)]} · "
+                + ("" if r.get("funcao") in _RQ_FUNCOES_TABELA else f"{crit} · ")
+                + f"`{r['tabela']}`"
                 + (" · ⬆️ a montante" if r.get("escopo") == "montante" else "")
                 + (f" · coluna `{r['coluna']}`" if r.get("coluna") else "")
                 + f" · {_RQ_TIPOS.get(r.get('tipo'), _RQ_FUNCAO_LABEL.get(r.get('funcao'), r.get('funcao')))}"
@@ -6932,17 +7075,26 @@ def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_edit
             )
             linhas = []
             if rid in por_regra:
-                f, pct = por_regra[rid]
-                linhas.append(("sem falhas" if f == 0 else f"{f} linha(s) com falha")
-                              + f" na última verificação ({pct}% conforme)")
-            linhas.append(f"Régua: 🟢 ≥ {_rq_fmt_pct(r['faixa_ok'])} · 🔴 < {_rq_fmt_pct(r['faixa_ruim'])}")
-            if r.get("teste_total") not in (None, ""):
+                f, pct, detalhe = por_regra[rid]
+                if r.get("funcao") in _RQ_FUNCOES_TABELA:
+                    linhas.append(f"Última verificação: {detalhe or '—'}")
+                else:
+                    linhas.append(("sem falhas" if f == 0 else f"{f} linha(s) com falha")
+                                  + f" na última verificação ({pct}% conforme)")
+            if r.get("funcao") == "freshness_sla":
+                pass  # régua vem da frequência (descrita no detalhe)
+            elif r.get("funcao") == "reconciliacao":
+                linhas.append(f"Régua: 🟢 diferença ≤ {_rq_fmt_pct(100 - float(r['faixa_ok']))} · "
+                              f"🔴 > {_rq_fmt_pct(100 - float(r['faixa_ruim']))}")
+            else:
+                linhas.append(f"Régua: 🟢 ≥ {_rq_fmt_pct(r['faixa_ok'])} · 🔴 < {_rq_fmt_pct(r['faixa_ruim'])}")
+            if r.get("teste_total") not in (None, "") and r.get("funcao") not in _RQ_FUNCOES_TABELA:
                 linhas.append(f"Teste ao criar: {r['teste_falhas']} de {r['teste_total']} linha(s) violavam")
             if r.get("origem") and r["origem"] != "app":
                 linhas.append(f"Origem: {r['origem']}")
             if linhas:
                 a.caption(" · ".join(linhas))
-            with a.expander("Definição técnica (DQX)"):
+            with a.expander("Definição técnica" + ("" if r.get("funcao") in _RQ_FUNCOES_TABELA else " (DQX)")):
                 st.code(json.dumps({"name": r["nome"], "criticality": r["criticidade"],
                                     "check": {"function": r["funcao"],
                                               "arguments": json.loads(r["argumentos"] or "{}")}},
@@ -6953,8 +7105,15 @@ def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_edit
                     dim_atual = _rq_dimensao(r)
                     nova_dim = st.selectbox("Dimensão de qualidade (DAMA)", dims, format_func=_RQ_DIMENSOES.get,
                                             index=dims.index(dim_atual), key=f"rq_reg_dim_{rid}")
-                    novo_ok, novo_ruim = _rq_regua_inputs(f"rq_reg_{rid}", float(r["faixa_ok"]),
-                                                          float(r["faixa_ruim"]))
+                    if r.get("funcao") == "freshness_sla":
+                        st.caption("Régua da Atualidade vem da frequência esperada.")
+                        novo_ok, novo_ruim = float(r["faixa_ok"]), float(r["faixa_ruim"])
+                    elif r.get("funcao") == "reconciliacao":
+                        novo_ok, novo_ruim = _rq_regua_dif_inputs(f"rq_reg_{rid}", float(r["faixa_ok"]),
+                                                                  float(r["faixa_ruim"]))
+                    else:
+                        novo_ok, novo_ruim = _rq_regua_inputs(f"rq_reg_{rid}", float(r["faixa_ok"]),
+                                                              float(r["faixa_ruim"]))
                     antes = {"faixa_ok": float(r["faixa_ok"]), "faixa_ruim": float(r["faixa_ruim"]),
                              "dimensao": dim_atual}
                     depois = {"faixa_ok": novo_ok, "faixa_ruim": novo_ruim, "dimensao": nova_dim}
@@ -7041,9 +7200,57 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
                         key=f"rq_tipo_{sid}")
     p: dict = {}
     coluna = ""
-    if tipo != "expressao":
-        coluna = st.selectbox("Coluna", nomes, key=f"rq_col_{sid}_{tabela}",
-                              format_func=lambda n: f"{n}  ·  {tipos_col.get(n, '')}")
+    fmt_col = lambda n: f"{n}  ·  {tipos_col.get(n, '')}"
+    if tipo not in ("expressao", "atualidade", "acuracia"):
+        coluna = st.selectbox("Coluna", nomes, key=f"rq_col_{sid}_{tabela}", format_func=fmt_col)
+    if tipo == "atualidade":
+        st.caption("Verificação da **tabela inteira**: quando chegou dado novo. Não entra no "
+                   "% de linhas válidas — tabela atrasada não tem linha errada.")
+        p["frequencia"] = st.selectbox(
+            "Com que frequência este dado precisa ser atualizado?", list(_RQ_FREQUENCIAS),
+            index=1, key=f"rq_freq_{sid}", format_func=lambda k: _RQ_FREQUENCIAS[k][0])
+        p["medida"] = st.radio(
+            "Medir pela", ["carga", "coluna"], key=f"rq_med_{sid}", horizontal=True,
+            format_func={"carga": "última carga da tabela",
+                         "coluna": "data mais recente de uma coluna"}.get,
+            help="Carga = último WRITE/MERGE no histórico da tabela (comentário e tag não contam). "
+                 "Coluna = o dado de negócio mais recente — pega a origem travada mesmo com a "
+                 "carga rodando.")
+        if p["medida"] == "coluna":
+            datas = [n for n in nomes if any(t in tipos_col.get(n, "").lower() for t in ("date", "timestamp"))]
+            coluna = st.selectbox("Coluna de data/hora", datas, key=f"rq_fcol_{sid}_{tabela}",
+                                  format_func=fmt_col)
+        h = _RQ_FREQUENCIAS[p["frequencia"]][1]
+        st.caption(f"Régua automática: 🟢 até {h}h · 🟡 perdeu 1 ciclo (até {2 * h}h) · "
+                   f"🔴 perdeu 2 ciclos ou mais.")
+    elif tipo == "acuracia":
+        st.caption("Verificação da **tabela inteira**: o total desta tabela bate com o da fonte "
+                   "de verdade (origem, silver, sistema). Não entra no % de linhas válidas.")
+        p["aggr"] = st.radio("Comparar", ["sum", "count"], key=f"rq_aggr_{sid}", horizontal=True,
+                             format_func={"sum": "soma de uma coluna", "count": "quantidade de linhas"}.get)
+        numericas = [n for n in nomes if any(t in tipos_col.get(n, "").lower()
+                                             for t in ("int", "decimal", "double", "float", "long", "short"))]
+        if p["aggr"] == "sum":
+            coluna = st.selectbox("Coluna (nesta tabela)", numericas, key=f"rq_acol_{sid}_{tabela}",
+                                  format_func=fmt_col)
+        try:
+            p["ref_tabela"] = _rq_escolher_tabela(user, f"rq_ref_{sid}", "Fonte de verdade")
+            ref_cols = []
+            if p["ref_tabela"]:
+                rc, rs_, rt = p["ref_tabela"].split(".")
+                ref_cols = [c.name for c in get_columns(user, rc, rs_, rt)]
+        except Exception as exc:
+            st.error(f"Não foi possível listar a fonte de verdade: {exc}")
+            return
+        if p["aggr"] == "sum":
+            p["ref_coluna"] = st.selectbox("Coluna correspondente na fonte de verdade", ref_cols,
+                                           key=f"rq_arc_{sid}_{p['ref_tabela']}")
+        if st.checkbox("Conferir por grupo (ex.: por mês) — um grupo errado não se esconde no total",
+                       key=f"rq_agrp_{sid}"):
+            x, y = st.columns(2)
+            p["group_by"] = x.selectbox("Agrupar por (nesta tabela)", nomes, key=f"rq_ag_{sid}_{tabela}")
+            p["ref_group_by"] = y.selectbox("Agrupar por (na fonte de verdade)", ref_cols,
+                                            key=f"rq_arg_{sid}_{p['ref_tabela']}")
     if tipo == "unico":
         p["colunas_extra"] = st.multiselect(
             "Combinada com (opcional)", [n for n in nomes if n != coluna], key=f"rq_ux_{sid}",
@@ -7089,13 +7296,23 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
         index=dims.index(_RQ_DIM_POR_TIPO.get(tipo, "validade")),
         help="Já vem do tipo de regra; troque se fizer mais sentido. Na regra livre, escolha "
              "o que ela realmente verifica — o painel mostra o status por dimensão.")
-    crit = st.radio("Gravidade (por linha)", list(_RQ_CRITICIDADE), format_func=_RQ_CRITICIDADE.get,
-                    key=f"rq_crit_{sid}", horizontal=True)
-    st.markdown("**Régua de aceitação** — quanto de falha o negócio aceita nesta regra")
-    faixa_ok, faixa_ruim = _rq_regua_inputs(f"rq_regua_{sid}", _RQ_FAIXA_OK_PADRAO, _RQ_FAIXA_RUIM_PADRAO)
+    de_tabela = tipo in _RQ_TIPOS_TABELA
+    if de_tabela:
+        crit = "error"  # gravidade é por linha; verificação de tabela não tem linha
+    else:
+        crit = st.radio("Gravidade (por linha)", list(_RQ_CRITICIDADE), format_func=_RQ_CRITICIDADE.get,
+                        key=f"rq_crit_{sid}", horizontal=True)
+    if tipo == "atualidade":
+        faixa_ok, faixa_ruim = 100.0, 50.0  # sobre o pct 100/50/0 dos ciclos
+    elif tipo == "acuracia":
+        st.markdown("**Régua de aceitação** — quanta diferença o negócio aceita")
+        faixa_ok, faixa_ruim = _rq_regua_dif_inputs(f"rq_regua_{sid}", 99.5, 98.0)
+    else:
+        st.markdown("**Régua de aceitação** — quanto de falha o negócio aceita nesta regra")
+        faixa_ok, faixa_ruim = _rq_regua_inputs(f"rq_regua_{sid}", _RQ_FAIXA_OK_PADRAO, _RQ_FAIXA_RUIM_PADRAO)
     descricao = st.text_input(
         "Descrição (como aparece no painel)", key=f"rq_desc_{sid}",
-        placeholder=_rq_descricao_padrao(tipo, coluna, p) if (coluna or tipo == "expressao") else "")
+        placeholder=_rq_descricao_padrao(tipo, coluna, p) if (coluna or tipo == "expressao" or de_tabela) else "")
 
     try:
         funcao, argumentos, cond = _rq_montar(tipo, coluna, p)
@@ -7112,14 +7329,19 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
     if b1.button("🧪 Testar", key=f"rq_test_{sid}", use_container_width=True, disabled=bool(erro_def)):
         with st.spinner("Testando a regra na tabela…"):
             try:
-                t = testar_regra_qualidade(tabela, tipo, argumentos, cond)
+                t = (testar_regra_tabela(tabela, funcao, argumentos, faixa_ok) if de_tabela
+                     else testar_regra_qualidade(tabela, tipo, argumentos, cond))
                 t["assinatura"] = assinatura
                 st.session_state[f"rq_teste_{sid}"] = teste = t
             except Exception as exc:
                 st.error(f"A regra não rodou na tabela — revise a definição. Detalhe: {exc}")
-    if erro_def and (coluna or p.get("texto")):
+    if erro_def and (coluna or p.get("texto") or de_tabela):
         st.caption(f"⚠️ {erro_def}")
-    if teste:
+    if teste and de_tabela:
+        s = _rq_status(teste["pct"], faixa_ok, faixa_ruim)
+        (st.success if s == "ok" else st.warning if s == "atencao" else st.error)(
+            f"{_RQ_STATUS[s]} hoje — {teste['detalhe']}")
+    elif teste:
         if teste["falhas"] == 0:
             st.success(f"✅ Nenhuma das {teste['total']} linha(s) viola a regra hoje.")
         else:
@@ -7138,6 +7360,9 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
         # tabela — senão a regra viraria um jeito de ler o que o autor não pode.
         if escopo == "montante" and not user_can_access_table(user, cat, sch, tbl):
             st.error(f"Você não tem acesso a `{tabela}` — não é possível criar regra nela.")
+            return
+        if tipo == "acuracia" and not user_can_access_table(user, *p["ref_tabela"].split(".")):
+            st.error(f"Você não tem acesso a `{p['ref_tabela']}` — escolha outra fonte de verdade.")
             return
         _rq_salvar(user, sid, tabela, nome_tecnico,
                    descricao or _rq_descricao_padrao(tipo, coluna, p), tipo, coluna, p,

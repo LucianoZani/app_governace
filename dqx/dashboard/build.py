@@ -45,7 +45,10 @@ SELECT indicador, tabela, run_time, regra_id, regra,
        CASE WHEN st = 'atencao' THEN 1 ELSE 0 END AS is_atencao,
        CASE WHEN st = 'ruim' THEN 1 ELSE 0 END AS is_ruim,
        concat('OK ≥ ', format_number(fok, '#.#'), '% · Ruim < ', format_number(fruim, '#.#'), '%') AS regua,
-       dimensao_label AS dimensao
+       dimensao_label AS dimensao,
+       -- Verificações da tabela (atualidade/acurácia) não têm "linha com falha": resultado em texto.
+       CASE WHEN funcao IN ('freshness_sla', 'reconciliacao') THEN NULL ELSE linhas_com_falha END AS falhas_linha,
+       coalesce(detalhe, concat(linhas_com_falha, ' de ', total_linhas, ' linha(s) com falha')) AS resultado
 FROM (
   -- Régua gravada pelo job em cada execução; execuções antigas usam o padrão 99 / 95.
   SELECT *, coalesce(faixa_ok, 99.0) AS fok, coalesce(faixa_ruim, 95.0) AS fruim,
@@ -223,10 +226,10 @@ layout = [
      "position": pos(0, 9, 6, 6)},
     {"widget": {"name": "falhas_por_regra",
                 "queries": q("ds_regras", [fld("regra_descricao"), fld("status"),
-                                           fld("sum(linhas_com_falha)", "SUM(`linhas_com_falha`)")]),
+                                           fld("sum(falhas_linha)", "SUM(`falhas_linha`)")]),
                 "spec": {"version": 3, "widgetType": "bar",
                          "encodings": {
-                             "x": {"fieldName": "sum(linhas_com_falha)", "scale": {"type": "quantitative"},
+                             "x": {"fieldName": "sum(falhas_linha)", "scale": {"type": "quantitative"},
                                    "displayName": "Linhas com falha"},
                              "y": {"fieldName": "regra_descricao", "scale": {"type": "categorical", "sort": {"by": "value"}},
                                    "displayName": "Regra"},
@@ -243,8 +246,7 @@ layout = [
         {"fieldName": "indicador", "displayName": "Indicador"},
         {"fieldName": "tabela", "displayName": "Tabela"},
         {"fieldName": "escopo", "displayName": "Escopo"},
-        {"fieldName": "linhas_com_falha", "displayName": "Linhas com falha"},
-        {"fieldName": "total_linhas", "displayName": "Linhas verificadas"},
+        {"fieldName": "resultado", "displayName": "Resultado"},
         {"fieldName": "pct_conformidade", "displayName": "Conformidade", "format": PCT},
         {"fieldName": "regua", "displayName": "Régua (negócio)"},
         {"fieldName": "origem_regra", "displayName": "Origem"},
