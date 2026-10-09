@@ -6769,19 +6769,14 @@ def _dqx_resultados(indicador_id: int) -> dict:
         regras = run_query(
             f"SELECT regra_id, linhas_com_falha, pct_conformidade FROM {base}.metricas_regras "
             f"WHERE {filtro}")
-        hist = run_query(
-            f"SELECT * FROM {base}.execucoes WHERE indicador_id = {int(indicador_id)} "
-            f"AND run_time >= (SELECT min(run_time) FROM (SELECT DISTINCT run_time FROM {base}.execucoes "
-            f"WHERE indicador_id = {int(indicador_id)} ORDER BY run_time DESC LIMIT 30))")
     except Exception:
         return {}
-    for df in (execs, hist):
-        if "escopo" not in df.columns:
-            df["escopo"] = "lineage"
-        df["escopo"] = df["escopo"].fillna("lineage")
+    if "escopo" not in execs.columns:
+        execs["escopo"] = "lineage"
+    execs["escopo"] = execs["escopo"].fillna("lineage")
     cols = ["tabela", "escopo", "qtd_regras", "total_linhas", "linhas_com_erro",
             "linhas_com_aviso", "linhas_validas", "pct_linhas_validas"]
-    return {"run_time": rt, "execucoes": execs[cols], "regras": regras, "historico": hist}
+    return {"run_time": rt, "execucoes": execs[cols], "regras": regras}
 
 
 def _rq_pct_validas(df: pd.DataFrame, escopo: str) -> float | None:
@@ -6901,16 +6896,7 @@ def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
               help="Linhas sem nenhuma violação (erro ou aviso) nas tabelas do lineage do indicador. "
                    "As tabelas a montante (ex.: silver) aparecem separadas, embaixo.")
     c4.metric("Última verificação", str(res["run_time"])[:16].replace("T", " "))
-    hist = res["historico"]
-    if hist["run_time"].nunique() > 1:
-        h = hist.copy()
-        for c in ("linhas_validas", "total_linhas"):
-            h[c] = pd.to_numeric(h[c])
-        h["run_time"] = pd.to_datetime(h["run_time"])
-        g = h.groupby(["run_time", "escopo"])[["linhas_validas", "total_linhas"]].sum()
-        g = (100.0 * g["linhas_validas"] / g["total_linhas"]).unstack("escopo")
-        g = g.rename(columns={"lineage": "lineage", "montante": "a montante"})
-        st.line_chart(g, height=140, y_label="% válidas")
+    # A evolução no tempo fica no dashboard de qualidade (link no topo da página).
     with st.expander("Resultado por tabela"):
         st.dataframe(
             ex.assign(escopo=ex["escopo"].map({"lineage": "lineage", "montante": "⬆️ a montante"}))
