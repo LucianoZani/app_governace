@@ -46,14 +46,19 @@ run_time = datetime.now(timezone.utc)
 
 regras = spark.sql(f"""
     SELECT r.id, r.indicador_id, i.nome AS indicador, r.tabela, r.nome, r.descricao, r.coluna,
-           r.criticidade, r.funcao, r.argumentos, r.origem
+           r.criticidade, r.funcao, r.argumentos, r.origem,
+           {"r.escopo" if "escopo" in spark.table(f"{CAD}.regras_qualidade").columns else "NULL"} AS escopo
     FROM {CAD}.regras_qualidade r
     LEFT JOIN {CAD}.indicadores i ON i.id = r.indicador_id
     WHERE r.ativa
 """).collect()
+# escopo: 'lineage' (tabela do indicador, definida pela Engenharia) ou 'montante' (tabela
+# escolhida livremente, ex. silver). A montante grava SÓ contagens — o registro reprovado
+# ficaria visível a quem vê o painel do indicador, que pode não ter acesso àquela camada.
 grupos = {}
 for r in regras:
-    grupos.setdefault((r.indicador_id, r.indicador, r.tabela), []).append(r)
+    escopo = "montante" if r.escopo == "montante" else "lineage"
+    grupos.setdefault((r.indicador_id, r.indicador, r.tabela, escopo), []).append(r)
 print(f"{len(regras)} regras ativas em {len(grupos)} grupo(s) indicador × tabela")
 
 # COMMAND ----------
@@ -109,7 +114,7 @@ def _colunas_sensiveis(tabela, colunas):
 saida = {"run_id": run_id, "run_time": str(run_time), "grupos": [], "erros": []}
 execucoes, metricas, falhas = [], [], []
 
-for (indicador_id, indicador, tabela), rs in grupos.items():
+for (indicador_id, indicador, tabela, escopo), rs in grupos.items():
     checks = [{
         "name": r.nome,
         "criticality": r.criticidade,
@@ -144,7 +149,7 @@ for (indicador_id, indicador, tabela), rs in grupos.items():
 
     total = totais["total"] or 0
     base = {"run_id": run_id, "run_time": run_time, "indicador_id": indicador_id,
-            "indicador": indicador, "tabela": tabela}
+            "indicador": indicador, "tabela": tabela, "escopo": escopo}
     execucoes.append({**base, "qtd_regras": len(rs), "total_linhas": total,
                       "linhas_com_erro": totais["com_erro"], "linhas_com_aviso": totais["com_aviso"],
                       "linhas_validas": totais["validas"],
@@ -156,17 +161,18 @@ for (indicador_id, indicador, tabela), rs in grupos.items():
                          "origem_regra": r.origem, "total_linhas": total, "linhas_com_falha": n,
                          "pct_conformidade": round(100.0 * (total - n) / total, 2) if total else None})
 
-    ids = spark.createDataFrame([(r.nome, r.id) for r in rs], "regra string, regra_id long")
-    w = Window.partitionBy("regra").orderBy("registro")
-    falhas.append(issues.withColumn("_rn", F.row_number().over(w))
-                        .where(F.col("_rn") <= MAX_FALHAS_POR_REGRA).drop("_rn")
-                        .join(ids, "regra", "left")
-                        .withColumn("run_id", F.lit(run_id))
-                        .withColumn("run_time", F.lit(run_time))
-                        .withColumn("indicador_id", F.lit(indicador_id).cast("long"))
-                        .withColumn("indicador", F.lit(indicador))
-                        .withColumn("tabela", F.lit(tabela)))
-    saida["grupos"].append({"indicador": indicador, "tabela": tabela, "regras": len(rs),
+    if escopo == "lineage":
+        ids = spark.createDataFrame([(r.nome, r.id) for r in rs], "regra string, regra_id long")
+        w = Window.partitionBy("regra").orderBy("registro")
+        falhas.append(issues.withColumn("_rn", F.row_number().over(w))
+                            .where(F.col("_rn") <= MAX_FALHAS_POR_REGRA).drop("_rn")
+                            .join(ids, "regra", "left")
+                            .withColumn("run_id", F.lit(run_id))
+                            .withColumn("run_time", F.lit(run_time))
+                            .withColumn("indicador_id", F.lit(indicador_id).cast("long"))
+                            .withColumn("indicador", F.lit(indicador))
+                            .withColumn("tabela", F.lit(tabela)))
+    saida["grupos"].append({"indicador": indicador, "tabela": tabela, "escopo": escopo, "regras": len(rs),
                             **totais.asDict(), "falhas_por_regra": por_regra,
                             "colunas_mascaradas": sensiveis})
 
@@ -187,10 +193,11 @@ for t in ("execucoes", "metricas_regras", "falhas"):
 if execucoes:
     spark.createDataFrame(execucoes).write.mode("append").option("mergeSchema", "true").saveAsTable(f"{RES}.execucoes")
     spark.createDataFrame(metricas).write.mode("append").option("mergeSchema", "true").saveAsTable(f"{RES}.metricas_regras")
-    df_falhas = falhas[0]
-    for f in falhas[1:]:
-        df_falhas = df_falhas.unionByName(f)
-    df_falhas.write.mode("append").option("mergeSchema", "true").saveAsTable(f"{RES}.falhas")
+    if falhas:  # vazio quando só há grupos a montante
+        df_falhas = falhas[0]
+        for f in falhas[1:]:
+            df_falhas = df_falhas.unionByName(f)
+        df_falhas.write.mode("append").option("mergeSchema", "true").saveAsTable(f"{RES}.falhas")
     for t, desc in [
         ("execucoes", "DQX — resumo por indicador, tabela e execução (modo monitoramento)."),
         ("metricas_regras", "DQX — resultado por regra e execução: linhas com falha e % de conformidade."),

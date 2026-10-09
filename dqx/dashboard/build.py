@@ -20,20 +20,24 @@ def ql(s):
 ds = [
     {"name": "ds_hist", "displayName": "Execuções (histórico)", "queryLines": ql("""
 SELECT indicador, tabela, run_id, run_time, total_linhas, linhas_validas, linhas_com_erro, linhas_com_aviso, qtd_regras,
-       pct_linhas_validas / 100.0 AS pct_validas
+       pct_linhas_validas / 100.0 AS pct_validas,
+       CASE WHEN escopo = 'montante' THEN 'A montante' ELSE 'Lineage' END AS escopo,
+       concat(indicador, ' · ', CASE WHEN escopo = 'montante' THEN 'A montante' ELSE 'Lineage' END) AS serie
 FROM execucoes""")},
     {"name": "ds_ultima", "displayName": "Última execução", "queryLines": ql("""
-SELECT indicador, tabela, run_time, total_linhas, linhas_validas, linhas_com_erro, linhas_com_aviso, qtd_regras
+SELECT indicador, tabela, run_time, total_linhas, linhas_validas, linhas_com_erro, linhas_com_aviso, qtd_regras,
+       CASE WHEN escopo = 'montante' THEN 'A montante' ELSE 'Lineage' END AS escopo
 FROM execucoes
 QUALIFY run_time = MAX(run_time) OVER (PARTITION BY indicador_id, tabela)"""),
      "columns": [{"displayName": "Pct Linhas Validas",
-                  "description": "Linhas válidas / total de linhas na última verificação",
-                  "expression": "SUM(`linhas_validas`) * 1.0 / SUM(`total_linhas`)"}]},
+                  "description": "Linhas válidas / total, só nas tabelas do lineage do indicador",
+                  "expression": "SUM(CASE WHEN `escopo` = 'Lineage' THEN `linhas_validas` END) * 1.0 / SUM(CASE WHEN `escopo` = 'Lineage' THEN `total_linhas` END)"}]},
     {"name": "ds_regras", "displayName": "Regras (última execução)", "queryLines": ql("""
 SELECT indicador, tabela, run_time, regra_id, regra,
        COALESCE(descricao, regra) AS regra_descricao,
        CASE criticidade WHEN 'error' THEN 'Erro' ELSE 'Aviso' END AS gravidade,
        origem_regra, funcao, linhas_com_falha, total_linhas,
+       CASE WHEN escopo = 'montante' THEN 'A montante' ELSE 'Lineage' END AS escopo,
        pct_conformidade / 100.0 AS pct_conformidade,
        CASE WHEN linhas_com_falha > 0 THEN 1 ELSE 0 END AS com_falha,
        CASE WHEN linhas_com_falha > 0 THEN 'Com falha' ELSE 'OK' END AS situacao
@@ -99,20 +103,20 @@ layout = [
                     "Os números do topo e as tabelas mostram a **última verificação** de cada indicador; o gráfico de evolução "
                     "mostra o histórico. Nesta fase as regras só **monitoram** — nada é bloqueado no pipeline."], 0, 0, 12, 2),
     counter("kpi_pct_validas", "ds_ultima", fld("measure(Pct Linhas Validas)", "MEASURE(`Pct Linhas Validas`)"),
-            "Linhas válidas", 0, PCT),
+            "Linhas válidas (lineage)", 0, PCT),
     counter("kpi_linhas_erro", "ds_ultima", fld("sum(linhas_com_erro)", "SUM(`linhas_com_erro`)"), "Linhas com erro", 3),
     counter("kpi_regras_falha", "ds_regras", fld("sum(com_falha)", "SUM(`com_falha`)"), "Regras com falha", 6),
     counter("kpi_regras", "ds_regras", fld("count(regra_id)", "COUNT(`regra_id`)"), "Regras monitoradas", 9),
     {"widget": {"name": "evolucao_pct",
-                "queries": q("ds_hist", [fld("run_time"), fld("indicador"), fld("avg(pct_validas)", "AVG(`pct_validas`)")]),
+                "queries": q("ds_hist", [fld("run_time"), fld("serie"), fld("avg(pct_validas)", "AVG(`pct_validas`)")]),
                 "spec": {"version": 3, "widgetType": "line",
                          "encodings": {
                              "x": {"fieldName": "run_time", "scale": {"type": "temporal"}, "displayName": "Verificação"},
                              "y": {"fieldName": "avg(pct_validas)", "scale": {"type": "quantitative"},
                                    "displayName": "% linhas válidas", "format": PCT},
-                             "color": {"fieldName": "indicador", "scale": {"type": "categorical"}, "displayName": "Indicador"}},
+                             "color": {"fieldName": "serie", "scale": {"type": "categorical"}, "displayName": "Indicador · escopo"}},
                          "frame": {"title": "Evolução das linhas válidas", "showTitle": True,
-                                   "description": "Uma linha por indicador; cada ponto é uma execução do job DQX.",
+                                   "description": "Uma linha por indicador e escopo (lineage = tabelas do indicador; a montante = ex. silver). Cada ponto é uma execução do job DQX.",
                                    "showDescription": True}}},
      "position": pos(0, 5, 6, 6)},
     {"widget": {"name": "falhas_por_regra",
@@ -137,12 +141,14 @@ layout = [
         {"fieldName": "gravidade", "displayName": "Gravidade"},
         {"fieldName": "indicador", "displayName": "Indicador"},
         {"fieldName": "tabela", "displayName": "Tabela"},
+        {"fieldName": "escopo", "displayName": "Escopo"},
         {"fieldName": "linhas_com_falha", "displayName": "Linhas com falha"},
         {"fieldName": "total_linhas", "displayName": "Linhas verificadas"},
         {"fieldName": "pct_conformidade", "displayName": "Conformidade", "format": PCT},
         {"fieldName": "origem_regra", "displayName": "Origem"},
     ], "Regras da última verificação", 12, 7, orders=[{"direction": "DESC", "expression": "`linhas_com_falha`"}]),
-    text("sec_registros", ["## Registros com falha\n"], 0, 19, 12, 1),
+    text("sec_registros", ["## Registros com falha\n",
+                           "Só tabelas do lineage — regras a montante guardam apenas contagens.\n"], 0, 19, 12, 1),
     table("tabela_falhas", "ds_falhas", [
         {"fieldName": "regra_descricao", "displayName": "Regra"},
         {"fieldName": "gravidade", "displayName": "Gravidade"},

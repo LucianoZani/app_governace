@@ -1950,7 +1950,7 @@ def ensure_cadastro_tables() -> bool:
         f"CREATE TABLE IF NOT EXISTS {_cad('regras_qualidade')} "
         f"(id BIGINT GENERATED ALWAYS AS IDENTITY, indicador_id BIGINT, tabela STRING, "
         f"nome STRING, descricao STRING, tipo STRING, coluna STRING, parametros STRING, "
-        f"criticidade STRING, funcao STRING, argumentos STRING, origem STRING, ativa BOOLEAN, "
+        f"criticidade STRING, funcao STRING, argumentos STRING, origem STRING, ativa BOOLEAN, escopo STRING, "
         f"teste_falhas BIGINT, teste_total BIGINT, testado_em TIMESTAMP, {audit})",
     ]
     for stmt in ddl:
@@ -2032,6 +2032,20 @@ def ensure_cadastro_tables() -> bool:
             run_exec(f"ALTER TABLE {_cad('dashboards')} ADD COLUMNS (categoria STRING)")
         if "indicador_id" not in existing_cols:
             run_exec(f"ALTER TABLE {_cad('dashboards')} ADD COLUMNS (indicador_id BIGINT)")
+    except Exception:
+        pass
+    # Coluna `escopo` em `regras_qualidade` (idempotente): 'lineage' = tabela do
+    # lineage do indicador (definido pela Engenharia); 'montante' = tabela escolhida
+    # livremente (ex.: silver), com portão OBO. NULL = 'lineage' (regras antigas).
+    try:
+        cols_df = run_query(
+            f"SELECT lower(column_name) AS c FROM {q_ident(CAD_CATALOG)}.information_schema.columns "
+            f"WHERE lower(table_schema) = {q_str(CAD_SCHEMA.lower())} "
+            f"AND lower(table_name) = {q_str(CAD_TABLE_PREFIX + 'regras_qualidade')}"
+        )
+        existing_cols = set(cols_df["c"].tolist()) if not cols_df.empty else set()
+        if existing_cols and "escopo" not in existing_cols:
+            run_exec(f"ALTER TABLE {_cad('regras_qualidade')} ADD COLUMNS (escopo STRING)")
     except Exception:
         pass
     # Coluna `power_steward` em `indicadores` (idempotente p/ a tabela já
@@ -6613,7 +6627,8 @@ def list_regras_qualidade(indicador_id: int | None = None) -> pd.DataFrame:
     where = f"WHERE indicador_id = {int(indicador_id)}" if indicador_id is not None else ""
     return run_query(
         "SELECT id, indicador_id, tabela, nome, descricao, tipo, coluna, parametros, "
-        "criticidade, funcao, argumentos, origem, ativa, teste_falhas, teste_total, "
+        "criticidade, funcao, argumentos, origem, ativa, coalesce(escopo, 'lineage') AS escopo, "
+        "teste_falhas, teste_total, "
         "testado_em, criado_por, atualizado_em "
         f"FROM {_cad('regras_qualidade')} {where} ORDER BY tabela, nome"
     )
@@ -6637,19 +6652,30 @@ def _dqx_resultados(indicador_id: int) -> dict:
         if not rt:
             return {}
         filtro = f"indicador_id = {int(indicador_id)} AND run_id = {q_str(str(ult.iloc[0]['rid']))}"
-        execs = run_query(
-            f"SELECT tabela, qtd_regras, total_linhas, linhas_com_erro, linhas_com_aviso, "
-            f"linhas_validas, pct_linhas_validas FROM {base}.execucoes WHERE {filtro}")
+        # SELECT * : `escopo` só existe depois da 1ª execução do job com regras a montante.
+        execs = run_query(f"SELECT * FROM {base}.execucoes WHERE {filtro}")
         regras = run_query(
             f"SELECT regra_id, linhas_com_falha, pct_conformidade FROM {base}.metricas_regras "
             f"WHERE {filtro}")
         hist = run_query(
-            f"SELECT run_time, round(100.0 * sum(linhas_validas) / nullif(sum(total_linhas), 0), 2) AS pct "
-            f"FROM {base}.execucoes WHERE indicador_id = {int(indicador_id)} "
-            f"GROUP BY run_time ORDER BY run_time DESC LIMIT 30")
+            f"SELECT * FROM {base}.execucoes WHERE indicador_id = {int(indicador_id)} "
+            f"AND run_time >= (SELECT min(run_time) FROM (SELECT DISTINCT run_time FROM {base}.execucoes "
+            f"WHERE indicador_id = {int(indicador_id)} ORDER BY run_time DESC LIMIT 30))")
     except Exception:
         return {}
-    return {"run_time": rt, "execucoes": execs, "regras": regras, "historico": hist}
+    for df in (execs, hist):
+        if "escopo" not in df.columns:
+            df["escopo"] = "lineage"
+        df["escopo"] = df["escopo"].fillna("lineage")
+    cols = ["tabela", "escopo", "qtd_regras", "total_linhas", "linhas_com_erro",
+            "linhas_com_aviso", "linhas_validas", "pct_linhas_validas"]
+    return {"run_time": rt, "execucoes": execs[cols], "regras": regras, "historico": hist}
+
+
+def _rq_pct_validas(df: pd.DataFrame, escopo: str) -> float | None:
+    d = df[df["escopo"] == escopo]
+    tot = pd.to_numeric(d["total_linhas"]).sum()
+    return 100.0 * pd.to_numeric(d["linhas_validas"]).sum() / tot if tot else None
 
 
 def _rq_tabelas_lineage(cur: dict) -> list[str]:
@@ -6685,21 +6711,22 @@ def _rq_descricao_padrao(tipo: str, coluna: str, p: dict) -> str:
 
 def _rq_salvar(user: str, indicador_id: int, tabela: str, nome: str, descricao: str, tipo: str,
                coluna: str, params: dict, criticidade: str, funcao: str, argumentos: dict,
-               teste: dict | None) -> None:
+               teste: dict | None, escopo: str = "lineage") -> None:
     run_exec(
         f"INSERT INTO {_cad('regras_qualidade')} (indicador_id, tabela, nome, descricao, tipo, "
-        "coluna, parametros, criticidade, funcao, argumentos, origem, ativa, teste_falhas, "
+        "coluna, parametros, criticidade, funcao, argumentos, origem, ativa, escopo, teste_falhas, "
         "teste_total, testado_em, criado_em, criado_por, atualizado_em, atualizado_por) VALUES ("
         f"{int(indicador_id)}, {q_str(tabela)}, {q_str(nome)}, {q_str(descricao)}, {q_str(tipo)}, "
         f"{_qn(coluna or None)}, {q_str(json.dumps(params, ensure_ascii=False))}, "
         f"{q_str(criticidade)}, {q_str(funcao)}, {q_str(json.dumps(argumentos, ensure_ascii=False))}, "
-        "'app', true, "
+        f"'app', true, {q_str(escopo)}, "
         f"{teste['falhas'] if teste else 'NULL'}, {teste['total'] if teste else 'NULL'}, "
         f"{'current_timestamp()' if teste else 'NULL'}, "
         f"current_timestamp(), {q_str(user)}, current_timestamp(), {q_str(user)})"
     )
     _log_cadastro(user, "regras_qualidade", "INSERT", f"{indicador_id}:{nome}", None,
-                  {"tabela": tabela, "nome": nome, "funcao": funcao, "argumentos": argumentos})
+                  {"tabela": tabela, "nome": nome, "funcao": funcao, "argumentos": argumentos,
+                   "escopo": escopo})
 
 
 def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
@@ -6719,27 +6746,34 @@ def _render_rq_resumo(cur: dict, regras: pd.DataFrame) -> dict:
         )
         return {}
     ex = res["execucoes"]
-    tot = pd.to_numeric(ex["total_linhas"]).sum()
-    val = pd.to_numeric(ex["linhas_validas"]).sum()
+    pct_lin = _rq_pct_validas(ex, "lineage")
+    pct_mon = _rq_pct_validas(ex, "montante")
     por_regra = {
         str(r["regra_id"]): (int(r["linhas_com_falha"] or 0), r["pct_conformidade"])
         for r in res["regras"].to_dict("records")
     }
     com_falha = sum(1 for f, _ in por_regra.values() if f > 0)
-    c2.metric("Linhas válidas", f"{(100.0 * val / tot if tot else 0):.1f}%",
-              help="Linhas sem nenhuma violação (erro ou aviso), somando as tabelas do indicador.")
+    c2.metric("Linhas válidas", "—" if pct_lin is None else f"{pct_lin:.1f}%",
+              delta=None if pct_mon is None else f"a montante: {pct_mon:.1f}%", delta_color="off",
+              help="Linhas sem nenhuma violação (erro ou aviso) nas tabelas do lineage do indicador. "
+                   "As tabelas a montante (ex.: silver) aparecem separadas, embaixo.")
     c3.metric("Regras com falha", f"{com_falha} de {len(por_regra)}")
     c4.metric("Última verificação", str(res["run_time"])[:16].replace("T", " "))
     hist = res["historico"]
-    if len(hist) > 1:
+    if hist["run_time"].nunique() > 1:
         h = hist.copy()
-        h["pct"] = pd.to_numeric(h["pct"])
+        for c in ("linhas_validas", "total_linhas"):
+            h[c] = pd.to_numeric(h[c])
         h["run_time"] = pd.to_datetime(h["run_time"])
-        st.line_chart(h.set_index("run_time")["pct"], height=140, y_label="% válidas")
+        g = h.groupby(["run_time", "escopo"])[["linhas_validas", "total_linhas"]].sum()
+        g = (100.0 * g["linhas_validas"] / g["total_linhas"]).unstack("escopo")
+        g = g.rename(columns={"lineage": "lineage", "montante": "a montante"})
+        st.line_chart(g, height=140, y_label="% válidas")
     with st.expander("Resultado por tabela"):
         st.dataframe(
-            ex.rename(columns={
-                "tabela": "Tabela", "qtd_regras": "Regras", "total_linhas": "Linhas",
+            ex.assign(escopo=ex["escopo"].map({"lineage": "lineage", "montante": "⬆️ a montante"}))
+            .rename(columns={
+                "tabela": "Tabela", "escopo": "Escopo", "qtd_regras": "Regras", "total_linhas": "Linhas",
                 "linhas_com_erro": "Com erro", "linhas_com_aviso": "Com aviso",
                 "linhas_validas": "Válidas", "pct_linhas_validas": "% válidas",
             }),
@@ -6761,6 +6795,7 @@ def _render_rq_lista(user: str, regras: pd.DataFrame, por_regra: dict, pode_edit
             a.markdown(
                 f"**{r.get('descricao') or r['nome']}**  \n"
                 f"{crit} · `{r['tabela']}`"
+                + (" · ⬆️ a montante" if r.get("escopo") == "montante" else "")
                 + (f" · coluna `{r['coluna']}`" if r.get("coluna") else "")
                 + f" · {_RQ_TIPOS.get(r.get('tipo'), _RQ_FUNCAO_LABEL.get(r.get('funcao'), r.get('funcao')))}"
                 + ("" if ativa else " · ⏸️ *desativada*")
@@ -6812,8 +6847,38 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
         "para ver quantas linhas violariam hoje antes de salvar. A regra salva já entra "
         "no próximo monitoramento."
     )
-    tabela = st.selectbox("Tabela", tabelas, key=f"rq_tab_{sid}",
-                          help="As tabelas vêm do lineage do indicador, definido pela Engenharia.")
+    origem_tab = st.radio(
+        "Tabela", ["lineage", "montante"], key=f"rq_orig_{sid}", horizontal=True,
+        format_func={"lineage": "Do lineage do indicador",
+                     "montante": "Outra tabela (a montante, ex.: silver)"}.get,
+        help="Lineage = tabelas que a Engenharia definiu para o indicador. Outra tabela = "
+             "qualquer tabela que VOCÊ enxerga — útil para pegar o problema antes de chegar "
+             "à gold. Regras a montante gravam só contagens, nunca os registros reprovados.")
+    if origem_tab == "lineage":
+        tabela = st.selectbox("Tabela do lineage", tabelas, key=f"rq_tab_{sid}",
+                              help="As tabelas vêm do lineage do indicador, definido pela Engenharia.")
+    else:
+        x, y, z = st.columns(3)
+        try:
+            cat = x.selectbox("Catálogo", list_catalogs(user), key=f"rq_ocat_{sid}")
+            sch = y.selectbox("Schema", list_schemas(user, cat) if cat else [], key=f"rq_osch_{sid}")
+            # `__materialization_*` / `event_log_*` são internas dos pipelines declarativos.
+            opcoes = [t for t in (list_tables(user, cat, sch) if sch else [])
+                      if not t.startswith("__") and not t.startswith("event_log_")]
+            tbl = z.selectbox("Tabela", opcoes, key=f"rq_otbl_{sid}")
+        except Exception as exc:
+            st.error(f"Não foi possível listar as tabelas que você enxerga: {exc}")
+            return
+        if not tbl:
+            st.info("Escolha catálogo, schema e tabela.")
+            return
+        tabela = f"{cat}.{sch}.{tbl}"
+    # Tabela do lineage escolhida pelo caminho livre continua sendo lineage.
+    escopo = "lineage" if tabela in tabelas else "montante"
+    if escopo == "montante":
+        st.caption("⬆️ Regra **a montante**: o monitoramento grava só as contagens desta tabela "
+                   "(os registros reprovados não são guardados, para não expor a camada a quem "
+                   "vê o painel do indicador).")
     cat, sch, tbl = tabela.split(".")
     try:
         cols = get_columns(user, cat, sch, tbl)
@@ -6911,9 +6976,14 @@ def _render_rq_nova(user: str, cur: dict, regras: pd.DataFrame) -> None:
         if nome_tecnico in existentes:
             st.error("Já existe uma regra com essa descrição neste indicador — mude a descrição.")
             return
+        # Portão OBO: o job lê com identidade forte, então quem cria precisa enxergar a
+        # tabela — senão a regra viraria um jeito de ler o que o autor não pode.
+        if escopo == "montante" and not user_can_access_table(user, cat, sch, tbl):
+            st.error(f"Você não tem acesso a `{tabela}` — não é possível criar regra nela.")
+            return
         _rq_salvar(user, sid, tabela, nome_tecnico,
                    descricao or _rq_descricao_padrao(tipo, coluna, p), tipo, coluna, p,
-                   crit, funcao, argumentos, teste)
+                   crit, funcao, argumentos, teste, escopo=escopo)
         for k in [k for k in st.session_state if k.startswith("rq_") and k.endswith(f"_{sid}")]:
             st.session_state.pop(k, None)
         _finish_write("Regra salva e ativa — entra no próximo monitoramento.")
